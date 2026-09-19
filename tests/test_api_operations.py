@@ -265,7 +265,45 @@ class ApiOperationsTests(unittest.TestCase):
         self.assertEqual(result['backups'][0]['created_at'], int(archive.stat().st_mtime))
         self.assertEqual(len(result['backups']), 1)
         self.assertNotIn('apk_path', result['artifacts'][0])
+        self.assertEqual(result['settings']['application_catalog']['state'], 'ready')
         self.assertNotIn('session_sha256', json.dumps(result))
+
+    def test_missing_and_empty_catalog_require_setup_without_reporting_service_failure(self):
+        for present in (False, True):
+            with self.subTest(present=present):
+                if present:
+                    atomic_json(self.root / 'apps.json', {'schema_version': 1, 'apps': []})
+                store = Mock()
+                store.list.return_value = []
+                with patch.object(self.ops, '_store', return_value=store), \
+                        patch('services.api.operations.resources.probe', return_value={'capacity': 10}), \
+                        patch('services.api.operations.provisioner.bulk_managed_inspections', return_value={}):
+                    result = self.ops.snapshot()
+                self.assertEqual(result['artifacts'], [])
+                self.assertEqual(result['settings']['application_catalog'], {'state': 'setup_required'})
+                self.assertNotIn('artifacts', [error['component'] for error in result['errors']])
+                with self.assertRaisesRegex(ValueError, 'approved APK is unavailable'):
+                    self.ops.validate_job({'action': 'provision', 'params': {
+                        'phone': '+12025551234', 'owner_authorized': True,
+                        'proxy_id': 'qa-proxy', 'artifact_id': 'unreviewed'}})
+                self.runner.assert_not_called()
+
+    def test_invalid_catalog_is_still_an_error_and_missing_apk_is_not_ready(self):
+        app = self.app_catalog()
+        Path(app['apk_path']).unlink()
+        store = Mock()
+        store.list.return_value = []
+        with patch.object(self.ops, '_store', return_value=store), \
+                patch('services.api.operations.resources.probe', return_value={'capacity': 10}), \
+                patch('services.api.operations.provisioner.bulk_managed_inspections', return_value={}):
+            result = self.ops.snapshot()
+            self.assertEqual(result['settings']['application_catalog']['state'], 'files_required')
+            self.assertFalse(result['artifacts'][0]['available'])
+            atomic_json(self.root / 'apps.json', {'schema_version': 999, 'apps': []})
+            invalid = self.ops.snapshot()
+        self.assertEqual(invalid['settings']['application_catalog']['state'], 'invalid')
+        self.assertIn('artifacts', [error['component'] for error in invalid['errors']])
+        self.assertEqual(invalid['artifacts'], [])
 
     def test_snapshot_missing_container_and_partial_failure_do_not_invent_data(self):
         store = Mock()
@@ -279,7 +317,7 @@ class ApiOperationsTests(unittest.TestCase):
         self.assertEqual(result['artifacts'], [])
         self.assertEqual(set(result['devices'][0]['containers'].values()), {'missing'})
         self.assertFalse(result['devices'][0]['screen_ready'])
-        self.assertGreaterEqual(len(result['errors']), 3)
+        self.assertGreaterEqual(len(result['errors']), 2)
         self.assertNotIn('registry-password', json.dumps(result))
 
     def test_snapshot_running_measurements_are_actual_docker_values(self):

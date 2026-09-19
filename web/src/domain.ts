@@ -18,13 +18,14 @@ export type Job = { id: string; action: string; device: string | null; state: Jo
   created_at: number; updated_at: number; error: string | null; result: Record<string, unknown> | null };
 export type Backup = { id: string; device: string; created_at: number; size_bytes: number };
 export type Artifact = { id: string; label: string; package: string; available: boolean };
+export type ApplicationCatalog = { state: 'setup_required' | 'files_required' | 'ready' | 'invalid' };
 export type SecuritySettings = { web_username: string | null; grafana_username: string | null;
   credential_rotation_available: boolean; proxy_credentials_available: boolean };
 export type ComponentHealth = { id: string; label: string; state: 'active' | 'inactive' | 'failed' | 'unknown'; detail?: string };
 export type Snapshot = { schema_version: 1; collected_at: number; csrf_token: string; resources: ResourceReport | null;
   devices: Device[]; proxies: ProxyRecord[]; backups: Backup[]; artifacts: Artifact[];
   errors: { component: string; message: string }[]; jobs: Job[];
-  settings: { console_url?: string | null; access_mode?: string | null; security?: SecuritySettings; central_activation_available?: boolean };
+  settings: { console_url?: string | null; access_mode?: string | null; security?: SecuritySettings; central_activation_available?: boolean; application_catalog?: ApplicationCatalog };
   components?: ComponentHealth[]; queue?: Record<string, unknown> };
 export type DeviceStatus = 'running' | 'off' | 'booting' | 'queued' | 'stopping' | 'backup' | 'error' | 'unknown';
 export const fa = (value: number) => new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 1 }).format(value);
@@ -91,6 +92,8 @@ export function parseSnapshot(value: unknown): Snapshot {
       !(value.settings.access_mode === undefined || nullableText(value.settings.access_mode))) return invalid();
   for (const key of ['devices', 'proxies', 'backups', 'artifacts', 'errors', 'jobs']) if (!Array.isArray(value[key])) return invalid();
   if (value.settings.central_activation_available !== undefined && typeof value.settings.central_activation_available !== 'boolean') return invalid();
+  if (value.settings.application_catalog !== undefined && (!object(value.settings.application_catalog) ||
+      !['setup_required', 'files_required', 'ready', 'invalid'].includes(String(value.settings.application_catalog.state)))) return invalid();
   if (value.settings.security !== undefined) {
     const security = value.settings.security;
     if (!object(security) || !nullableText(security.web_username) || !nullableText(security.grafana_username) ||

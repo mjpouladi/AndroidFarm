@@ -187,6 +187,7 @@ class CredentialManagerTests(unittest.TestCase):
         with self.assertRaises(CredentialsError) as failure:
             self.manager.rotate('platform', 'new-operator', 'new-platform-password')
         self.assertNotIn('private-canary-error', str(failure.exception))
+        self.assertIn('[web-secret-sync/tool-failed]', str(failure.exception))
         self.assertEqual(self.files(), before)
         self.assertEqual((self.current_user, self.current_password), ('admin', 'existing-monitor-password'))
 
@@ -198,6 +199,17 @@ class CredentialManagerTests(unittest.TestCase):
         self.assertEqual(self.current_password, 'existing-monitor-password')
         self.assertEqual(self.current_user, 'admin')
         self.assertEqual(self.files(), before)
+
+    def test_preflight_failure_reports_stage_without_secret_exception_text(self):
+        before = self.files()
+        self.fail_all_http = True
+        with self.assertRaises(CredentialsError) as failure:
+            self.manager.rotate('platform', 'new-operator', 'new-platform-password')
+        self.assertIn('[grafana-preflight/credential-operation]', str(failure.exception))
+        self.assertNotIn('private-canary-error', str(failure.exception))
+        self.assertEqual(self.files(), before)
+        self.assertFalse(any(method != 'GET' for method, *_ in self.http_calls))
+        self.assertFalse(any(argv[:2] == ['docker', 'start'] for argv, _ in self.commands))
 
     def test_preflight_rejects_wrong_mount_identity_without_mutating_credentials(self):
         before = self.files()

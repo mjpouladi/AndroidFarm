@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import ConnectionHelp from './ConnectionHelp';
 import Diagnostics from './Diagnostics';
 import SecurityPanel from './SecurityPanel';
+import CatalogSetup from './CatalogSetup';
 import { parseSnapshot } from './domain';
 
 describe('پنل‌های عملیات و امنیت', () => {
@@ -40,5 +41,22 @@ describe('پنل‌های عملیات و امنیت', () => {
     const passwordInputs = html.match(/<input[^>]+type="password"[^>]*>/g) ?? [];
     expect(passwordInputs).toHaveLength(5);
     for (const input of passwordInputs) expect(input).toContain('value=""');
+  });
+  it('فهرست خالی را آماده‌سازی اولیه نشان می‌دهد و به بخش دقیق راهنما وصل می‌کند', () => {
+    const snapshot = parseSnapshot({ schema_version: 1, collected_at: Date.now() / 1000, csrf_token: 'test', resources: null,
+      devices: [], proxies: [], backups: [], artifacts: [], jobs: [], errors: [],
+      settings: { application_catalog: { state: 'setup_required' } } });
+    const html = renderToStaticMarkup(<CatalogSetup snapshot={snapshot} fresh={true} />);
+    expect(html).toContain('در نصب تازه طبیعی است');
+    expect(html).toContain('GUIDE.fa.md#approved-app-catalog');
+    const diagnostics = renderToStaticMarkup(<Diagnostics snapshot={snapshot} fresh={true} canMutate={true} onActivate={() => {}} />);
+    expect(diagnostics).toContain('نیاز به ثبت برنامه؛ اختلال سرویس نیست');
+    expect(renderToStaticMarkup(<CatalogSetup snapshot={snapshot} fresh={false} />)).toBe('');
+    snapshot.settings.application_catalog = { state: 'invalid' };
+    expect(renderToStaticMarkup(<CatalogSetup snapshot={snapshot} fresh={true} />)).toBe('');
+    snapshot.settings.application_catalog = { state: 'ready' };
+    expect(renderToStaticMarkup(<CatalogSetup snapshot={snapshot} fresh={true} />)).toBe('');
+    snapshot.settings.application_catalog = { state: 'files_required' };
+    expect(renderToStaticMarkup(<CatalogSetup snapshot={snapshot} fresh={true} />)).toContain('فایل برنامه‌های ثبت‌شده آمادهٔ نصب نیست');
   });
 });

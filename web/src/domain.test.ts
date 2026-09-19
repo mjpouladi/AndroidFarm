@@ -34,6 +34,14 @@ describe('وضعیت واقعی و مرز اعتماد API', () => {
       expect(() => parseSnapshot({ ...snapshotData(), ...override })).toThrow();
     }
   });
+  it('آماده‌سازی اولیهٔ فهرست را از خرابی یا آمادگی واقعی جدا می‌کند', () => {
+    for (const state of ['setup_required', 'files_required', 'ready', 'invalid']) {
+      expect(parseSnapshot({ ...snapshotData(), settings: { application_catalog: { state } } }).settings.application_catalog?.state).toBe(state);
+    }
+    for (const application_catalog of [null, [], 'ready', { state: 'guessed' }, {}]) {
+      expect(() => parseSnapshot({ ...snapshotData(), settings: { application_catalog } })).toThrow();
+    }
+  });
   it('قطع اتصال یا گزارش قدیمی مجوز تغییر ایجاد نمی‌کند', () => {
     const snapshot = parseSnapshot(snapshotData());
     expect(isSnapshotFresh(snapshot)).toBe(true);

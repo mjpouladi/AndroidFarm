@@ -479,10 +479,14 @@ class Operations:
             result['artifacts'] = [{'id': app['id'], 'label': app['label'],
                                     'package': app['apk_package'], 'available': self._artifact_available(app)}
                                    for app in catalog.values()]
-            if not catalog:
-                failure('artifacts', 'no approved application catalog; add reviewed APK metadata to /etc/android-farm/apps.json')
+            # A new installation deliberately has no approved applications. This
+            # requires setup before provisioning, but is not an API/service fault.
+            result['settings']['application_catalog'] = {
+                'state': ('setup_required' if not catalog else
+                          'ready' if any(app['available'] for app in result['artifacts']) else 'files_required')}
         except (OSError, RuntimeError, ValueError, KeyError, TypeError):
-            failure('artifacts', 'private application catalog is invalid')
+            result['settings']['application_catalog'] = {'state': 'invalid'}
+            failure('artifacts', 'فهرست خصوصی برنامه‌ها نامعتبر یا دسترسی آن ناامن است؛ بخش ۹ راهنمای واحد را بررسی کنید.')
         try:
             records = inventory.records(inventory.load(config.state_dir / 'inventory.json'))
         except (OSError, RuntimeError, ValueError, KeyError):

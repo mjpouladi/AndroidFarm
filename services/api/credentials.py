@@ -67,10 +67,35 @@ COMPOSE_SERVICES = {
 }
 PRIVATE_NETWORKS = tuple(ipaddress.IPv4Network(value) for value in
                          ('10.0.0.0/8', '172.16.0.0/12', '192.168.0.0/16'))
+FAILURE_DETAILS = {
+    'init-policy': 'تنظیم کانتینر همگام‌سازی با سیاست مدیریت‌شده سازگار نیست.',
+    'tool-failed': 'ابزار محلی مدیریت رمز موفق نشد.',
+    'tool-unavailable': 'ابزار محلی اجرا نشد یا مهلت اجرای آن پایان یافت.',
+    'grafana-auth': 'Grafana اطلاعات ورود ذخیره‌شده را نپذیرفت.',
+    'grafana-forbidden': 'Grafana مجوز تغییر حساب را نداد.',
+    'grafana-http': 'Grafana پاسخ HTTP موفق نداد.',
+    'grafana-response': 'پاسخ Grafana قابل تأیید نیست.',
+    'grafana-unreachable': 'اتصال مستقیم به Grafana برقرار نشد.',
+    'file-missing': 'یکی از فایل‌ها یا پوشه‌های لازم وجود ندارد.',
+    'file-permission': 'خواندن یا نوشتن فایل خصوصی مجاز نبود.',
+    'credential-operation': 'تنظیمات سرویس‌ها و فایل‌های خصوصی باید بررسی شوند.',
+}
 
 
 class CredentialsError(RuntimeError):
     """Controlled secret-free failure suitable for the authenticated UI."""
+
+    def __init__(self, message, *, code='credential-operation'):
+        super().__init__(message)
+        self.code = code if code in FAILURE_DETAILS else 'credential-operation'
+
+
+def _failure_detail(error, stage):
+    # Never include raw subprocess output, HTTP responses or exception text.
+    code = error.code if isinstance(error, CredentialsError) else (
+        'file-missing' if isinstance(error, FileNotFoundError) else
+        'file-permission' if isinstance(error, PermissionError) else 'credential-operation')
+    return f'[{stage}/{code}] {FAILURE_DETAILS[code]}'
 
 
 def validate_credentials(username, password):
@@ -112,6 +137,21 @@ def render_middleware(content, revision):
             # the actual realm field forces rebuilding it without proxy restart.
             lines.append(f'        realm: "Android Farm {revision}"')
     return ('\n'.join(lines) + '\n').encode('utf-8')
+
+
+def _capabilities_match(values, expected):
+    """Compare Docker's canonical CAP_* names and legacy Compose spellings.
+
+    Moby normalizes capability names before container creation. Only aliases
+    for the exact reviewed set are accepted; normalization must not make an
+    extra capability, a missing drop, or an invalid inspect value acceptable.
+    """
+    if not isinstance(values, list) or any(not isinstance(value, str) for value in values):
+        return False
+    aliases = {name: name for name in expected}
+    aliases.update({'CAP_' + name: name for name in expected if name != 'ALL'})
+    normalized = [aliases.get(value.upper()) for value in values]
+    return None not in normalized and set(normalized) == expected
 
 
 def _safe_path(path, *, dynamic=False, public=False, missing=False):
@@ -180,13 +220,19 @@ def _http(method, url, username, password, payload=None):
         with opener.open(request, timeout=10) as response:
             content = response.read(65537)
             if len(content) > 65536:
-                raise CredentialsError('پاسخ سرویس مانیتورینگ بیش از حد بزرگ بود.')
+                raise CredentialsError('پاسخ سرویس مانیتورینگ بیش از حد بزرگ بود.', code='grafana-response')
             result = json.loads(content)
             if not isinstance(result, dict):
-                raise CredentialsError('پاسخ سرویس مانیتورینگ معتبر نیست.')
+                raise CredentialsError('پاسخ سرویس مانیتورینگ معتبر نیست.', code='grafana-response')
             return result
-    except (OSError, ValueError, urllib.error.URLError):
-        raise CredentialsError('ارتباط یا احراز هویت مستقیم Grafana ناموفق بود؛ رمز فعلی آن را بررسی کنید.') from None
+    except urllib.error.HTTPError as error:
+        code = 'grafana-auth' if error.code == 401 else 'grafana-forbidden' if error.code == 403 else 'grafana-http'
+        error.close()
+        raise CredentialsError(FAILURE_DETAILS[code], code=code) from None
+    except ValueError:
+        raise CredentialsError(FAILURE_DETAILS['grafana-response'], code='grafana-response') from None
+    except (OSError, urllib.error.URLError):
+        raise CredentialsError(FAILURE_DETAILS['grafana-unreachable'], code='grafana-unreachable') from None
 
 
 class CredentialManager:
@@ -204,9 +250,9 @@ class CredentialManager:
         try:
             result = self.runner(argv, input=input, capture_output=True, text=True, timeout=timeout)
         except (OSError, subprocess.SubprocessError):
-            raise CredentialsError('اجرای ابزار مدیریت اطلاعات ورود ناموفق بود.') from None
+            raise CredentialsError('اجرای ابزار مدیریت اطلاعات ورود ناموفق بود.', code='tool-unavailable') from None
         if result.returncode:
-            raise CredentialsError('ابزار مدیریت اطلاعات ورود عملیات را تأیید نکرد.')
+            raise CredentialsError('ابزار مدیریت اطلاعات ورود عملیات را تأیید نکرد.', code='tool-failed')
         return result.stdout or ''
 
     def _user(self):
@@ -258,12 +304,13 @@ class CredentialManager:
                 host.get('ReadonlyRootfs') is not True or config.get('User') != '0:0' or
                 config.get('Entrypoint') not in (None, []) or config.get('Image') != 'alpine:3.21' or
                 script not in scripts or host.get('Privileged') is not False or
-                set(host.get('CapDrop') or []) != {'ALL'} or
-                set(host.get('CapAdd') or []) != {'CHOWN', 'DAC_OVERRIDE', 'FOWNER'} or
-                set(host.get('SecurityOpt') or []) not in ({'no-new-privileges:true'}, {'no-new-privileges'}) or
+                not _capabilities_match(host.get('CapDrop'), {'ALL'}) or
+                not _capabilities_match(host.get('CapAdd'), {'CHOWN', 'DAC_OVERRIDE', 'FOWNER'}) or
+                host.get('SecurityOpt') not in (['no-new-privileges:true'], ['no-new-privileges=true'],
+                                                 ['no-new-privileges']) or
                 host.get('PidMode') not in (None, '') or host.get('IpcMode') not in (None, '', 'private') or
                 host.get('Devices') or host.get('DeviceRequests')):
-            raise CredentialsError('کانتینر همگام‌سازی رمز آمادهٔ اجرای محدود نیست.')
+            raise CredentialsError('کانتینر همگام‌سازی رمز آمادهٔ اجرای محدود نیست.', code='init-policy')
         binds = [m for m in init.get('Mounts', []) if m.get('Destination') == target]
         private = [m for m in init.get('Mounts', []) if m.get('Destination') == '/private']
         mounted = [m for m in service.get('Mounts', []) if m.get('Destination') in
@@ -444,27 +491,36 @@ class CredentialManager:
         require_private_directory(self.state_dir, 'credential state')
         web = grafana = None
         web_attempted = grafana_attempted = False
+        stage = 'preflight'
         with _lock(self.state_dir / 'credential.lock'):
             try:
                 # Validate all endpoints/files before changing either account.
                 if target in {'web', 'platform'}:
+                    stage = 'web-preflight'
                     web = self._prepare_web(username, password)
                 if target in {'grafana', 'platform'}:
+                    stage = 'grafana-preflight'
                     grafana = self._prepare_grafana(username, password)
                 if grafana:
+                    stage = 'grafana-account'
                     grafana_attempted = True
                     self._grafana_set(grafana, grafana['old_user'], grafana['old_password'], username, password)
+                    stage = 'grafana-files'
                     self._apply_files(grafana['changes'])
+                    stage = 'grafana-secret-sync'
                     self._refresh(grafana['plan'])
                 if web:
                     # Grafana may have just updated these shared env files.
                     # Merge the auth revision against that current content so
                     # a platform change cannot restore the previous login.
+                    stage = 'web-files'
                     web['changes'].extend(self._environment_changes({'FARM_HTTP_AUTH_REVISION': web['revision']}))
                     web_attempted = True
                     self._apply_files(web['changes'])
+                    stage = 'web-secret-sync'
                     self._refresh(web['plan'])
-            except Exception:
+            except Exception as error:
+                detail = _failure_detail(error, stage)
                 rollback_failed = False
                 if web_attempted:
                     try:
@@ -482,8 +538,8 @@ class CredentialManager:
                                 'created_at': int(time.time()), 'requires_review': True}
                     _write(self.config_dir / 'credential-recovery.json',
                            (json.dumps(recovery) + '\n').encode())
-                    raise CredentialsError('تغییر ورود کامل نشد و بازگردانی همهٔ سرویس‌ها تأیید نشد؛ فایل خصوصی credential-recovery.json و وضعیت واقعی سرویس‌ها باید در میزبان بررسی شود.') from None
-                raise CredentialsError('تغییر اطلاعات ورود انجام نشد؛ وضعیت قبلی حفظ یا بازگردانی شد. دسترسی سرویس‌ها و فایل‌های خصوصی را بررسی کنید.') from None
+                    raise CredentialsError('تغییر ورود کامل نشد و بازگردانی همهٔ سرویس‌ها تأیید نشد؛ فایل خصوصی credential-recovery.json و وضعیت واقعی سرویس‌ها باید در میزبان بررسی شود. ' + detail) from None
+                raise CredentialsError('تغییر اطلاعات ورود انجام نشد؛ وضعیت قبلی حفظ یا بازگردانی شد. ' + detail) from None
         return {'completed': True, 'target': target, 'username': username,
                 'changed': [name for name, active in (('web', web), ('grafana', grafana)) if active],
                 'relogin_required': bool(web), 'redis_changed': False}
