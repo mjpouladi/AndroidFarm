@@ -124,12 +124,14 @@ sudo device-provisioner status --json
 - Coolify و Traefik داخلی آن از قبل فعال باشند.
 - برای مسیر اصلی، دامنهٔ `commex-box.com`، سرور `185.208.172.141` و TCP `80/443` قابل دسترس باشند. DNSهای `commex-box.com` و `metrics.commex-box.com` را مطابق بخش بعد به این سرور وصل کنید.
 - حالت اختیاری بدون دامنه به TCP `18080` از شبکهٔ مطمئن/VPN نیاز دارد. قواعد انتشار پورت Docker می‌توانند از قواعد معمول UFW عبور کنند؛ فایروال شبکه/ارائه‌دهنده را هم تنظیم کنید ([مستندات Docker](https://docs.docker.com/engine/network/packet-filtering-firewalls/#docker-and-ufw)). ADB عمومی نباشد.
-- kernel میزبان Binder را ارائه کند؛ cgroup v2 و Docker rootful محلی لازم است.
+- کرنل میزبان BinderFS را ارائه کند؛ cgroup v2 و Docker rootful محلی لازم است. وجود `/dev/binder` روی خود میزبان پیش‌نیاز این معماری نیست.
 - `/dev/kmsg` باید به‌صورت character device موجود باشد؛ Compose فعلی آن را برای cAdvisor mount می‌کند و روی VPS فاقد آن deploy هسته fail می‌شود.
 - `DOCKER_HOST` و `DOCKER_CONTEXT` نباید به daemon راه‌دور اشاره کنند.
 - دسترسی root فقط برای تیم زیرساخت؛ Docker socket هرگز در UI، worker یا شبکه publish نمی‌شود.
 
 installer در صورت نیاز Docker CE، Compose plugin و ابزارهای `iptables`، `htpasswd`، `apksigner`، `aapt`، `rsync` و `restic` را نصب می‌کند، `binder_linux` را load و persistent می‌کند و Compose نسخهٔ 2.33.1 یا بالاتر را الزام می‌کند. اگر Binder برای کرنل در حال اجرا موجود نباشد، نصب بستهٔ رسمی `linux-modules-extra-$(uname -r)` همان کرنل را امتحان می‌کند؛ در صورت نیاز به بوت کرنل دیگری، با راهنمای مشخص متوقف می‌شود و **سرور را خودکار reboot نمی‌کند**. نصب/پارتیشن‌بندی خود Ubuntu و نصب خود Coolify خارج از installer است.
+
+تشخیص Binder براساس ثبت فایل‌سیستم `binder` در `/proc/filesystems` است. هنگام آماده‌سازی میزبان، نصب‌کننده یک mount موقت BinderFS در mount namespace خصوصی می‌سازد، character device بودن `binder-control` را بررسی و آن را پاک‌سازی می‌کند. Redroid 11/12 هنگام بوت، BinderFS و دستگاه‌های Binder خود را داخل کانتینر می‌سازد؛ `/dev/binder`، `/dev/hwbinder` و `/dev/vndbinder` میزبان نه ساخته می‌شوند و نه به کانتینرها bind می‌شوند. موفقیت این بررسی هنوز جای آزمون بوت واقعی `num01` را نمی‌گیرد. جزئیات و رفع خطای نسخهٔ قبلی در بخش عیب‌یابی همین راهنما آمده است.
 
 ## ۵. نصب قدم‌به‌قدم با دامنه و HTTPS
 
@@ -914,7 +916,7 @@ sudo docker compose --env-file /etc/android-farm/compose.env \
 ```
 
 - doctor باید `ready` باشد و release میزبان/anchor برابر باشد.
-- `/dev/binder` یا binderfs موجود و Redroid واقعاً boot شود.
+- فایل‌سیستم `binder` در `/proc/filesystems` ثبت باشد، آزمون mount موقت نصب‌کننده موفق شود و Redroid واقعاً boot شود. نبودن `/dev/binder` روی میزبان خطا نیست؛ دستگاه‌ها داخل کانتینر ساخته می‌شوند.
 - `test -c /dev/kmsg` موفق باشد تا cAdvisor بتواند با Compose فعلی شروع شود.
 - پس از deploy هسته، هیچ `android-*`، `proxy-*` یا `screen-*` بدون دستور اپراتور روشن نباشد.
 
@@ -983,6 +985,7 @@ ss -ltnp | grep ':5551'
 | نشانه | بررسی |
 |---|---|
 | `Module binder_linux not found` | مراحل «نبودن Binder پس از به‌روزرسانی کرنل» در ادامهٔ همین بخش؛ ابتدا نصب‌کنندهٔ به‌روز را دوباره اجرا کنید |
+| Binder بارگذاری شده ولی `/dev/binder`، `/dev/hwbinder` و `/dev/vndbinder` آماده نیستند | خطای تشخیص نسخهٔ قبلی نصب‌کننده؛ بخش «Binder بارگذاری شده ولی دستگاه‌های میزبان وجود ندارند» را ببینید و همان فرمان نصب را تکرار کنید |
 | `doctor: blocked` | remediation همان check را اجرا کنید؛ معمولاً Binder، release mismatch، auth file یا local Docker context است |
 | راه‌انداز: نتیجهٔ Deploy نامعلوم | راه‌انداز ابتدا تاریخچهٔ API را بررسی می‌کند. فقط اگر در Coolify مطمئن شدید هیچ Deploy ساخته نشده، همان فرمان را با `--retry-deploy` تکرار کنید؛ درخواست نامعلوم خودکار تکرار نمی‌شود |
 | apply در `waiting_for_coolify` | `coolify.env` را در همان یک App وارد، همان release را deploy و apply یکسان را دوباره اجرا کنید |
@@ -993,6 +996,35 @@ ss -ltnp | grep ':5551'
 | metricهای سلامت stale هستند | `android-farm-health.timer`، permission مسیر textfile و mount node-exporter را بررسی کنید |
 | worker retry می‌کند | journal، result task، lock device و DLQ را بررسی کنید؛ task دلخواه shell به صف نفرستید |
 | profile drift | device را stop، فایل profile و digest را بازبینی و start کنترل‌شده اجرا کنید |
+
+### Binder بارگذاری شده ولی دستگاه‌های میزبان وجود ندارند
+
+اگر پس از نصب موفق `linux-modules-extra` و بارگذاری `binder_linux` این پیام را دیده‌اید:
+
+```text
+Binder بارگذاری شد ولی /dev/binder، /dev/hwbinder و /dev/vndbinder آماده نیستند.
+```
+
+این پیام از شرط نادرست نسخهٔ قبلی نصب‌کننده می‌آید؛ نبودن این سه مسیر روی میزبان، در حالت BinderFS طبیعی است. در Linux 6.8 با `CONFIG_ANDROID_BINDERFS`، درایور دستگاه‌های عمومی را در `/dev` نمی‌سازد؛ نام‌های پارامتر `devices=` هنگام mount شدن هر BinderFS در همان فایل‌سیستم ساخته می‌شوند. [کد رسمی Linux 6.8 برای بارگذاری Binder](https://github.com/torvalds/linux/blob/v6.8/drivers/android/binder.c#L6229)، [ساخت دستگاه‌ها هنگام mount](https://github.com/torvalds/linux/blob/v6.8/drivers/android/binderfs.c#L673)
+
+Redroid 11 و 12 خودشان `/dev/binderfs` را mount و با `binder_alloc` دستگاه‌های لازم را ایجاد می‌کنند؛ سپس مسیرهای `/dev/binder`، `/dev/hwbinder` و `/dev/vndbinder` را **داخل همان کانتینر** به آن‌ها متصل می‌کنند. در این معماری به ساخت یا bind کردن دستگاه‌های مشترک میزبان نیازی نیست. [راه‌اندازی Redroid 11](https://github.com/remote-android/platform_system_core/blob/redroid-11.0.0/rootdir/init.rc#L159)، [راه‌اندازی Redroid 12](https://github.com/remote-android/platform_system_core/blob/redroid-12.0.0/rootdir/init.rc#L211)، [مستند رسمی Redroid دربارهٔ BinderFS](https://github.com/remote-android/redroid-doc/blob/master/deploy/debian.md)
+
+برای رفع **همین خطای تشخیص**، کافی است نصب‌کنندهٔ اصلاح‌شده را دریافت و ادامه دهید:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com
+```
+
+reboot یا unload کردن `binder_linux` برای این خطا لازم نیست. نصب‌کنندهٔ جدید پشتیبانی ثبت‌شده و mount موقت BinderFS را بررسی می‌کند؛ اگر آزمون mount خطا بدهد، پیام همان خطا را بررسی کنید. روی میزبان node دستی با `mknod` یا symlink نسازید و `/dev/binder` را بین دستگاه‌ها مشترک نکنید.
+
+برای بررسی فقط‌خواندنی پشتیبانی کرنل:
+
+```bash
+uname -r
+grep -w binder /proc/filesystems
+```
+
+خروجی `nodev binder` یعنی پشتیبانی فایل‌سیستم فعال است؛ سلامت کامل Android پس از روشن‌کردن اولین دستگاه و موفقیت ADB تأیید می‌شود. هشدار `Pending kernel upgrade` را جداگانه در زمان نگهداری رسیدگی کنید؛ آن هشدار علت این توقف نصب نیست.
 
 ### نبودن Binder پس از به‌روزرسانی کرنل
 
@@ -1018,7 +1050,7 @@ sudo modprobe binder_linux devices=binder,hwbinder,vndbinder
 sudo bash /opt/android-farm/source/install.sh --domain commex-box.com
 ```
 
-اگر Binder با این روش بارگذاری شد، برای ادامهٔ نصب فارم نیازی به reboot ندارید؛ رسیدگی به هشدار کرنل جدید می‌تواند جداگانه انجام شود.
+اگر Binder با این روش بارگذاری شد و آزمون BinderFS نصب‌کننده موفق بود، برای ادامهٔ نصب فارم نیازی به reboot ندارید؛ رسیدگی به هشدار کرنل جدید می‌تواند جداگانه انجام شود. معیار را وجود سه node روی `/dev` میزبان قرار ندهید؛ توضیح خطای نسخهٔ قبلی در بخش قبل آمده است.
 
 **۳. فقط اگر راه‌انداز نیاز به reboot برای استفاده از کرنل نصب‌شدهٔ دارای Binder را گزارش کرد، زمان مناسب انتخاب کنید:**
 

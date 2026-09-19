@@ -21,7 +21,7 @@ class BinderBootstrapTests(unittest.TestCase):
         self.patches.enter_context(redirect_stdout(io.StringIO()))
         self.patches.enter_context(patch("installer.install.platform.release", return_value=KERNEL))
         self.ready = self.patches.enter_context(patch(
-            "installer.install.binder_devices_ready", side_effect=[False, True]))
+            "installer.install.binderfs_available", side_effect=[False, True]))
         self.command = self.patches.enter_context(patch(
             "installer.install._command",
             return_value=subprocess.CompletedProcess([], 0, "", "")))
@@ -29,14 +29,14 @@ class BinderBootstrapTests(unittest.TestCase):
             "installer.install.subprocess.run",
             return_value=subprocess.CompletedProcess([], 0, "", "")))
 
-    def test_existing_devices_allow_builtin_binder_without_package_or_module_lookup(self):
+    def test_registered_binderfs_allows_builtin_binder_without_package_or_module_lookup(self):
         self.ready.side_effect = None
         self.ready.return_value = True
         install.prepare_binder()
         self.command.assert_not_called()
         self.run.assert_not_called()
 
-    def test_available_module_loads_without_apt_and_checks_devices(self):
+    def test_available_module_loads_without_apt_and_checks_binderfs_registration(self):
         install.prepare_binder()
         self.assertEqual(self.command.call_args_list, [
             call(["modinfo", "-k", KERNEL, "binder_linux"]),
@@ -117,9 +117,9 @@ class BinderBootstrapTests(unittest.TestCase):
         ])
         self.run.assert_not_called()
 
-    def test_loaded_module_without_all_three_devices_fails_without_unloading(self):
+    def test_loaded_module_without_binderfs_fails_without_unloading(self):
         self.ready.side_effect = [False, False]
-        with self.assertRaisesRegex(RuntimeError, "/dev/binder.*hwbinder.*vndbinder"):
+        with self.assertRaisesRegex(RuntimeError, "CONFIG_ANDROID_BINDERFS"):
             install.prepare_binder()
         self.assertEqual(self.command.call_count, 2)
         self.assertNotIn("-r", self.command.call_args.args[0])
@@ -132,10 +132,66 @@ class BinderBootstrapTests(unittest.TestCase):
                 patch("installer.install.shutil.which", return_value=None), \
                 patch("installer.install.subprocess.check_output", return_value="2.33.1\n"), \
                 patch("installer.install._atomic_write"), \
+                patch("installer.install.probe_binderfs") as probe, \
                 patch("installer.install.prepare_binder") as prepare:
             install.prepare_host(Path("unused-source"))
         prepare.assert_called_once_with()
+        probe.assert_called_once_with()
         self.run.assert_not_called()
+
+    def test_skipping_bootstrap_still_requires_and_probes_binderfs(self):
+        self.ready.side_effect = None
+        self.ready.return_value = True
+        with patch("installer.install.probe_binderfs") as probe:
+            install.prepare_host(Path("unused-source"), skip=True)
+        probe.assert_called_once_with()
+        self.command.assert_not_called()
+        self.run.assert_not_called()
+        self.ready.return_value = False
+        with patch("installer.install.probe_binderfs") as probe:
+            with self.assertRaisesRegex(RuntimeError, "CONFIG_ANDROID_BINDERFS"):
+                install.prepare_host(Path("unused-source"), skip=True)
+        probe.assert_not_called()
+
+
+class BinderfsProbeTests(unittest.TestCase):
+    def test_probe_is_disposable_private_and_never_checks_host_global_nodes(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with patch("installer.install._command",
+                       return_value=subprocess.CompletedProcess([], 0, "", "")) as command:
+                install.probe_binderfs(root)
+            arguments = command.call_args.args[0]
+            self.assertEqual(arguments[:10], ["unshare", "--mount", "--propagation", "private",
+                                              "--pid", "--fork", "--kill-child", "--", "sh", "-ec"])
+            self.assertIn('mount -t binder -o nosuid,noexec binder "$1"', arguments[10])
+            self.assertIn('[ ! -c "$1/binder-control" ]', arguments[10])
+            self.assertNotIn("/dev/binder", arguments[10])
+            self.assertEqual(Path(arguments[-1]).parent, root)
+            self.assertEqual(command.call_args.kwargs["timeout"], 30)
+            self.assertEqual(list(root.iterdir()), [])
+
+    def test_probe_failures_stop_install_and_cleanup_parent_directory(self):
+        outcomes = [
+            subprocess.CompletedProcess([], 1, "", "unshare: Operation not permitted"),
+            subprocess.CompletedProcess([], 32, "", "mount: unknown filesystem type binder"),
+            subprocess.CompletedProcess([], 1, "", "BinderFS did not create a character binder-control device"),
+            subprocess.TimeoutExpired(["unshare"], 30),
+            FileNotFoundError("unshare missing"),
+        ]
+        for outcome in outcomes:
+            with self.subTest(outcome=outcome), tempfile.TemporaryDirectory() as directory:
+                root = Path(directory)
+                with patch("installer.install._command") as command:
+                    if isinstance(outcome, Exception):
+                        command.side_effect = outcome
+                    else:
+                        command.return_value = outcome
+                    with self.assertRaisesRegex(RuntimeError, "BinderFS") as error:
+                        install.probe_binderfs(root)
+                if isinstance(outcome, subprocess.CompletedProcess):
+                    self.assertIn(outcome.stderr, str(error.exception))
+                self.assertEqual(list(root.iterdir()), [])
 
 
 class BinderRecoveryHintTests(unittest.TestCase):

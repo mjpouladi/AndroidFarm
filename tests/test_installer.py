@@ -37,15 +37,19 @@ class InstallerPureTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             install.parse_version("unknown")
 
-    def test_binder_readiness_requires_all_redroid_devices(self):
+    def test_binderfs_readiness_uses_kernel_registration_without_host_device_nodes(self):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
-            (root / "binderfs").mkdir()
-            (root / "binderfs" / "binder-control").touch()
-            self.assertFalse(install.binder_devices_ready(root))
-            for name in install.BINDER_DEVICE_NAMES:
-                (root / name).touch()
-            self.assertTrue(install.binder_devices_ready(root))
+            filesystems = root / "filesystems"
+            self.assertFalse(install.binderfs_available(filesystems))
+            filesystems.write_text("nodev\tsysfs\nnodev\ttmpfs\n\text4\n", encoding="utf-8")
+            self.assertFalse(install.binderfs_available(filesystems))
+            filesystems.write_text("nodev\tsysfs\nnodev\tbinder\n\text4\n", encoding="utf-8")
+            self.assertTrue(install.binderfs_available(filesystems))
+            self.assertFalse((root / "binder").exists())
+            # Exact filesystem token: a similarly named filesystem is not BinderFS.
+            filesystems.write_text("nodev\tbinderfs\nnodev\tbinder-backup\n", encoding="utf-8")
+            self.assertFalse(install.binderfs_available(filesystems))
 
     def test_domain_validation_and_idna(self):
         self.assertEqual(install.normalize_domain("Farm.Example.com."), "farm.example.com")
@@ -479,6 +483,20 @@ class InstallerFilesystemTests(unittest.TestCase):
             self.assertFalse(settings.paths.wrapper.exists())
             self.assertTrue((settings.paths.config_dir / "compose.env").exists())
             self.assertTrue((settings.paths.config_dir / "coolify.env").exists())
+
+    def test_doctor_checks_binderfs_without_mounting_or_requiring_host_nodes(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings = self.settings(root, self.make_source(root))
+            for available in (True, False):
+                with self.subTest(available=available), \
+                        patch("installer.install.binderfs_available", return_value=available), \
+                        patch("installer.install.probe_binderfs") as probe:
+                    checks = install.doctor_checks(settings, {})
+                binder = next(item for item in checks if item.name == "binder")
+                self.assertEqual(binder.status, "pass" if available else "block")
+                self.assertIn("BinderFS", binder.detail)
+                probe.assert_not_called()
 
     def test_doctor_never_reports_waiting_upgrade_as_ready(self):
         with tempfile.TemporaryDirectory() as folder:

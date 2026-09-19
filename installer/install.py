@@ -42,7 +42,6 @@ DEFAULT_HTTP_PORT = 18080
 FIRST_ADB_PORT = 5551
 LAST_ADB_PORT = 13742
 GATEWAY_CONTAINER = "android-farm-gateway"
-BINDER_DEVICE_NAMES = ("binder", "hwbinder", "vndbinder")
 RELEASE_ENTRIES = (
     ".dockerignore",
     "provisioner.py",
@@ -214,13 +213,19 @@ def parse_version(value: str) -> tuple[int, int, int]:
     return tuple(int(part) for part in match.groups())  # type: ignore[return-value]
 
 
-def binder_devices_ready(device_root: Path = Path("/dev")) -> bool:
-    """Return true only when all Redroid binder character devices exist.
+def binderfs_available(filesystems: Path = Path("/proc/filesystems")) -> bool:
+    """Check active kernel support, without requiring host-global Binder nodes.
 
-    A binderfs control node merely permits creating devices; it is not itself
-    one of the three device nodes consumed by this Redroid configuration.
+    Redroid 11/12 mounts a private BinderFS and allocates its own devices during
+    init. This Compose configuration deliberately does not bind host devices.
+    Registration also covers built-in Binder without a loadable module.
+    https://github.com/remote-android/platform_system_core/blob/redroid-12.0.0/rootdir/init.rc
     """
-    return all((device_root / name).exists() for name in BINDER_DEVICE_NAMES)
+    try:
+        return any(line.split() == ["nodev", "binder"]
+                   for line in filesystems.read_text(encoding="utf-8").splitlines())
+    except OSError:
+        return False
 
 
 def validate_project(value: str) -> str:
@@ -1103,7 +1108,8 @@ def discover(settings: Settings) -> dict[str, object]:
 
 def _bootstrap_required() -> bool:
     commands = ("curl", "git", "rsync", "docker", "iptables", "iptables-restore",
-                "htpasswd", "apksigner", "aapt", "restic", "modprobe", "modinfo", "depmod")
+                "htpasswd", "apksigner", "aapt", "restic", "modprobe", "modinfo", "depmod",
+                "unshare", "mount")
     if any(not shutil.which(command) for command in commands):
         return True
     try:
@@ -1159,9 +1165,8 @@ def prepare_binder() -> None:
     Never replace the kernel, unload a live Binder module, or reboot the host.
     https://github.com/remote-android/redroid-doc/blob/master/deploy/ubuntu.md
     """
-    # Some kernels compile Binder in. Already-created devices are sufficient;
-    # such hosts need neither a loadable module nor an extra package.
-    if binder_devices_ready():
+    # Built-in or already-loaded BinderFS needs no package install/reload.
+    if binderfs_available():
         return
     kernel = platform.release()
     if not re.fullmatch(r"[0-9][A-Za-z0-9._+-]{0,127}", kernel):
@@ -1187,12 +1192,43 @@ def prepare_binder() -> None:
         detail = (loaded.stderr or loaded.stdout or "unknown module loading error").strip()[:1500]
         raise RuntimeError(f"بارگذاری Binder در کرنل {kernel} ناموفق بود: {detail}. "
                            "ماژول موجود را حذف یا unload نکنید؛ وضعیت کرنل و محدودیت میزبان را بررسی کنید.")
-    if not binder_devices_ready():
+    if not binderfs_available():
         raise RuntimeError(
-            "Binder بارگذاری شد ولی /dev/binder، /dev/hwbinder و /dev/vndbinder آماده نیستند. "
-            "ممکن است ماژول از قبل با تنظیمات دیگری بارگذاری شده باشد؛ آن را خودکار unload نمی‌کنم. "
-            "تنظیم devices و سرویس استفاده‌کننده از Binder را بررسی کنید."
+            "Binder بارگذاری شد ولی binderfs در /proc/filesystems ثبت نشده است. "
+            "این پیکربندی Redroid به CONFIG_ANDROID_BINDERFS نیاز دارد؛ "
+            "تنظیمات کرنل و محدودیت‌های میزبان را بررسی کنید. "
+            "ساخت دستی /dev/binder یا unload ماژول راه‌حل این بررسی نیست."
         )
+
+
+def probe_binderfs(temp_root: Path = Path("/run")) -> None:
+    """Mount BinderFS in a disposable private mount namespace, then discard it.
+
+    The mount never propagates to the host or running containers. A PID
+    namespace with --kill-child also kills mount descendants on timeout.
+    Namespace exit releases it on test failure. The parent sees an empty temporary
+    directory, so cleanup never walks a BinderFS mount or removes live nodes.
+    This checks the host prerequisite, not successful Android/container boot.
+    """
+    script = ('mount -t binder -o nosuid,noexec binder "$1"\n'
+              'if [ ! -c "$1/binder-control" ]; then\n'
+              '  printf "%s\\n" "BinderFS did not create a character binder-control device" >&2\n'
+              '  exit 1\n'
+              'fi\n')
+    try:
+        with tempfile.TemporaryDirectory(prefix="android-farm-binder-", dir=temp_root) as directory:
+            result = _command(["unshare", "--mount", "--propagation", "private",
+                               "--pid", "--fork", "--kill-child", "--",
+                               "sh", "-ec", script, "binderfs-probe", directory], timeout=30)
+            if result.returncode:
+                detail = (result.stderr or result.stdout or "unknown mount error").strip()[:1500]
+                raise RuntimeError(detail)
+    except (OSError, subprocess.SubprocessError, RuntimeError) as exc:
+        raise RuntimeError(
+            "آزمون mount خصوصی BinderFS ناموفق بود: " + str(exc) + ". "
+            "دسترسی root، ابزارهای unshare و mount و محدودیت mount namespace میزبان را بررسی کنید. "
+            "هیچ مسیر Binder در /dev میزبان ایجاد یا جایگزین نشد."
+        ) from exc
 
 
 def prepare_host(source: Path, skip: bool = False) -> None:
@@ -1202,7 +1238,8 @@ def prepare_host(source: Path, skip: bool = False) -> None:
             os.environ["DEBIAN_FRONTEND"] = "noninteractive"
             subprocess.run(["apt-get", "update"], check=True)
             subprocess.run(["apt-get", "install", "-y", "ca-certificates", "curl", "git", "python3",
-                            "iptables", "apache2-utils", "apksigner", "aapt", "rsync", "restic", "kmod"], check=True)
+                            "iptables", "apache2-utils", "apksigner", "aapt", "rsync", "restic", "kmod",
+                            "util-linux", "mount"], check=True)
             if not shutil.which("docker"):
                 conflicts = []
                 for package in ("docker.io", "docker-compose", "containerd", "runc", "podman-docker"):
@@ -1244,13 +1281,14 @@ def prepare_host(source: Path, skip: bool = False) -> None:
         _atomic_write(Path("/etc/modules-load.d/android-farm.conf"), b"binder_linux\n", 0o644)
         _atomic_write(Path("/etc/modprobe.d/android-farm.conf"),
                       b"options binder_linux devices=binder,hwbinder,vndbinder\n", 0o644)
-    if not binder_devices_ready():
-        missing = ", ".join(name for name in BINDER_DEVICE_NAMES
-                            if not (Path("/dev") / name).exists())
+    if not binderfs_available():
         raise RuntimeError(
-            "Redroid binder devices unavailable (missing: " + missing +
-            "); load binder_linux with devices=binder,hwbinder,vndbinder"
+            "BinderFS برای Redroid فعال نیست؛ install.sh را بدون ردکردن آماده‌سازی میزبان اجرا کنید. "
+            "کرنل باید CONFIG_ANDROID_BINDERFS داشته باشد و binder در /proc/filesystems ثبت شود."
         )
+    probe_binderfs()
+    print("  BinderFS آماده است؛ ساخت دستگاه‌های Binder داخل هر کانتینر به Redroid سپرده می‌شود.",
+          flush=True)
 
 
 def _existing_env(path: Path) -> dict[str, str]:
@@ -1408,10 +1446,10 @@ def doctor_checks(settings: Settings, discovered: Mapping[str, object]) -> list[
     checks.append(Check("cgroup-v2", "pass" if cgroup else "block",
                         "available" if cgroup else "not detected",
                         None if cgroup else "Enable unified cgroup v2 on the Ubuntu host."))
-    binder = binder_devices_ready()
+    binder = binderfs_available()
     checks.append(Check("binder", "pass" if binder else "block",
-                        "binder, hwbinder and vndbinder available" if binder else
-                        "one or more Redroid binder devices are missing",
+                        "BinderFS registered; apply probes mounting, Redroid creates private devices" if binder else
+                        "BinderFS is not registered in /proc/filesystems",
                         None if binder else "Rerun install.sh to install the matching Ubuntu kernel modules and load Binder."))
     guard_ready = bool(discovered.get("docker_user_chain")) and bool(shutil.which("iptables-restore"))
     checks.append(Check("egress-guard", "pass" if guard_ready else "block",
