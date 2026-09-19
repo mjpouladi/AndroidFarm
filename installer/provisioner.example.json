@@ -1,0 +1,9 @@
+{
+  "compose_file": "/opt/android-farm/release/docker-compose.farm.yml",
+  "compose_project": "REPLACE_WITH_COMPOSE_PROJECT",
+  "console_url": "https://farm.example.com",
+  "secret_dir": "/etc/android-farm/secrets",
+  "backup_dir": "/var/backups/android-farm",
+  "state_dir": "/var/lib/android-farm",
+  "apk_trust_file": "/etc/android-farm/apk-trust.json"
+}

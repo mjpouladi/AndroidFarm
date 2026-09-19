@@ -1,0 +1,153 @@
+name: android-farm-${DEVICE_ID:-num01}
+
+# Standalone one-device template. For the 70-device Coolify catalog use
+# docker-compose.farm.yml and device-provisioner. HTTP/SOCKS upstreams use the
+# bundled sing-box gateway; Gluetun is only appropriate when the provider gives
+# an OpenVPN/WireGuard tunnel.
+services:
+  farm-anchor:
+    image: alpine:3.21
+    command: [sleep, infinity]
+    restart: unless-stopped
+    network_mode: none
+    labels:
+      traefik.enable: "false"
+
+  proxy:
+    profiles: [manual]
+    image: ${PROXY_IMAGE:-android-farm/proxy:1}
+    build:
+      context: .
+      dockerfile: images/proxy/Dockerfile
+    container_name: proxy-${DEVICE_ID:-num01}
+    restart: "no"
+    cap_add: [NET_ADMIN]
+    cap_drop: [NET_RAW]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 256
+    environment:
+      CONTROL_CIDR: ${CONTROL_CIDR:-10.232.1.0/29}
+      EGRESS_CIDR: ${EGRESS_CIDR:-10.231.1.0/29}
+    sysctls:
+      net.ipv6.conf.all.disable_ipv6: "1"
+    networks:
+      egress:
+        ipv4_address: ${PROXY_EGRESS_IP:-10.231.1.2}
+        gw_priority: 1
+      control:
+        ipv4_address: ${PROXY_CONTROL_IP:-10.232.1.2}
+    ports:
+      - 127.0.0.1:${ADB_PORT:-5551}:5555
+    secrets:
+      - source: proxy-config
+        target: proxy.json
+    healthcheck:
+      test: [CMD, /healthcheck.sh]
+      interval: 20s
+      timeout: 10s
+      retries: 3
+      start_period: 15s
+    labels:
+      farm.device: ${DEVICE_ID:-num01}
+      farm.role: proxy
+      traefik.enable: "false"
+
+  android:
+    profiles: [manual]
+    image: ${REDROID_IMAGE:-redroid/redroid:12.0.0-latest}
+    container_name: android-${DEVICE_ID:-num01}
+    privileged: true
+    restart: "no"
+    network_mode: service:proxy
+    depends_on:
+      proxy:
+        condition: service_healthy
+    mem_limit: 4g
+    cpus: 4
+    pids_limit: 2048
+    stop_grace_period: 60s
+    volumes:
+      - type: bind
+        source: ${DATA_ROOT:-/opt/farm/data/instances}/${DEVICE_ID:-num01}/data
+        target: /data
+        bind:
+          create_host_path: false
+    command:
+      - androidboot.redroid_width=${REDROID_WIDTH:-720}
+      - androidboot.redroid_height=${REDROID_HEIGHT:-1280}
+      - androidboot.redroid_dpi=${REDROID_DPI:-240}
+      - androidboot.redroid_fps=${REDROID_FPS:-20}
+      - androidboot.redroid_gpu_mode=guest
+      - androidboot.use_memfd=true
+      - androidboot.redroid_dns=1.1.1.1
+      - androidboot.serialno=farm-${DEVICE_ID:-num01}
+      - ro.product.brand=redroid
+      - ro.product.manufacturer=remote-android
+      - ro.product.model=${REDROID_MODEL:-Redroid QA Phone}
+    labels:
+      farm.device: ${DEVICE_ID:-num01}
+      farm.role: android
+      traefik.enable: "false"
+
+  screen:
+    profiles: [manual]
+    image: ${SCREEN_IMAGE:-android-farm/screen:1}
+    build:
+      context: .
+      dockerfile: images/screen/Dockerfile
+    container_name: screen-${DEVICE_ID:-num01}
+    restart: "no"
+    init: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 1g
+    cpus: 1.5
+    pids_limit: 256
+    environment:
+      DEVICE_ID: ${DEVICE_ID:-num01}
+      ADB_TARGET: proxy:5555
+    networks: [coolify, control]
+    depends_on:
+      android:
+        condition: service_started
+    healthcheck:
+      test: [CMD, curl, -fsS, http://127.0.0.1:6080/vnc.html]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    labels:
+      - farm.device=${DEVICE_ID:-num01}
+      - farm.role=screen
+      - traefik.enable=true
+      - traefik.docker.network=${COOLIFY_NETWORK:-coolify}
+      - traefik.http.routers.farm-${DEVICE_ID:-num01}.rule=Host(`${FARM_DOMAIN:-farm.example.com}`) && PathPrefix(`/d/${DEVICE_ID:-num01}/`)
+      - traefik.http.routers.farm-${DEVICE_ID:-num01}.entrypoints=https
+      - traefik.http.routers.farm-${DEVICE_ID:-num01}.tls=true
+      - traefik.http.routers.farm-${DEVICE_ID:-num01}.tls.certresolver=letsencrypt
+      - traefik.http.routers.farm-${DEVICE_ID:-num01}.middlewares=farm-auth@file,farm-${DEVICE_ID:-num01}-strip
+      - traefik.http.middlewares.farm-${DEVICE_ID:-num01}-strip.stripprefix.prefixes=/d/${DEVICE_ID:-num01}
+      - traefik.http.services.farm-${DEVICE_ID:-num01}.loadbalancer.server.port=6080
+
+secrets:
+  proxy-config:
+    file: ${PROXY_SECRET_FILE:-/etc/android-farm/secrets/num01.json}
+
+networks:
+  coolify:
+    external: true
+    name: ${COOLIFY_NETWORK:-coolify}
+  egress:
+    name: farm-egress-${DEVICE_ID:-num01}
+    driver: bridge
+    driver_opts:
+      com.docker.network.bridge.name: ${BRIDGE_NAME:-br-af001}
+    ipam:
+      config:
+        - subnet: ${EGRESS_CIDR:-10.231.1.0/29}
+  control:
+    name: farm-control-${DEVICE_ID:-num01}
+    internal: true
+    ipam:
+      config:
+        - subnet: ${CONTROL_CIDR:-10.232.1.0/29}

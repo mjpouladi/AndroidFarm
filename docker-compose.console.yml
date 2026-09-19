@@ -1,0 +1,37 @@
+name: android-farm-console
+services:
+  console:
+    build:
+      context: ./web
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    cap_drop:
+      - ALL
+    security_opt:
+      - no-new-privileges:true
+    mem_limit: 128m
+    cpus: 0.5
+    networks:
+      - coolify
+    labels:
+      traefik.enable: 'true'
+      traefik.docker.network: '${COOLIFY_NETWORK:-coolify}'
+      traefik.http.routers.farm-console.rule: 'Host(`${CONSOLE_DOMAIN:-console.farm.example.com}`)'
+      traefik.http.routers.farm-console.entrypoints: https
+      traefik.http.routers.farm-console.tls: 'true'
+      traefik.http.routers.farm-console.tls.certresolver: letsencrypt
+      traefik.http.routers.farm-console.middlewares: farm-auth@file
+      traefik.http.services.farm-console.loadbalancer.server.port: '8080'
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, 'http://127.0.0.1:8080/healthz']
+      interval: 30s
+      timeout: 5s
+      retries: 3
+networks:
+  coolify:
+    external: true
+    name: '${COOLIFY_NETWORK:-coolify}'

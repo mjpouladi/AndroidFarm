@@ -1,0 +1,9 @@
+{
+  "packages": {
+    "com.example.qaapp": {
+      "signers": [
+        "REPLACE_WITH_INDEPENDENTLY_VERIFIED_64_HEX_CERTIFICATE_SHA256"
+      ]
+    }
+  }
+}

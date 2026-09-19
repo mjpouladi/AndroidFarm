@@ -1,0 +1,6 @@
+http:
+  middlewares:
+    farm-auth:
+      basicAuth:
+        usersFile: /traefik/dynamic/farm-users.htpasswd
+        removeHeader: true

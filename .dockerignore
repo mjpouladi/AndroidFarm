@@ -1,0 +1,4 @@
+# Only image sources are needed in build contexts; never transmit local secrets.
+*
+!images/
+!images/**

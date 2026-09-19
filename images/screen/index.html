@@ -1,0 +1,10 @@
+<!doctype html>
+<html lang="fa" dir="rtl"><meta charset="utf-8"><title>کنترل دستگاه</title>
+<p>در حال اتصال به دستگاه…</p>
+<script>
+const base = location.pathname.endsWith('/') ? location.pathname : location.pathname + '/';
+const target = new URL('vnc.html', location.origin + base);
+target.search = new URLSearchParams({autoconnect: '1', resize: 'scale',
+    path: base.slice(1) + 'websockify', reconnect: '1', reconnect_delay: '2000'});
+location.replace(target.href);
+</script></html>
