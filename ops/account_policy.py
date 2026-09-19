@@ -33,10 +33,11 @@ def assert_not_held(device, path=DEFAULT):
 def main():
     try:
         from .secureio import atomic_json, require_private_directory
-        from . import farmctl
+        from . import events, farmctl
         from .device_ids import canonical_device
     except ImportError:
         from secureio import atomic_json, require_private_directory
+        import events
         import farmctl
         from device_ids import canonical_device
     parser = argparse.ArgumentParser(description=__doc__)
@@ -67,11 +68,13 @@ def main():
                 parser.error('--reason required')
             holds[args.device] = dict(reason=args.reason, at=int(time.time()))
             atomic_json(DEFAULT, holds)  # Persist even if Docker stop fails.
+            events.note('device-held', args.device, args.reason)
         else:
             if not args.review_completed:
                 parser.error('explicit --review-completed required; no timed automatic release')
             holds.pop(args.device, None)
             atomic_json(DEFAULT, holds)
+            events.note('device-released', args.device, 'operator review completed')
     if args.action == 'hold':
         # The persisted hold makes a concurrent start fail on its next guard
         # check. Close the network boundary first, then perform graceful stop.

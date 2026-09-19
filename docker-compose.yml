@@ -285,6 +285,77 @@ services:
       - "traefik.http.routers.android-farm-grafana.middlewares=farm-auth@file"
       - "traefik.http.services.android-farm-grafana.loadbalancer.server.port=3000"
 
+  alertmanager:
+    image: prom/alertmanager:v0.28.1
+    container_name: android-farm-alertmanager
+    restart: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command:
+      - --config.file=/etc/alertmanager/alertmanager.yml
+      - --storage.path=/alertmanager
+    volumes:
+      - ${FARM_MONITORING_DIR:-./monitoring}/alertmanager.yml:/etc/alertmanager/alertmanager.yml:ro
+      - alertmanager-data:/alertmanager
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 256
+    networks: [monitoring]
+    labels:
+      - "farm.stack=core"
+      - "farm.role=alertmanager"
+      - "traefik.enable=false"
+
+  loki:
+    image: grafana/loki:3.4.3
+    container_name: android-farm-loki
+    restart: unless-stopped
+    user: "10001:10001"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [-config.file=/etc/loki/loki.yml]
+    volumes:
+      - ${FARM_MONITORING_DIR:-./monitoring}/loki.yml:/etc/loki/loki.yml:ro
+      - loki-data:/loki
+    tmpfs: [/tmp]
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 512
+    networks: [monitoring]
+    labels:
+      - "farm.stack=core"
+      - "farm.role=loki"
+      - "traefik.enable=false"
+
+  promtail:
+    # Reads container stdout/stderr through the read-only Docker socket, like
+    # cAdvisor; internal network only, no published ports.
+    image: grafana/promtail:3.4.3
+    container_name: android-farm-promtail
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command: [-config.file=/etc/promtail/promtail.yml]
+    volumes:
+      - ${FARM_MONITORING_DIR:-./monitoring}/promtail.yml:/etc/promtail/promtail.yml:ro
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      - promtail-positions:/positions
+    tmpfs: [/tmp]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 256
+    networks: [monitoring]
+    depends_on: [loki]
+    labels:
+      - "farm.stack=core"
+      - "farm.role=promtail"
+      - "traefik.enable=false"
+
 networks:
   coolify:
     external: true
@@ -297,6 +368,9 @@ volumes:
   grafana-data:
   grafana-secrets:
   gateway-secrets:
+  alertmanager-data:
+  loki-data:
+  promtail-positions:
 
 secrets:
   farm-http-auth:

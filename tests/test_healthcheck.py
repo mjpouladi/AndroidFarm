@@ -1,8 +1,11 @@
 import json
+import os
 from pathlib import Path
 import subprocess
+import tempfile
 import unittest
 
+from ops import events
 from ops.healthcheck import (RECOVERY_TIMEOUT, Observation, canonical_device, compose_argv,
                              observe, prometheus, reconcile)
 
@@ -12,6 +15,14 @@ def completed(argv, code=0, stdout="", stderr=""):
 
 
 class HealthcheckTests(unittest.TestCase):
+    def setUp(self):
+        # Keep the best-effort event log out of the real host state directory.
+        self.temporary = tempfile.TemporaryDirectory()
+        self.addCleanup(self.temporary.cleanup)
+        Path(self.temporary.name).chmod(0o700)
+        os.environ["ANDROID_FARM_EVENT_LOG"] = str(Path(self.temporary.name) / "events.jsonl")
+        self.addCleanup(os.environ.pop, "ANDROID_FARM_EVENT_LOG", None)
+
     def config(self):
         return {"compose_file": Path("/opt/android-farm/release/docker-compose.farm.yml"),
                 "compose_project": "android-farm-runtime", "compose_env_file": None,
@@ -180,6 +191,61 @@ class HealthcheckTests(unittest.TestCase):
         self.assertNotIn("restart_total", record)
         self.assertNotIn("recovery_failure_total", record)
         self.assertNotIn("next_restart_at", record)
+
+    def test_crashed_android_is_recovered_only_while_the_operator_intent_is_running(self):
+        def runner(argv, timeout=30):
+            if argv[:2] == ["docker", "inspect"]:
+                if argv[-1] == "android-num07":
+                    return completed(argv, stdout=json.dumps([{"State": {"Running": False, "ExitCode": 137,
+                                                                           "OOMKilled": True}}]))
+                return completed(argv, stdout=json.dumps([{"State": {"Running": True}}]))
+            raise AssertionError("a crashed guest has no ADB to probe")
+
+        crashed = observe("num07", runner=runner, clock=lambda: 1000, wants_running=lambda device: True)
+        self.assertEqual((crashed.state, crashed.recovery_component), ("crashed", "android-crashed"))
+        intentional = observe("num07", runner=runner, clock=lambda: 1000, wants_running=lambda device: False)
+        self.assertEqual((intentional.state, intentional.recovery_component), ("stopped", None))
+
+        def clean_exit(argv, timeout=30):
+            if argv[-1] == "android-num07":
+                return completed(argv, stdout=json.dumps([{"State": {"Running": False, "ExitCode": 0}}]))
+            return runner(argv, timeout)
+
+        self.assertEqual(observe("num07", runner=clean_exit, clock=lambda: 1000,
+                                 wants_running=lambda device: True).state, "stopped")
+        self.assertEqual(compose_argv(self.config(), "restart", "android-crashed", "num07")[3:5],
+                         ["recover-crashed", "num07"])
+
+        # First sight already restarts; the cooldown then grows exponentially.
+        notes = []
+        calls = []
+        state = {"schema_version": 1, "devices": {}}
+        actions = reconcile([crashed], self.config(), state, clock=lambda: 1000,
+                            runner=lambda argv, timeout: calls.append(argv) or completed(argv),
+                            notify=lambda kind, device, detail=None: notes.append((kind, device)))
+        self.assertTrue(actions[0]["succeeded"])
+        self.assertEqual(calls[0][3:5], ["recover-crashed", "num07"])
+        self.assertEqual(state["devices"]["num07"]["next_restart_at"], 1300)
+        self.assertEqual([kind for kind, _ in notes], ["device-crashed", "recovery-started", "recovery-succeeded"])
+        state["devices"]["num07"]["consecutive_failures"] = 3
+        state["devices"]["num07"]["next_restart_at"] = 0
+        reconcile([crashed], self.config(), state, clock=lambda: 2000,
+                  runner=lambda argv, timeout: completed(argv),
+                  notify=lambda *args, **kwargs: None)
+        self.assertEqual(state["devices"]["num07"]["next_restart_at"], 2000 + 300 * 2 ** 3)
+        self.assertIn('android_farm_android_crashed{device="num07"} 1', prometheus([crashed], state))
+        self.assertIn('android_farm_android_crashed{device="num07"} 0', prometheus([intentional], state))
+
+    def test_default_notifier_writes_the_shared_event_log(self):
+        item = Observation("num08", "stalled", True, True, True, False, False, True, .4, "android")
+        state = {"schema_version": 1, "devices": {"num08": {"consecutive_failures": 1, "last_state": "healthy"}}}
+        reconcile([item], self.config(), state, runner=lambda argv, timeout: completed(argv, code=1),
+                  clock=lambda: 3000)
+        kinds = [event["kind"] for event in events.recent(10)]
+        self.assertEqual(kinds, ["recovery-failed", "recovery-started", "device-stalled"])
+        healthy = Observation("num08", "healthy", True, True, True, True, True, True, .1)
+        reconcile([healthy], self.config(), state, clock=lambda: 3100)
+        self.assertEqual(events.recent(1)[0]["kind"], "device-ready")
 
     def test_missing_screen_is_reported_without_unsafe_recreation(self):
         def runner(argv, timeout=30):

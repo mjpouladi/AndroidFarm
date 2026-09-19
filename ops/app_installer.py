@@ -3,13 +3,12 @@ import hashlib
 import re
 from pathlib import Path
 import subprocess
-import time
-
-from .device_ids import device_index, network_plan
 
 try:
+    from . import adb_helper
     from .secureio import read_private_json, require_private_file
 except ImportError:  # direct host execution during recovery only
+    import adb_helper
     from secureio import read_private_json, require_private_file
 
 ALLOWED_GRANTS = {
@@ -81,18 +80,11 @@ def install(device, artifact, permissions=(), activity=None, timeout=300):
         raise ValueError('unsupported runtime permission: ' + ', '.join(sorted(invalid)))
     if activity and not ACTIVITY_RE.fullmatch(activity):
         raise ValueError('invalid Android activity component')
-    target = f"{network_plan(device_index(device, aliases=False))['proxy_control_ip']}:5555"
-    adb = ['docker', 'exec', f'screen-{device}', 'adb', '-s', target]
-    deadline = time.monotonic() + timeout
-    while time.monotonic() < deadline:
-        try:
-            if output(*adb, 'shell', 'getprop', 'sys.boot_completed', timeout=20).strip() == '1':
-                break
-        except (subprocess.CalledProcessError, subprocess.TimeoutExpired):
-            pass
-        time.sleep(3)
-    else:
-        raise RuntimeError('Android boot timed out before APK installation')
+    adb = adb_helper.command(device)
+    try:
+        adb_helper.wait_for_boot(device, timeout, runner=output)
+    except RuntimeError:
+        raise RuntimeError('Android boot timed out before APK installation') from None
     serial = output(*adb, 'shell', 'getprop', 'ro.serialno', timeout=20).strip()
     if serial != f'farm-{device}':
         raise RuntimeError('device identity mismatch before APK installation')

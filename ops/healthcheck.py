@@ -23,9 +23,12 @@ import time
 from typing import Callable
 
 try:
+    from . import desired_state, events
     from .device_ids import device_index, network_plan
     from .secureio import read_private_json, require_private_file, require_trusted_release_file
 except ImportError:
+    import desired_state
+    import events
     from device_ids import device_index, network_plan
     from secureio import read_private_json, require_private_file, require_trusted_release_file
 
@@ -81,15 +84,19 @@ def load_control_config(path: Path) -> dict:
             "proxy_store_dir": Path(value.get("proxy_store_dir", "/etc/android-farm/proxies"))}
 
 
+RECOVERY_ACTIONS = {"android": "recover", "screen": "recover-screen", "android-crashed": "recover-crashed"}
+
+
 def compose_argv(config: dict, action: str, component: str, device: str) -> list[str]:
-    if action != "restart" or component not in {"android", "screen"}:
+    if action != "restart" or component not in RECOVERY_ACTIONS:
         raise ValueError("unsupported recovery operation")
     canonical_device(device)
     # Android recovery must traverse farmctl's full identity/egress attestation
-    # path. Screen recovery starts only the already-existing container. Both
-    # actions re-check that Android is still active while holding the shared
-    # lifecycle lock, closing the observation-to-restart race.
-    recovery_action = "recover" if component == "android" else "recover-screen"
+    # path. Screen recovery starts only the already-existing container. A
+    # crashed Android (exited while the operator intent is "running") goes
+    # through the same attested start. Every action re-checks the live state
+    # while holding the shared lifecycle lock, closing the observation race.
+    recovery_action = RECOVERY_ACTIONS[component]
     argv = [sys.executable, "-m", "ops.farmctl", recovery_action, device]
     if config.get("compose_env_file"):
         argv.extend(["--env-file", str(config["compose_env_file"])])
@@ -161,11 +168,23 @@ class Observation:
     probe_failed: bool = False
 
 
+def _crashed(item: dict | None) -> bool:
+    """An existing, exited Android container that did not stop cleanly."""
+    if not item:
+        return False
+    state = item.get("State") or {}
+    if state.get("Running") or state.get("Paused") or state.get("Restarting"):
+        return False
+    exit_code = state.get("ExitCode")
+    return bool(state.get("OOMKilled")) or (isinstance(exit_code, int) and exit_code != 0)
+
+
 def observe(device: str, runner: Callable = run, clock: Callable[[], float] = time.time,
-            boot_grace: int = 240) -> Observation:
+            boot_grace: int = 240, wants_running: Callable[[str], bool] | None = None) -> Observation:
     canonical_device(device)
     try:
-        return _observe(device, runner, clock, boot_grace)
+        return _observe(device, runner, clock, boot_grace,
+                        wants_running if wants_running is not None else desired_state.wants_running)
     except (OSError, subprocess.SubprocessError, RuntimeError):
         # Docker itself is unavailable: do not infer an intentional stop or
         # attempt recovery from an unknown container state.
@@ -174,7 +193,7 @@ def observe(device: str, runner: Callable = run, clock: Callable[[], float] = ti
 
 
 def _observe(device: str, runner: Callable, clock: Callable[[], float],
-             boot_grace: int) -> Observation:
+             boot_grace: int, wants_running: Callable[[str], bool]) -> Observation:
     device = canonical_device(device)
     now = clock()
     android = _inspect(f"android-{device}", runner)
@@ -182,6 +201,11 @@ def _observe(device: str, runner: Callable, clock: Callable[[], float],
     screen = _inspect(f"screen-{device}", runner)
     android_running, proxy_running, screen_running = map(_running, (android, proxy, screen))
     if not android_running:
+        # A stop is intentional unless the last recorded intent was a successful
+        # start and the container itself exited abnormally: that is a crash.
+        if _crashed(android) and wants_running(device):
+            return Observation(device, "crashed", False, screen_running, proxy_running,
+                               False, False, False, 0.0, "android-crashed")
         return Observation(device, "stopped", False, screen_running, proxy_running,
                            False, False, False, 0.0)
 
@@ -272,10 +296,13 @@ def prometheus(observations: list[Observation], state: dict, run_deadline: int =
         f"android_farm_health_run_deadline_seconds {run_deadline}",
         "# HELP android_farm_probe_failed Whether Docker inspection failed and device state is unknown.",
         "# TYPE android_farm_probe_failed gauge",
+        "# HELP android_farm_android_crashed Whether the Android container exited abnormally while the operator intent is running.",
+        "# TYPE android_farm_android_crashed gauge",
     ]
     for item in observations:
         label = f'device="{item.device}"'
         lines.append(f"android_farm_probe_failed{{{label}}} {1 if item.probe_failed else 0}")
+        lines.append(f"android_farm_android_crashed{{{label}}} {1 if item.state == 'crashed' else 0}")
         lines.append(f"android_farm_adb_healthy{{{label}}} {1 if item.adb_healthy and item.boot_completed else 0}")
         lines.append(f"android_farm_android_running{{{label}}} {1 if item.android_running else 0}")
         lines.append(f"android_farm_screen_running{{{label}}} {1 if item.screen_running else 0}")
@@ -291,7 +318,8 @@ def prometheus(observations: list[Observation], state: dict, run_deadline: int =
 def reconcile(observations: list[Observation], config: dict, state: dict, runner: Callable = run,
               clock: Callable[[], float] = time.time, dry_run: bool = False,
               cooldown_base: int = 300, cooldown_max: int = 3600,
-              restart_limit: int = 1, failure_threshold: int = 2) -> list[dict]:
+              restart_limit: int = 1, failure_threshold: int = 2,
+              notify: Callable = events.note) -> list[dict]:
     now = int(clock())
     actions = []
     restarted = 0
@@ -300,6 +328,8 @@ def reconcile(observations: list[Observation], config: dict, state: dict, runner
         previous = devices.get(item.device, {})
         record = dict(previous)
         if item.state == "healthy":
+            if previous.get("last_state") not in (None, "healthy"):
+                notify("device-ready", item.device, f"healthy after {previous.get('last_state')}")
             record.update(consecutive_failures=0, last_state=item.state, checked_at=now)
         elif item.state in {"stopped", "booting", "proxy_unhealthy", "probe_failed"}:
             # These states are not evidence of a repeated ADB/screen stall.
@@ -308,9 +338,17 @@ def reconcile(observations: list[Observation], config: dict, state: dict, runner
             record.update(consecutive_failures=0, last_state=item.state, checked_at=now)
         else:
             failures = int(previous.get("consecutive_failures", 0)) + 1
+            if previous.get("last_state") != item.state:
+                notify("device-crashed" if item.state == "crashed" else "device-stalled", item.device,
+                       "container exited abnormally" if item.state == "crashed" else
+                       f"{item.recovery_component or 'device'} unresponsive")
             record.update(consecutive_failures=failures, last_state=item.state, checked_at=now)
             allowed_at = int(previous.get("next_restart_at", 0))
-            threshold = 1 if item.recovery_component == "screen" and not item.screen_running else failure_threshold
+            # A crash and a stopped-but-existing screen are restarted on first
+            # sight; ADB stalls must repeat before recovery. The exponential
+            # cooldown below applies to every kind (300 s, 600 s, ... 3600 s).
+            immediate = item.state == "crashed" or (item.recovery_component == "screen" and not item.screen_running)
+            threshold = 1 if immediate else failure_threshold
             if (item.recovery_component and failures >= threshold and now >= allowed_at and
                     restarted < restart_limit):
                 action = "restart"
@@ -320,6 +358,7 @@ def reconcile(observations: list[Observation], config: dict, state: dict, runner
                 restarted += 1
                 if not dry_run:
                     delay = min(cooldown_max, cooldown_base * (2 ** min(failures - 1, 8)))
+                    notify("recovery-started", item.device, f"{item.recovery_component} attempt {failures}")
                     try:
                         result = runner(argv, timeout=RECOVERY_TIMEOUT)
                         succeeded = result.returncode == 0
@@ -332,14 +371,17 @@ def reconcile(observations: list[Observation], config: dict, state: dict, runner
                     if skipped:
                         # The locked farmctl re-check observed an intentional
                         # stop or another recovery already completed the work.
+                        notify("recovery-skipped", item.device, "state changed after observation")
                         record.update(consecutive_failures=0,
                                       last_state="changed_after_observation")
                     elif succeeded:
+                        notify("recovery-succeeded", item.device, f"next attempt not before {delay}s")
                         record["last_restart_at"] = now
                         record["next_restart_at"] = now + delay
                         record["restart_total"] = int(previous.get("restart_total", 0)) + 1
                         record.pop("last_recovery_error", None)
                     else:
+                        notify("recovery-failed", item.device, f"cooldown {delay}s")
                         record["last_restart_at"] = now
                         record["next_restart_at"] = now + delay
                         record["recovery_failure_total"] = int(

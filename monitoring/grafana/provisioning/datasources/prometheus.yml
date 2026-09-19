@@ -7,3 +7,20 @@ datasources:
     url: http://prometheus:9090
     isDefault: true
     editable: false
+  - name: Alertmanager
+    uid: android-farm-alertmanager
+    type: alertmanager
+    access: proxy
+    url: http://alertmanager:9093
+    editable: false
+    jsonData:
+      implementation: prometheus
+      handleGrafanaManagedAlerts: false
+  - name: Loki
+    uid: android-farm-loki
+    type: loki
+    access: proxy
+    url: http://loki:3100
+    editable: false
+    jsonData:
+      maxLines: 1000

@@ -5,6 +5,13 @@ global:
 rule_files:
   - /etc/prometheus/alerts.yml
 
+# Alerts leave Prometheus only towards the internal Alertmanager; Grafana's
+# Alertmanager datasource shows them and alertmanager.yml holds the receivers.
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets: [alertmanager:9093]
+
 scrape_configs:
   - job_name: prometheus
     static_configs:

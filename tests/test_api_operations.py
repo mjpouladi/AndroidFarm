@@ -23,6 +23,8 @@ class ApiOperationsTests(unittest.TestCase):
         self.temporary = tempfile.TemporaryDirectory()
         self.addCleanup(self.temporary.cleanup)
         self.root = Path(self.temporary.name)
+        os.environ['ANDROID_FARM_EVENT_LOG'] = str(self.root / 'events.jsonl')
+        self.addCleanup(os.environ.pop, 'ANDROID_FARM_EVENT_LOG', None)
         self.config = Config(self.root / 'compose.yml', None, 'farm', self.root / 'secrets',
                              self.root / 'backups', 'https://farm.example.com',
                              state_dir=self.root, apk_trust_file=self.root / 'trust.json',
@@ -278,6 +280,21 @@ class ApiOperationsTests(unittest.TestCase):
         self.assertEqual(rows['num02']['egress'], 'direct')
         self.assertIsNone(rows['num02']['proxy'])
         self.assertIsNone(rows['num02']['proxy_id'])
+
+    def test_snapshot_carries_recent_device_events_from_the_shared_log(self):
+        from ops import events
+        events.record('device-crashed', 'num01', 'exit code 137')
+        events.record('recovery-succeeded', 'num01', 'next attempt not before 300s')
+        self.app_catalog()
+        store = Mock()
+        store.list.return_value = []
+        with patch.object(self.ops, '_store', return_value=store), \
+                patch('services.api.operations.resources.probe', return_value={'capacity': 10}), \
+                patch('services.api.operations.provisioner.bulk_managed_inspections', return_value={}):
+            result = self.ops.snapshot()
+        self.assertEqual([item['kind'] for item in result['events']], ['recovery-succeeded', 'device-crashed'])
+        self.assertEqual(result['events'][1]['device'], 'num01')
+        self.assertNotIn('events', [error['component'] for error in result['errors']])
 
     def test_failed_provision_also_removes_private_request(self):
         self.app_catalog()

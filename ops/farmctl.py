@@ -21,6 +21,7 @@ try:
     from .device_profiles import (PROFILE_DIGEST_LABEL, REDROID_IMAGES, apply_profile,
                                   load as load_device_profile, parse_cpus, parse_memory_bytes)
     from .proxy_store import ProxyStore
+    from . import adb_helper, desired_state, events
 except ImportError:
     from resources import probe, admission, local_docker
     from account_policy import assert_not_held
@@ -31,8 +32,32 @@ except ImportError:
     from device_profiles import (PROFILE_DIGEST_LABEL, REDROID_IMAGES, apply_profile,
                                   load as load_device_profile, parse_cpus, parse_memory_bytes)
     from proxy_store import ProxyStore
+    import adb_helper
+    import desired_state
+    import events
 
 DATA_ROOT = Path('/opt/farm/data/instances')
+
+
+def _record_intent(device, running):
+    """Persist operator intent best-effort; a missing state file never blocks lifecycle work."""
+    try:
+        desired_state.set_running(device, running)
+    except (OSError, RuntimeError, ValueError) as exc:
+        print(f'desired state unavailable: {exc}', file=sys.stderr)
+
+
+def crashed_and_wanted(device):
+    """True when Android exited abnormally and the last recorded intent is running."""
+    android = inspect(f'android-{device}')
+    if not android:
+        return False
+    state = android.get('State') or {}
+    if state.get('Running') or state.get('Paused') or state.get('Restarting'):
+        return False
+    exit_code = state.get('ExitCode')
+    crashed = bool(state.get('OOMKilled')) or (isinstance(exit_code, int) and exit_code != 0)
+    return crashed and desired_state.wants_running(device)
 
 
 def run(*args, capture=False, timeout=300):
@@ -170,6 +195,10 @@ def stop(device):
                 if state['State'].get('Paused'):
                     run('docker', 'unpause', name, timeout=30)
                 run('docker', 'stop', '-t', '60', name)
+    # Every guarded stop clears the running intent, so the health controller
+    # never "recovers" a device an operator, a hold or a failed start stopped.
+    _record_intent(device, False)
+    events.note('device-stopped', device)
     if guard_error:
         raise RuntimeError('host egress guard update failed; containers were still stopped') from guard_error
 
@@ -451,7 +480,7 @@ def _sha256(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=['start', 'recover', 'recover-screen', 'stop',
+    p.add_argument('action', choices=['start', 'recover', 'recover-crashed', 'recover-screen', 'stop',
                                       'check', 'ip', 'backup', 'status'])
     p.add_argument('device', nargs='?')
     p.add_argument('--compose', default='docker-compose.farm.yml')
@@ -493,9 +522,14 @@ def main():
             # a screen after an operator intentionally stopped Android.  This
             # decision and the start happen under the same lifecycle lock.
             recover_existing_screen(d)
-        elif args.action in {'start', 'recover'}:
+        elif args.action in {'start', 'recover', 'recover-crashed'}:
             if args.action == 'recover' and not recovery_android_is_active(d):
                 print(f'ANDROID_FARM_RECOVERY_SKIPPED {d} android-not-running')
+                return
+            if args.action == 'recover-crashed' and not crashed_and_wanted(d):
+                # Re-checked under the lifecycle lock: an operator stop, a hold
+                # or a completed recovery since the observation wins.
+                print(f'ANDROID_FARM_RECOVERY_SKIPPED {d} not-crashed-or-not-wanted')
                 return
             assert_not_held(d)
             state = inventory.load()
@@ -597,6 +631,15 @@ def main():
                 android_ip = android_egress_ip(d)
                 if android_ip != proxy_ip:
                     raise RuntimeError('Android-shell egress IP mismatch; device returned to stopped state')
+                if expected_profile is not None and (expected_profile.timezone or expected_profile.locale):
+                    # Timezone/locale are persisted guest properties; unchanged
+                    # values are only verified, a change restarts the framework.
+                    environment = adb_helper.apply_environment(d, expected_profile)
+                    if environment['applied']:
+                        print(f"{d} environment applied: {', '.join(sorted(environment['applied']))}")
+                        events.note('environment-applied', d, ', '.join(sorted(environment['applied'])))
+                _record_intent(d, True)
+                events.note('device-started', d, 'attested start' if args.action == 'start' else f'{args.action} recovery')
                 print(f'{d} started; identity and egress verified. Use check and browser acceptance tests.')
             except BaseException:
                 if android_paused:

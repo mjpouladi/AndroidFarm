@@ -27,11 +27,12 @@ sudo bash install-android-farm.sh --domain commex-box.com --admin-user mjpouladi
 | installer میزبان | پیاده‌سازی و آزمون واحد | `plan/apply/doctor`، release تغییرناپذیر مبتنی بر محتوا، نصب Docker و ابزارهای لازم، Binder و تنظیم Basic Auth؛ دو مرحله را راه‌انداز ساده هماهنگ می‌کند |
 | کاتالوگ و ظرفیت | پیاده‌سازی و آزمون واحد | ظرفیت فعال بر اساس منابع زنده و ظرفیت کاتالوگ بر اساس دیسک؛ کاتالوگ نصب‌شده خودکار کوچک نمی‌شود |
 | lifecycle دستگاه | پیاده‌سازی و آزمون واحد | start/stop/check/check-ip/status/hold/release/backup با حفظ `/data` و کنترل topology Compose |
-| شبکه و پراکسی | پیاده‌سازی و آزمون واحد | یک upstream اختصاصی HTTP CONNECT یا SOCKS5 برای هر دستگاه، gateway مبتنی بر sing-box، namespace مشترک Android و proxy و guard مستقل میزبان |
-| پروفایل QA | پیاده‌سازی و آزمون واحد | Android 11/12، resolution، DPI، FPS، locale و نام شفاف QA؛ جعل مدل تجاری یا شناسهٔ سخت‌افزاری رد می‌شود |
+| شبکه و پراکسی | پیاده‌سازی و آزمون واحد | یک upstream اختصاصی HTTP CONNECT یا SOCKS5 برای هر دستگاه، gateway مبتنی بر sing-box، namespace مشترک Android و proxy و guard مستقل میزبان؛ پراکسی اختیاری است و حالت «خروجی مستقیم میزبان» همان namespace، ADB و guard را بدون tunnel نگه می‌دارد |
+| پروفایل QA | پیاده‌سازی و آزمون واحد | Android 11/12/13، resolution، DPI، FPS، locale، منطقهٔ زمانی (IANA) و سقف CPU/RAM هر دستگاه در محدودهٔ بودجهٔ ممیزی‌شده؛ جعل مدل تجاری یا شناسهٔ سخت‌افزاری رد می‌شود |
+| مخزن APK | پیاده‌سازی و آزمون واحد | بارگذاری APK از کنسول یا `apps import`، ذخیرهٔ content-addressed خصوصی، بررسی aapt/apksigner، pin امضاکننده در اولین ثبت و استفادهٔ مجدد در هر نصب بعدی |
 | صف Redis Worker | پیاده‌سازی و آزمون واحد | صف قابل‌بازیابی، idempotency، lease، retry/backoff، dead-letter و lock مجزای هر دستگاه؛ فقط فرمان‌های allowlist |
-| بازیابی سلامت ADB | پیاده‌سازی و آزمون واحد | مشاهدهٔ ADB/boot/screen/proxy، restart محدود، boot grace و cooldown نمایی؛ دستگاه خاموش را روشن نمی‌کند |
-| Prometheus/Grafana | پیکربندی آماده | CPU، uptime، سلامت ADB، latency و سلامت proxy و تعداد recovery؛ باید روی سرور مقصد scrape و dashboard تأیید شود |
+| بازیابی سلامت ADB | پیاده‌سازی و آزمون واحد | مشاهدهٔ ADB/boot/screen/proxy، restart محدود، boot grace و cooldown نمایی؛ کانتینر کرش‌کرده فقط وقتی قصد ثبت‌شدهٔ اپراتور «روشن» باشد بازیابی می‌شود و دستگاه عمداً خاموش‌شده روشن نمی‌شود؛ رویدادها در لاگ پایدار ثبت می‌شوند |
+| Prometheus/Grafana | پیکربندی آماده | CPU، uptime، سلامت ADB، latency و سلامت proxy، تعداد recovery و کرش؛ Alertmanager داخلی و Loki/Promtail برای لاگ هر دستگاه؛ باید روی سرور مقصد scrape و dashboard تأیید شود |
 | Ansible | پیکربندی آماده | API وب، Redis محلی، worker، timer سلامت، پروفایل‌های دستگاه و تشخیص drift؛ اجرا به‌صورت `serial: 1` و بدون حذف data |
 | کنسول وب | متصل به کنترل‌پلین میزبان | وضعیت و منابع واقعی، پراکسی، دستگاه، نصب APK تأییدشده و درخواست‌های پایدار؛ خطای backend آشکار است و با دادهٔ نمونه جایگزین نمی‌شود |
 | مدیریت اطلاعات ورود | پیاده‌سازی و آزمون واحد | تغییر حساب وب و مدیر واقعی Grafana، جداگانه یا مشترک، با تأیید رمز فعلی و بازگردانی در خطا؛ رمز اتصال پراکسی بدون تغییر هویت اتصال |
@@ -295,7 +296,7 @@ sudo device-provisioner status
 برای انجام همان pilot از CLI:
 
 1. مطابق **بخش ۷**، یک upstream HTTP CONNECT/SOCKS5 مجاز را با `proxy add` ثبت و با `proxy test` تأیید کنید. IP عمومی endpoint، port، username/password و IP خروجی sticky واقعی لازم‌اند؛ نصب‌کننده اشتراک پراکسی نمی‌خرد.
-2. مطابق **بخش ۸**، پیش از اولین provisioning پروفایل `/etc/android-farm/device-profiles/num01.json` را نصب کنید. از مدل شفاف QA، Android 11/12، resolution، DPI و locale همان سناریوی آزمایش استفاده کنید.
+2. مطابق **بخش ۸**، پیش از اولین provisioning پروفایل `/etc/android-farm/device-profiles/num01.json` را نصب کنید. از مدل شفاف QA، Android 11/12/13، resolution، DPI، locale، timezone و در صورت نیاز سقف منابع همان سناریوی آزمایش استفاده کنید. پراکسی اختیاری است (بخش ۷) و APK را می‌توانید از کنسول در مخزن ثبت کنید (بخش ۹).
 3. مطابق **بخش ۹**، APK مورداعتماد خود و policy signer را آماده و request خصوصی را با `proxy_id` همین پراکسی تکمیل کنید. نمونهٔ JSON آن بخش schema واقعی CLI است؛ مقدارهای نمونه را به‌جای اطلاعات واقعی استفاده نکنید.
 4. `sudo device-provisioner up --request /root/farm-input/device-request.json` را اجرا کنید. این فرمان نخستین ID آزاد را می‌گیرد؛ روی نصب تازه `num01` است. برای دستگاه تخصیص‌نیافته مستقیماً `up --id num01` نزنید.
 
@@ -573,21 +574,42 @@ rotation برای proxy تخصیص‌یافته ابتدا device را متوق�
 
 در هر start، registry دوباره بررسی می‌شود: proxy باید enabled، به همان device تخصیص‌یافته و credential نصب‌شده دقیقاً با registry یکسان باشد. `unassign` و `delete` برای proxy متعلق به device پایدار رد می‌شوند. مهاجرت device به proxy دیگر هنوز نیازمند workflow بازبینی‌شدهٔ جداگانه است؛ `delete` فقط برای proxy هرگز تخصیص‌نیافته مناسب است.
 
-## ۸. پروفایل شفاف QA برای هر دستگاه
+### پراکسی اختیاری: خروجی مستقیم میزبان
 
-پروفایل خصوصی `/etc/android-farm/device-profiles/numXX.json` می‌تواند نسخهٔ Android، display و locale را تعیین کند:
+پراکسی الزامی نیست. اگر سناریوی آزمون به IP ثابت اختصاصی نیاز ندارد، دستگاه را با `egress: "direct"` بسازید؛ در کنسول گزینهٔ «بدون پراکسی — خروجی مستقیم میزبان» همین کار را می‌کند و وقتی هیچ پراکسی آزادی ثبت نشده باشد پیش‌فرض است. توپولوژی تغییر نمی‌کند: sidecar همان namespace شبکهٔ خصوصی، درگاه ADB روی loopback و سیاست ورودی را نگه می‌دارد، اما sing-box و redirect شفاف اجرا نمی‌شود و ترافیک با IP خود سرور خارج می‌شود. guard میزبان در حالت باز عبور می‌دهد و با hold یا stop به DROP کامل تبدیل می‌شود، پس kill-switch همچنان کار می‌کند.
 
 ```json
 {
-  "schema_version": 1,
-  "android_version": 12,
+  "phone": "+989000000001",
+  "owner_authorized": true,
+  "egress": "direct",
+  "apk_path": "/var/lib/android-farm/apk-repository/<sha256>.apk",
+  "apk_sha256": "<sha256>",
+  "apk_package": "com.whatsapp"
+}
+```
+
+فقط یکی از `proxy_id`، `proxy_file` قدیمی یا `egress: "direct"` مجاز است. در حالت مستقیم `expected_egress_ip` اختیاری است: اگر بدهید همان IP pin می‌شود، وگرنه هر start فقط بررسی می‌کند IP خروجی namespace و shell Android یکسان و عمومی باشند و `check-ip` همان مقایسه را انجام می‌دهد. secret نصب‌شدهٔ این دستگاه دقیقاً `{"type": "direct"}` است و هر فیلد upstream اضافه رد می‌شود.
+
+## ۸. پروفایل شفاف QA برای هر دستگاه
+
+پروفایل خصوصی `/etc/android-farm/device-profiles/numXX.json` می‌تواند نسخهٔ Android، display، locale، منطقهٔ زمانی و سقف منابع را تعیین کند. این فایل همان نقش متغیرهای `DEVICE_ID`/`ANDROID_VERSION`/`TIMEZONE`/`DPI`/`CPU_LIMIT`/`RAM_LIMIT` را دارد؛ شناسهٔ دستگاه از نام فایل و مسیر شبکه از `proxy_id` یا حالت مستقیم request می‌آید:
+
+```json
+{
+  "schema_version": 2,
+  "android_version": 13,
   "resolution": {"width": 720, "height": 1280},
   "dpi": 240,
   "fps": 20,
   "device_model": "Android Farm QA Phone HD",
-  "locale": "fa-IR"
+  "locale": "fa-IR",
+  "timezone": "Asia/Tehran",
+  "resources": {"cpus": 2, "memory_gib": 3}
 }
 ```
+
+`timezone` باید نام IANA موجود در tzdata میزبان باشد و همراه `locale` پس از boot از راه ADB به‌صورت property پایدار (`persist.sys.*`) اعمال و با `getprop` تأیید می‌شود؛ مقدار بدون تغییر در startهای بعدی فقط بررسی می‌شود و تغییر واقعی یک‌بار framework اندروید (zygote) را restart می‌کند، نه کانتینر را. `resources` فقط سقف کانتینر Android را پایین می‌آورد: `cpus` بین ۱ و ۴ و `memory_gib` بین ۲ و ۴ با گام ۰٫۲۵؛ بودجهٔ ممیزی‌شدهٔ هر دستگاه در مدل ظرفیت تغییر نمی‌کند، بنابراین admission همچنان صادق است. schema 1 بدون این دو فیلد همچنان پذیرفته می‌شود و digest قبلی خود را حفظ می‌کند.
 
 ```bash
 sudo install -d -m 0700 /etc/android-farm/device-profiles
@@ -596,7 +618,7 @@ sudo install -m 0600 /opt/android-farm/source/installer/device-profile.example.j
 sudoedit /etc/android-farm/device-profiles/num01.json
 ```
 
-Android 11 و 12 پشتیبانی می‌شوند. validator محدودهٔ resolution/DPI/FPS و locale را کنترل می‌کند و نام مدل باید آشکارا شامل QA/Test/Redroid/Virtual/Emulator/Lab باشد؛ نام‌های تجاری و فیلدهای IMEI/serial/android_id پذیرفته نمی‌شوند. هنگام start، profile به override خصوصی Compose تبدیل، digest آن label و screen نیز با همان هندسه تنظیم می‌شود. profile را پیش از نخستین provisioning دستگاه نصب کنید. پس از ساخته‌شدن baseline، تغییر `device_model` یا نسخهٔ Android می‌تواند به‌درستی به‌عنوان drift هویت رد شود؛ resolution/DPI/FPS/locale را نیز فقط در maintenance window و پس از backup و review تغییر دهید. Ansible drift نمونهٔ فعال را گزارش می‌کند و خودکار recreate نمی‌کند.
+Android 11، 12 و 13 پشتیبانی می‌شوند. validator محدودهٔ resolution/DPI/FPS، locale، timezone و resources را کنترل می‌کند و نام مدل باید آشکارا شامل QA/Test/Redroid/Virtual/Emulator/Lab باشد؛ نام‌های تجاری و فیلدهای IMEI/serial/android_id پذیرفته نمی‌شوند. هنگام start، profile به override خصوصی Compose تبدیل، digest آن label و screen نیز با همان هندسه تنظیم می‌شود. profile را پیش از نخستین provisioning دستگاه نصب کنید. پس از ساخته‌شدن baseline، تغییر `device_model` یا نسخهٔ Android می‌تواند به‌درستی به‌عنوان drift هویت رد شود؛ resolution/DPI/FPS/locale را نیز فقط در maintenance window و پس از backup و review تغییر دهید. Ansible drift نمونهٔ فعال را گزارش می‌کند و خودکار recreate نمی‌کند.
 
 برای review یک نمونهٔ مستقل بسازید؛ این خروجی جای Compose مدیریت‌شده را نمی‌گیرد:
 
@@ -611,7 +633,26 @@ sudo device-provisioner render \
 
 ## ۹. APK عمومی/داخلیِ تأییدشده و تخصیص دستگاه
 
-### معرفی برنامهٔ قابل انتخاب در پنل
+### مخزن APK: یک‌بار بارگذاری، نصب برای همهٔ دستگاه‌ها (مثال WhatsApp)
+
+سریع‌ترین مسیر، مخزن خصوصی APK است. فایل رسمی برنامه را از منبع ناشر بگیرید (برای WhatsApp از سایت رسمی آن) و یکی از دو راه زیر را انتخاب کنید:
+
+- **کنسول:** «تنظیمات فارم ← مخزن APK» فایل را انتخاب، نام نمایشی و مجوزهای زمان اجرا را تعیین و «بارگذاری و ثبت» را بزنید. فایل با همان احراز هویت Basic به API میزبان می‌رود، در فضای خصوصی staging می‌ماند و بررسی و ثبت آن به‌صورت یک درخواست در صف عملیات اجرا می‌شود؛ سقف حجم ۲۵۶ مگابایت است.
+- **CLI روی میزبان:**
+
+```bash
+sudo install -d -m 0700 /root/farm-input
+sudo install -m 0600 ~/Downloads/WhatsApp.apk /root/farm-input/WhatsApp.apk
+sudo device-provisioner apps import --apk /root/farm-input/WhatsApp.apk --label "WhatsApp" \
+  --grant android.permission.CAMERA --grant android.permission.READ_CONTACTS --grant android.permission.RECORD_AUDIO
+sudo device-provisioner apps list
+```
+
+در هر دو مسیر میزبان فایل را به `/var/lib/android-farm/apk-repository/<sha256>.apk` (root و `0600`) کپی می‌کند، با `aapt` نام package، نسخه و activity و با `apksigner` گواهی امضاکننده را می‌خواند، رکورد را در `/etc/android-farm/apps.json` ثبت یا در جای همان شناسه به‌روز می‌کند و امضاکننده را در `/etc/android-farm/apk-trust.json` pin می‌کند. شناسهٔ پیش‌فرض از package مشتق می‌شود (`com.whatsapp` ← `whatsapp`). از این پس فرم «افزودن دستگاه» همین برنامه را نشان می‌دهد و هر provisioning جدید همان فایل را نصب می‌کند؛ hash و امضا در لحظهٔ نصب دوباره بررسی می‌شوند.
+
+بارگذاری مجدد همان بایت‌ها بی‌اثر است. نسخهٔ جدید همان package رکورد را در جا جایگزین و فایل قدیمی بدون ارجاع را حذف می‌کند. اگر امضاکنندهٔ نسخهٔ جدید با گواهی pin‌شده فرق داشته باشد، ثبت رد می‌شود؛ فقط پس از تطبیق fingerprint با منبع ناشر، گزینهٔ «تغییر امضاکننده پذیرفته شود» در کنسول یا `--allow-signer-change` در CLI را به‌کار ببرید. حذف با `apps remove --id whatsapp` یا دکمهٔ سطل زباله در کنسول انجام می‌شود و دستگاه‌های موجود را تغییر نمی‌دهد.
+
+### معرفی برنامهٔ قابل انتخاب در پنل (مسیر دستی)
 
 پیام «فهرست برنامه‌ها نیاز به آماده‌سازی دارد» در نصب تازه طبیعی است: هنوز برنامه‌ای را برای نصب تأیید نکرده‌اید. خالی یا ساخته‌نشدن `/etc/android-farm/apps.json` اختلال API نیست و مانع مدیریت سایر بخش‌های فارم نمی‌شود؛ فقط ساخت دستگاه همراه با نصب برنامه تا ثبت یک APK قابل استفاده انجام نمی‌شود. اگر نسخهٔ قبلی پنل پیام انگلیسی `no approved application catalog` نشان می‌دهد، منظور همین مرحلهٔ آماده‌سازی است. فهرست خراب یا دارای مجوز ناامن همچنان خطا محسوب می‌شود و باید اصلاح شود.
 
@@ -721,11 +762,14 @@ sudo device-provisioner status
 sudo device-provisioner status --json
 sudo docker stats android-num01 proxy-num01 screen-num01
 
+# راه‌اندازی مجدد: stop محافظت‌شده و سپس همان start تأییدشده (هرگز docker restart خام)
+sudo device-provisioner restart --id num01
+
 # پایان کار؛ /data و inventory حفظ می‌شود
 sudo device-provisioner down --id num01
 ```
 
-ترتیب start عمداً fail-closed است: proxy بدون Android بالا می‌آید و IP آن بررسی می‌شود؛ guard بسته می‌شود؛ Android و screen boot و baseline بررسی می‌شوند؛ Android موقت pause، proxy دوباره آزمون و سپس IP shell Android با IP مصوب مقایسه می‌شود. هر mismatch باعث stop می‌شود. `check-ip` هنگام تغییر IP یک hold پایدار ثبت و device را متوقف می‌کند.
+`restart` در کنسول (دکمهٔ «راه‌اندازی مجدد» در جزئیات دستگاه)، در API و در Worker با همان مسیر اجرا می‌شود. ترتیب start عمداً fail-closed است: proxy بدون Android بالا می‌آید و IP آن بررسی می‌شود؛ guard بسته می‌شود؛ Android و screen boot و baseline بررسی می‌شوند؛ Android موقت pause، proxy دوباره آزمون و سپس IP shell Android با IP مصوب مقایسه می‌شود. هر mismatch باعث stop می‌شود. `check-ip` هنگام تغییر IP یک hold پایدار ثبت و device را متوقف می‌کند.
 
 پیش از هر start محافظت‌شده، imageهای محلی `proxy` و `screen` صریحاً از Dockerfileهای release immutable فعال build می‌شوند تا tag محلی قدیمی پس از upgrade بی‌صدا reuse نشود. در start اول یا پس از upgrade این مرحله می‌تواند تا چند دقیقه طول بکشد؛ failure در build پیش از روشن‌شدن Android عملیات را متوقف می‌کند.
 
@@ -811,6 +855,10 @@ sudo journalctl -u redis-server.service -n 100 --no-pager
 
 ADB stall پس از failure threshold مسیر کنترل‌شدهٔ `farmctl recover` را اجرا می‌کند: توقف، بررسی assignment و secret پراکسی، guard شبکه، profile، هویت پایدار و IP خروجی Android مجدداً ارزیابی می‌شوند. این مسیر `docker restart` مستقیم نیست. پیش‌فرض هر اجرای timer حداکثر یک recovery دارد و cooldown از ۳۰۰ ثانیه تا ۳۶۰۰ ثانیه نمایی افزایش می‌یابد.
 
+**کرش کانتینر:** `farmctl start` پس از موفقیت، قصد «روشن» را در `/var/lib/android-farm/desired-state.json` ثبت می‌کند و هر stop محافظت‌شده (down، hold، backup، start ناموفق) آن را پاک می‌کند. اگر کانتینر Android موجود با exit code غیرصفر یا OOMKilled خارج شده باشد و قصد ثبت‌شده «روشن» باشد، controller وضعیت `crashed` را گزارش می‌کند و در همان اولین مشاهده مسیر `farmctl recover-crashed` را اجرا می‌کند؛ این مسیر زیر قفل چرخهٔ عمر دوباره بررسی می‌کند که دستگاه هنوز کرش‌کرده و مورد انتظار است و سپس همان start کامل (proxy، guard، هویت، IP) را طی می‌کند. cooldown نمایی یکسان است (۳۰۰، ۶۰۰، ۱۲۰۰ … تا ۳۶۰۰ ثانیه) و metric `android_farm_android_crashed` و هشدار `AndroidFarmContainerCrashed` آن را آشکار می‌کنند. دستگاهی که اپراتور خاموش کرده هرگز به‌عنوان کرش تفسیر نمی‌شود.
+
+**رویدادها:** روشن/خاموش‌شدن، کرش، stall، شروع و نتیجهٔ بازیابی، hold/release، پایان provisioning، اعمال timezone/locale و ثبت/حذف APK در `/var/lib/android-farm/events.jsonl` (root، `0600`، خودکار محدود به ۵۰۰۰ خط) نوشته می‌شوند. کنسول در صفحهٔ «رویدادها» و API در فیلد `events` هر snapshot ۱۰۰ رویداد آخر را نشان می‌دهند. ثبت رویداد best-effort است و خرابی لاگ هیچ عملیاتی را متوقف نمی‌کند.
+
 timeout یک probe ADB یا proxy به‌عنوان failure همان نمونه ثبت می‌شود و sweep را قطع نمی‌کند. اگر وضعیت Docker خوانده نشود، metric مستقل `android_farm_probe_failed` صادر می‌شود و بازیابی آن نمونه انجام نمی‌شود. مهلت هر بازیابی ۳۳۰۰ ثانیه است تا build سرد و boot فرصت تکمیل داشته باشند. مشاهده‌های سلامت پیش از بازیابی منتشر می‌شوند و metric مهلت اجرای فعال، هشدار stale را فقط تا همان مهلت محدود به تعویق می‌اندازد؛ سلامت تازه پس از sweep بعدی سنجیده می‌شود.
 
 ```bash
@@ -858,9 +906,17 @@ sudo test -s /var/lib/node_exporter/textfile_collector/android_farm_health.prom
 - `Proxy health latency`؛
 - `Android CPU`؛
 - `Container uptime`؛
-- `Bounded recovery restarts`.
+- `Bounded recovery restarts`؛
+- `Device logs` (Loki، با انتخاب دستگاه از بالای dashboard).
 
-ruleها در Prometheus ارزیابی می‌شوند، اما Alertmanager و ارسال email/Slack در این release تعریف نشده است. برای اعلان production، Alertmanager را با secret و receiver سازمانی جداگانه اضافه کنید و از public کردن Prometheus پرهیز کنید.
+ruleها در Prometheus ارزیابی و به Alertmanager داخلی (`android-farm-alertmanager`، فقط در شبکهٔ monitoring) فرستاده می‌شوند. Grafana با datasource «Alertmanager» همان هشدارها را نشان می‌دهد. receiver پیش‌فرض `farm-operators` گیرنده‌ای ندارد؛ برای email، Slack یا webhook سازمانی، `monitoring/alertmanager.yml` را در همان release ویرایش کنید (نمونه‌ها داخل فایل کامنت شده‌اند) و رمزها را فقط در همین فایل root-private نگه دارید. Prometheus و Alertmanager را public نکنید.
+
+**لاگ هر دستگاه (Loki/Promtail):** `android-farm-promtail` با socket فقط‌خواندنی Docker (مانند cAdvisor) stdout/stderr همهٔ کانتینرهایی را که label `farm.stack` دارند می‌خواند، رمز و credential احتمالی را پیش از ارسال با `[REDACTED]` جایگزین می‌کند و به `android-farm-loki` (شبکهٔ داخلی، نگهداری ۷ روز روی volume `loki-data`) می‌فرستد. برچسب‌های `device`، `role` و `stack` هر خط را قابل جست‌وجو می‌کنند. در Grafana panel «Device logs» با انتخاب دستگاه، یا در Explore با datasource «Loki»:
+
+```logql
+{stack="devices", device="num01", role="android"}
+{stack="devices", role="proxy"} |= "error"
+```
 
 password تصادفی فایل فقط bootstrap نخستین دیتابیس Grafana است. آن را یک‌بار در terminal امن بخوانید، وارد Grafana شوید و از UI خود Grafana به password ذخیره‌شده در password manager سازمان تغییر دهید:
 
@@ -1075,6 +1131,18 @@ ss -ltnp | grep ':5551'
 - targetهای Prometheus up، metric textfile تازه و پنج panel Grafana دارای داده باشند.
 - alert ruleها parse شوند؛ اگر اعلان لازم است Alertmanager جداگانه را نیز end-to-end آزمون کنید.
 - backup بسازید، hash manifest را تطبیق دهید و restore جداگانه را تمرین کنید.
+
+### سناریوی پذیرش End-to-End (WhatsApp روی یک دستگاه بدون پراکسی)
+
+1. **ثبت APK:** فایل رسمی را بارگذاری کنید (کنسول ← تنظیمات فارم ← مخزن APK، یا `apps import`). در صفحهٔ «رویدادها» رویداد «APK در مخزن ثبت شد» و در `apps list` امضاکننده و نسخه دیده شود.
+2. **پروفایل:** `/etc/android-farm/device-profiles/num01.json` را با `timezone` و در صورت نیاز `resources` بسازید (بخش ۸).
+3. **ساخت دستگاه:** در فرم «افزودن دستگاه» شماره را وارد، «بدون پراکسی — خروجی مستقیم میزبان» و برنامهٔ WhatsApp را انتخاب کنید. درخواست `provision` باید در صف به `succeeded` برسد؛ رویدادهای «دستگاه روشن شد»، «منطقهٔ زمانی/زبان اعمال شد» و «آماده‌سازی کامل شد» ثبت شوند.
+4. **تأیید محیط:** `sudo docker exec screen-num01 adb -s 10.232.0.2:5555 shell getprop persist.sys.timezone` مقدار پروفایل را برگرداند؛ `check-ip --json` باید `matches: true` و `egress: "direct"` بدهد.
+5. **کنترل صفحه:** `https://commex-box.com/d/num01/` با Basic Auth باز شود و WhatsApp روی صفحه دیده شود.
+6. **راه‌اندازی مجدد:** دکمهٔ «راه‌اندازی مجدد» (یا `restart --id num01`)؛ دستگاه باید با همان داده و timezone برگردد و رویداد «دستگاه روشن شد» دوباره ثبت شود.
+7. **کرش شبیه‌سازی‌شده:** `sudo docker kill --signal=KILL android-num01` (exit code غیرصفر). در نوبت بعدی timer سلامت، رویدادهای «کانتینر اندروید کرش کرد» و «بازیابی موفق» ثبت و metric `android_farm_android_crashed` به ۰ برگردد. سپس `down --id num01` بزنید و مطمئن شوید controller آن را روشن نمی‌کند.
+8. **لاگ و هشدار:** در Grafana panel «Device logs» خطوط `device="num01"` را ببینید و در datasource «Alertmanager» هشدارهای فعال (در حالت سالم خالی) را بررسی کنید.
+9. **استفادهٔ مجدد:** دستگاه دوم را با همان برنامه بسازید؛ نباید APK دوباره بارگذاری شود و `apk-repository` همچنان یک فایل برای این نسخه داشته باشد.
 
 ## ۱۹. امنیت و محدودیت‌های عملیاتی
 
@@ -1363,8 +1431,14 @@ modinfo -k "$(uname -r)" binder_linux
 | `generate_farm.py` | تولید کاتالوگ پویا |
 | `ops/farmctl.py` | lifecycle، guard، health و backup |
 | `ops/proxy_store.py` | registry و secrets پراکسی |
-| `ops/device_profiles.py` | validation پروفایل شفاف QA |
-| `ops/healthcheck.py` | self-healing محدود و metricهای Prometheus |
+| `ops/device_profiles.py` | validation پروفایل شفاف QA، timezone و سقف منابع |
+| `ops/adb_helper.py` | فرمان‌های ADB با argv ثابت، انتظار boot و اعمال timezone/locale |
+| `ops/apk_repository.py` | مخزن content-addressed APK، بررسی aapt/apksigner و pin امضاکننده |
+| `ops/events.py` | لاگ پایدار رویدادهای دستگاه‌ها |
+| `ops/desired_state.py` | قصد ثبت‌شدهٔ اپراتور (روشن/خاموش) برای بازیابی کرش |
+| `ops/healthcheck.py` | self-healing محدود، بازیابی کرش و metricهای Prometheus |
+| `monitoring/alertmanager.yml` | مسیر و receiver هشدارها |
+| `monitoring/loki.yml`، `monitoring/promtail.yml` | ذخیره و جمع‌آوری لاگ هر کانتینر |
 | `services/worker/worker.py` | صف Redis و اجرای allowlist |
 | `monitoring/` | Prometheus، alert rules و provisioning Grafana |
 | `ansible/` | desired state کنترل‌پلین و profileها |

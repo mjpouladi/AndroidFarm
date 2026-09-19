@@ -582,6 +582,11 @@ class InstallerFilesystemTests(unittest.TestCase):
                 encoding="utf-8")
             (settings.paths.config_dir / "compose.env").write_text("FARM_DOMAIN=farm.example.com\n",
                                                                      encoding="utf-8")
+            for private in ("install-state.json", "provisioner.json", "compose.env"):
+                # The doctor requires 0600 root files; fixtures must not depend on the umask.
+                for folder in (settings.paths.state_dir, settings.paths.config_dir):
+                    if (folder / private).exists():
+                        (folder / private).chmod(0o600)
             checks = install.doctor_checks(settings, {
                 "os_release": {"ID": "ubuntu", "VERSION_ID": "24.04"},
                 "docker_ready": True,

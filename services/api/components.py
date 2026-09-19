@@ -16,6 +16,9 @@ CONTAINERS = {
     'android-farm-node-exporter': ('node-exporter', 'پایش میزبان'),
     'android-farm-cadvisor': ('cadvisor', 'پایش کانتینرها'),
     'android-farm-grafana': ('grafana', 'Grafana'),
+    'android-farm-alertmanager': ('alertmanager', 'ارسال هشدارها'),
+    'android-farm-loki': ('loki', 'ذخیرهٔ لاگ‌ها'),
+    'android-farm-promtail': ('promtail', 'جمع‌آوری لاگ کانتینرها'),
 }
 
 

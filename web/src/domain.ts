@@ -24,11 +24,18 @@ export type ApplicationCatalog = { state: 'setup_required' | 'files_required' | 
 export type SecuritySettings = { web_username: string | null; grafana_username: string | null;
   credential_rotation_available: boolean; proxy_credentials_available: boolean };
 export type ComponentHealth = { id: string; label: string; state: 'active' | 'inactive' | 'failed' | 'unknown'; detail?: string };
+export type FarmEvent = { at: number; kind: string; device: string | null; detail: string | null };
+export const eventText: Record<string, string> = { 'device-started': 'دستگاه روشن شد', 'device-stopped': 'دستگاه خاموش شد',
+  'device-ready': 'دستگاه آماده است', 'device-crashed': 'کانتینر اندروید کرش کرد', 'device-stalled': 'ADB پاسخ نمی‌دهد',
+  'recovery-started': 'بازیابی خودکار آغاز شد', 'recovery-succeeded': 'بازیابی موفق', 'recovery-failed': 'بازیابی ناموفق',
+  'recovery-skipped': 'بازیابی لازم نبود', 'device-held': 'توقف حفاظتی ثبت شد', 'device-released': 'توقف حفاظتی رفع شد',
+  'provisioning-completed': 'آماده‌سازی کامل شد', 'provisioning-failed': 'آماده‌سازی ناموفق', 'environment-applied': 'منطقهٔ زمانی/زبان اعمال شد',
+  'artifact-imported': 'APK در مخزن ثبت شد', 'artifact-removed': 'APK از مخزن حذف شد' };
 export type Snapshot = { schema_version: 1; collected_at: number; csrf_token: string; resources: ResourceReport | null;
   devices: Device[]; proxies: ProxyRecord[]; backups: Backup[]; artifacts: Artifact[];
   errors: { component: string; message: string }[]; jobs: Job[];
   settings: { console_url?: string | null; access_mode?: string | null; security?: SecuritySettings; central_activation_available?: boolean; application_catalog?: ApplicationCatalog };
-  components?: ComponentHealth[]; queue?: Record<string, unknown> };
+  components?: ComponentHealth[]; events?: FarmEvent[]; queue?: Record<string, unknown> };
 export type DeviceStatus = 'running' | 'off' | 'booting' | 'queued' | 'stopping' | 'backup' | 'error' | 'unknown';
 export const fa = (value: number) => new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 1 }).format(value);
 export const statusText: Record<DeviceStatus, string> = { running: 'روشن', off: 'خاموش', booting: 'در حال راه‌اندازی',
@@ -131,6 +138,12 @@ export function parseSnapshot(value: unknown): Snapshot {
         !(item.imported_at === undefined || item.imported_at === null || finite(item.imported_at))) return invalid();
   }
   for (const item of value.errors as unknown[]) if (!object(item) || !text(item.component) || !text(item.message)) return invalid();
+  if (value.events !== undefined) {
+    if (!Array.isArray(value.events)) return invalid();
+    for (const item of value.events as unknown[]) {
+      if (!object(item) || !finite(item.at) || !text(item.kind) || !nullableText(item.device) || !nullableText(item.detail)) return invalid();
+    }
+  }
   (value.jobs as unknown[]).forEach(parseJob);
   return { ...value, resources: value.resources === null ? null : parseResourceReport(value.resources) } as Snapshot;
 }

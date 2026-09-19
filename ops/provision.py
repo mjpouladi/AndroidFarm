@@ -16,12 +16,12 @@ import sys
 import time
 
 try:
-    from . import app_installer, farmctl, inventory, resources
+    from . import app_installer, events, farmctl, inventory, resources
     from .proxy_store import ProxyStore
     from .secureio import atomic_json, read_private_json, require_private_directory
     from .device_ids import DEVICE_LIMIT, device_id
 except ImportError:
-    import app_installer, farmctl, inventory, resources
+    import app_installer, events, farmctl, inventory, resources
     from proxy_store import ProxyStore
     from secureio import atomic_json, read_private_json, require_private_directory
     from device_ids import DEVICE_LIMIT, device_id
@@ -268,6 +268,7 @@ def main():
                           apk_package=artifact['package'], prepared_at=int(time.time()), egress_ip=observed)
             record.pop('last_error', None)
             inventory.save(registry, inventory_state)
+            events.note('provisioning-completed', device, f"{artifact['package']} installed")
             print(f'{device}: approved QA application installed and opened. Any vendor sign-in stays manual.')
         except BaseException:
             with contextlib.suppress(Exception):
@@ -275,6 +276,7 @@ def main():
                             '--access-mode', args.access_mode)
             record.update(phase='failed', last_error='Preparation failed; inspect local operator output and retry identical request')
             inventory.save(registry, inventory_state)
+            events.note('provisioning-failed', device, 'preparation stopped; retry the identical request')
             raise
 
 

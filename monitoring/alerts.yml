@@ -57,6 +57,14 @@ groups:
           summary: "Android Farm health metrics are stale"
           description: "The systemd health timer or node-exporter textfile path needs attention."
 
+      - alert: AndroidFarmContainerCrashed
+        expr: android_farm_android_crashed == 1
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Android container crashed on {{ $labels.device }}"
+          description: "The container exited abnormally while the operator intent is running; bounded recovery restarts it with exponential cooldown."
+
       - alert: AndroidFarmRecoveryFailed
         expr: increase(android_farm_health_recovery_failures_total[15m]) > 0
         labels: {severity: warning}

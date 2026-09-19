@@ -30,6 +30,15 @@ describe('وضعیت واقعی و مرز اعتماد API', () => {
       expect(() => parseSnapshot({ ...snapshotData(), artifacts: [broken] })).toThrow();
     }
   });
+  it('رویدادهای میزبان را فقط با ساختار معتبر می‌پذیرد', () => {
+    const event = { at: 1700000000, kind: 'device-crashed', device: 'num01', detail: 'exit code 137' };
+    expect(parseSnapshot({ ...snapshotData(), events: [event, { ...event, device: null, detail: null }] }).events?.length).toBe(2);
+    expect(parseSnapshot(snapshotData()).events).toBeUndefined();
+    for (const broken of [{ ...event, at: 'now' }, { ...event, kind: 7 }, { ...event, device: 12 }, 'text']) {
+      expect(() => parseSnapshot({ ...snapshotData(), events: [broken] })).toThrow();
+    }
+    expect(() => parseSnapshot({ ...snapshotData(), events: {} })).toThrow();
+  });
   it('فیلدهای اندازه‌گیری‌نشده و تنظیمات ناقص را می‌پذیرد', () => {
     const result = parseSnapshot({ ...snapshotData(), devices: [device], errors: [{ component: 'configuration', message: 'unavailable' }] });
     expect(result.devices[0].cpu).toBeNull();

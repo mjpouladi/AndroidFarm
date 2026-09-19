@@ -87,6 +87,49 @@ class FarmTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.make_config(dict(secret, server=invalid))
 
+    def test_monitoring_chain_is_internal_alerts_are_routed_and_logs_are_shipped(self):
+        import yaml
+        compose = yaml.safe_load(Path('docker-compose.yml').read_text(encoding='utf-8'))
+        services = compose['services']
+        for name in ('alertmanager', 'loki', 'promtail'):
+            with self.subTest(service=name):
+                service = services[name]
+                self.assertEqual(service['networks'], ['monitoring'])
+                self.assertNotIn('ports', service)
+                self.assertTrue(service['read_only'])
+                self.assertEqual(service['cap_drop'], ['ALL'])
+                self.assertIn('farm.stack=core', service['labels'])
+                self.assertIn('traefik.enable=false', service['labels'])
+        self.assertTrue(compose['networks']['monitoring']['internal'])
+        self.assertIn('/var/run/docker.sock:/var/run/docker.sock:ro', services['promtail']['volumes'])
+        self.assertFalse(any('docker.sock' in volume for volume in services['loki']['volumes']))
+        prometheus = yaml.safe_load(Path('monitoring/prometheus.yml').read_text(encoding='utf-8'))
+        self.assertEqual(prometheus['alerting']['alertmanagers'][0]['static_configs'][0]['targets'], ['alertmanager:9093'])
+        alertmanager = yaml.safe_load(Path('monitoring/alertmanager.yml').read_text(encoding='utf-8'))
+        self.assertEqual(alertmanager['route']['receiver'], alertmanager['receivers'][0]['name'])
+        loki = yaml.safe_load(Path('monitoring/loki.yml').read_text(encoding='utf-8'))
+        self.assertFalse(loki['auth_enabled'])
+        self.assertTrue(loki['compactor']['retention_enabled'])
+        self.assertEqual(loki['limits_config']['retention_period'], '168h')
+        promtail = yaml.safe_load(Path('monitoring/promtail.yml').read_text(encoding='utf-8'))
+        scrape = promtail['scrape_configs'][0]
+        self.assertEqual(scrape['docker_sd_configs'][0]['filters'], [{'name': 'label', 'values': ['farm.stack']}])
+        self.assertIn('device', [rule['target_label'] for rule in scrape['relabel_configs']])
+        self.assertTrue(any('REDACTED' in json.dumps(stage) for stage in scrape['pipeline_stages']))
+        datasources = yaml.safe_load(Path('monitoring/grafana/provisioning/datasources/prometheus.yml').read_text(encoding='utf-8'))
+        self.assertEqual({item['type'] for item in datasources['datasources']}, {'prometheus', 'alertmanager', 'loki'})
+        dashboard = json.loads(Path('monitoring/grafana/dashboards/android-farm.json').read_text(encoding='utf-8'))
+        logs = next(panel for panel in dashboard['panels'] if panel['type'] == 'logs')
+        self.assertEqual(logs['datasource']['uid'], 'android-farm-loki')
+        alerts = yaml.safe_load(Path('monitoring/alerts.yml').read_text(encoding='utf-8'))
+        names = [rule['alert'] for group in alerts['groups'] for rule in group['rules']]
+        self.assertIn('AndroidFarmContainerCrashed', names)
+        from installer.quickstart import CORE_CONTAINERS
+        from services.api.components import CONTAINERS
+        for name in ('android-farm-alertmanager', 'android-farm-loki', 'android-farm-promtail'):
+            self.assertIn(name, CORE_CONTAINERS)
+            self.assertIn(name, CONTAINERS)
+
     def test_direct_egress_is_an_explicit_secret_not_a_fallback(self):
         # Only the exact {"type": "direct"} secret selects the tunnel-free mode.
         self.assertIsNone(module.make_config({'type': 'direct'}))

@@ -18,7 +18,7 @@ import time
 import uuid
 
 import provisioner
-from ops import apk_repository, app_installer, inventory, proxy_store, resources
+from ops import apk_repository, app_installer, events, inventory, proxy_store, resources
 from ops.device_ids import canonical_device
 from ops.secureio import (atomic_json, read_private_json, require_private_directory,
                           require_private_file, require_trusted_release_file)
@@ -381,10 +381,12 @@ class Operations:
             finally:
                 staged.unlink(missing_ok=True)
             summary.pop('path', None)
+            events.note('artifact-imported', None, f"{summary['package']} {summary.get('version_name') or ''}".strip())
             return {'action': action, 'completed': True, 'artifact': summary}
         if action == 'artifact-remove':
             with provisioner.host_lifecycle_lock():
                 result = apk_repository.remove_app(params['id'], catalog_path=self.catalog_path)
+            events.note('artifact-removed', None, params['id'])
             return {'action': action, 'completed': True, 'artifact': result}
         if action == 'proxy-credentials':
             # Use the existing guarded rotation with stop, pinned-IP validation,
@@ -494,6 +496,12 @@ class Operations:
 
         def failure(component, message):
             result['errors'].append({'component': component, 'message': message})
+
+        try:
+            result['events'] = events.recent(100)
+        except (OSError, RuntimeError, ValueError):
+            result['events'] = []
+            failure('events', 'رویدادهای دستگاه‌ها خوانده نشد؛ مالکیت فایل رویداد را بررسی کنید.')
 
         try:
             config = self._config()

@@ -108,6 +108,7 @@ class OperationsTests(unittest.TestCase):
             path = Path(folder) / 'holds.json'
             assert_not_held('num01', path)
             path.write_text(json.dumps({'num01': {'reason': 'account-restriction'}}))
+            path.chmod(0o600)  # Private state must be 0600 whatever the caller's umask is.
             with self.assertRaises(RuntimeError):
                 assert_not_held('num01', path)
             assert_not_held('num02', path)
@@ -117,8 +118,9 @@ class OperationsTests(unittest.TestCase):
             directory = Path(folder)
             baseline = directory / 'num01.json'
             baseline.write_text('{}')
+            baseline.chmod(0o600)
             with patch('ops.identity.snapshot', return_value={'ro.serialno': 'changed'}):
-                with self.assertRaises(RuntimeError):
+                with self.assertRaisesRegex(RuntimeError, 'identity drift'):
                     verify('num01', directory)
             self.assertEqual(baseline.read_text(), '{}')
 
@@ -306,6 +308,19 @@ class OperationsTests(unittest.TestCase):
                 self.assertRaisesRegex(RuntimeError, 'unexpected upstream'):
             farmctl.guard('num01', Path('/etc/android-farm/secrets'))
         self.assertEqual(len(payloads), 3)
+
+    def test_crash_recovery_needs_an_abnormal_exit_and_a_running_intent(self):
+        from ops import farmctl
+        crashed = {'State': {'Running': False, 'ExitCode': 139}}
+        oom = {'State': {'Running': False, 'ExitCode': 0, 'OOMKilled': True}}
+        clean = {'State': {'Running': False, 'ExitCode': 0}}
+        running = {'State': {'Running': True, 'ExitCode': 0}}
+        for item, wanted, expected in ((crashed, True, True), (oom, True, True), (crashed, False, False),
+                                       (clean, True, False), (running, True, False), (None, True, False)):
+            with self.subTest(item=item, wanted=wanted), \
+                    patch('ops.farmctl.inspect', return_value=item), \
+                    patch('ops.farmctl.desired_state.wants_running', return_value=wanted):
+                self.assertEqual(farmctl.crashed_and_wanted('num01'), expected)
 
     def test_direct_device_validation_requires_the_exact_direct_secret(self):
         from ops import farmctl

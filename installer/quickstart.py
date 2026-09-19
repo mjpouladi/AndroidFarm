@@ -42,7 +42,8 @@ REPOSITORY = "https://github.com/mjpouladi/AndroidFarm.git"
 FAILED_DEPLOYMENTS = {"failed", "cancelled", "canceled", "cancelled-by-user"}
 CORE_CONTAINERS = ("farm-anchor", "farm-console", "android-farm-prometheus",
                    "android-farm-node-exporter", "android-farm-cadvisor", "android-farm-grafana",
-                   "android-farm-gateway")
+                   "android-farm-gateway", "android-farm-alertmanager", "android-farm-loki",
+                   "android-farm-promtail")
 
 
 def say(message: str) -> None:

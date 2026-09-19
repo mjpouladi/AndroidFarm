@@ -8,9 +8,9 @@ import Diagnostics from './Diagnostics';
 import SecurityPanel from './SecurityPanel';
 import CatalogSetup, { applicationGuide } from './CatalogSetup';
 import ArtifactPanel from './ArtifactPanel';
-import { actionText, activeDevices, activeJob, deviceStatus, egressText, fa, formatSize, formatTime, isSnapshotFresh,
+import { actionText, activeDevices, activeJob, deviceStatus, egressText, eventText, fa, formatSize, formatTime, isSnapshotFresh,
   jobStateText, provisionableProxies, resumablePhases, runningContainer, screenPath, statusText, type Device, type DeviceStatus, type Job,
-  type ProxyRecord, type Snapshot } from './domain';
+  type FarmEvent, type ProxyRecord, type Snapshot } from './domain';
 
 type Page = 'devices' | 'sessions' | 'proxies' | 'backups' | 'events' | 'architecture' | 'settings';
 const pages: { id: Page; title: string; icon: typeof Smartphone }[] = [
@@ -200,7 +200,7 @@ export default function App() {
 
         {page === 'backups' && <><div className="notice"><Database size={24} /><div><strong>بکاپ سازگار با دادهٔ دستگاه</strong><p>از جزئیات دستگاه خاموش، پشتیبان‌گیری را شروع کنید. این فهرست فقط آرشیوهای موجود روی میزبان را نشان می‌دهد. بازیابی فعلاً از راهنمای عملیات انجام می‌شود.</p></div></div>{snapshot?.backups.length ? <div className="panel table-wrap"><table><thead><tr><th>آرشیو</th><th>دستگاه</th><th>زمان ثبت</th><th>اندازه</th></tr></thead><tbody>{snapshot.backups.map(backup => <tr key={backup.id}><td className="mono">{backup.id}</td><td><button className="text-button mono" onClick={() => { setSelected(backup.device); setDetailTab('overview'); }}>{backup.device}</button></td><td>{formatTime(backup.created_at)}</td><td dir="ltr">{formatSize(backup.size_bytes)}</td></tr>)}</tbody></table></div> : <Empty title={unavailable('backups') ? 'فهرست بکاپ در دسترس نیست' : 'آرشیوی گزارش نشده است'} text={unavailable('backups') ? 'خطای دسترسی به فهرست بکاپ را بررسی کنید؛ این وضعیت به معنی حذف آرشیوها نیست.' : 'پس از پایان موفق پشتیبان‌گیری، آرشیو واقعی در این فهرست نمایش داده می‌شود.'} />}</>}
 
-        {page === 'events' && <section className="panel"><div className="section-header"><h2>تاریخچهٔ درخواست‌ها</h2><span className="tag">{unavailable('queue') ? 'تاریخچه در دسترس نیست' : `${fa(jobs.length)} رکورد دریافت‌شده`}</span></div><JobList jobs={jobs} onOpen={setSelectedJob} onCancel={cancel} canMutate={canMutate} unavailable={unavailable('queue')} /></section>}
+        {page === 'events' && <section className="panel"><div className="section-header"><h2>تاریخچهٔ درخواست‌ها</h2><span className="tag">{unavailable('queue') ? 'تاریخچه در دسترس نیست' : `${fa(jobs.length)} رکورد دریافت‌شده`}</span></div><JobList jobs={jobs} onOpen={setSelectedJob} onCancel={cancel} canMutate={canMutate} unavailable={unavailable('queue')} /><div className="section-header"><h2>رویدادهای دستگاه‌ها</h2><span className="tag">{unavailable('events') ? 'در دسترس نیست' : `${fa((snapshot?.events ?? []).length)} رویداد اخیر`}</span></div><EventList events={snapshot?.events ?? []} /></section>}
 
         {page === 'architecture' && <><div className="architecture-hero"><div><div className="eyebrow">LIVE CONTROL PLANE</div><h2>از کنسول تا دستگاه،<br />یک مسیر قابل پیگیری.</h2><p>کنسول وضعیت را از میزبان می‌خواند. هر تغییر یک درخواست پایدار با نتیجهٔ مشخص دارد؛ تصویر دستگاه مستقیماً از سرویس کنترل همان دستگاه دریافت می‌شود.</p></div><div className="arch-emblem"><Server size={70} strokeWidth={1} /><span>API · صف · Android</span></div></div><div className="architecture-flow">{[
           [Globe2, 'مرورگر', 'کنسول و scrcpy در همان دامنه'], [LockKeyhole, 'احراز هویت', 'Basic Auth مشترک در ورودی'], [Server, 'API میزبان', 'سوکت Unix داخلی و فرمان‌های مجاز'], [Clock3, 'اجرای پایدار', 'ثبت درخواست، وضعیت و نتیجه'], [Smartphone, 'دستگاه', 'Android، مسیر شبکه و دادهٔ مستقل'],
@@ -240,4 +240,12 @@ function Setting({ title, note, value }: { title: string; note: string; value: s
 function ProxyHealth({ proxy }: { proxy: ProxyRecord }) { return proxy.last_health ? <span className={`status ${proxy.last_health.status === 'healthy' ? 'running' : 'error'}`}><i />{proxy.last_health.status === 'healthy' ? 'آخرین تست موفق' : 'آخرین تست ناموفق'}<small dir="ltr">{proxy.last_health.observed_egress_ip ?? '—'}</small></span> : <span className="status unknown">آزمایش نشده</span>; }
 function JobList({ jobs, onOpen, onCancel, canMutate, unavailable = false }: { jobs: Job[]; onOpen: (job: Job) => void; onCancel: (job: Job) => void; canMutate: boolean; unavailable?: boolean }) {
   return jobs.length ? <div className="job-list">{jobs.map(job => <div className="job-row" key={job.id}><span className={`job-indicator ${job.state}`}>{job.state === 'running' ? <LoaderCircle size={18} className="spin" /> : <Clock3 size={18} />}</span><div className="job-main"><button className="text-button" onClick={() => onOpen(job)}>{actionText[job.action] ?? job.action}{job.device && <span dir="ltr">{job.device}</span>}</button><p>{formatTime(job.updated_at)}</p>{job.error && <p className="job-error">{job.error}</p>}</div><span className={`job-state ${job.state}`}>{jobStateText[job.state]}</span>{job.state === 'queued' && <button className="secondary small" disabled={!canMutate} onClick={() => onCancel(job)}>لغو</button>}<IconButton label="جزئیات عملیات" onClick={() => onOpen(job)}><ArrowUpLeft size={17} /></IconButton></div>)}</div> : <Empty title={unavailable ? 'تاریخچهٔ عملیات در دسترس نیست' : 'درخواستی در این فهرست نیست'} text={unavailable ? 'تا دریافت پاسخ معتبر، نمی‌توان خالی‌بودن صف یا تاریخچه را تأیید کرد.' : 'فقط عملیات ثبت‌شده در سرویس کنترل نمایش داده می‌شوند.'} />;
+}
+// رویدادهای پایدار میزبان (روشن/خاموش، کرش، بازیابی، توقف حفاظتی) که با هر snapshot به‌روز می‌شوند.
+function EventList({ events }: { events: FarmEvent[] }) {
+  if (!events.length) return <Empty title="رویدادی ثبت نشده است" text="روشن‌شدن، کرش، بازیابی خودکار و توقف حفاظتی دستگاه‌ها این‌جا ثبت می‌شوند." />;
+  return <div className="job-list">{events.map((event, index) => <div className="job-row" key={`${event.at}-${index}`}>
+    <span className={`job-indicator ${event.kind.includes('failed') || event.kind.includes('crashed') || event.kind.includes('held') ? 'failed' : event.kind.includes('recovery') ? 'running' : 'succeeded'}`}><Activity size={18} /></span>
+    <div className="job-main"><p><b>{eventText[event.kind] ?? event.kind}</b>{event.device && <span dir="ltr"> {event.device}</span>}</p><p>{formatTime(event.at)}{event.detail ? ` · ${event.detail}` : ''}</p></div>
+  </div>)}</div>;
 }
