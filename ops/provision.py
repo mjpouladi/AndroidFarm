@@ -19,12 +19,12 @@ try:
     from . import app_installer, events, farmctl, inventory, resources
     from .proxy_store import ProxyStore
     from .secureio import atomic_json, read_private_json, require_private_directory
-    from .device_ids import DEVICE_LIMIT, device_id
+    from .device_ids import DEVICE_LIMIT, canonical_device, device_id
 except ImportError:
     import app_installer, events, farmctl, inventory, resources
     from proxy_store import ProxyStore
     from secureio import atomic_json, read_private_json, require_private_directory
-    from device_ids import DEVICE_LIMIT, device_id
+    from device_ids import DEVICE_LIMIT, canonical_device, device_id
 
 ROOT = Path(__file__).resolve().parents[1]
 FAILURE_STAGES = ('guarded start', 'egress verification', 'application installation')
@@ -96,6 +96,8 @@ def choose_record(records, phone_hash, proxy_hash, request_hash):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request', required=True, type=Path)
+    parser.add_argument('--resume-id', type=canonical_device,
+                        help='continue only this existing device with its original request')
     parser.add_argument('--compose', required=True, type=Path)
     parser.add_argument('--env-file', type=Path)
     parser.add_argument('--project', required=True, help='host-owned runtime Compose project name')
@@ -165,6 +167,12 @@ def main():
     if activity is not None and not isinstance(activity, str):
         raise RuntimeError('apk_activity must be a string when provided')
     artifact = app_installer.verify(apk_path, request['apk_sha256'], package, args.apk_trust_file)
+    if args.resume_id is not None:
+        # Refuse an unknown target before bootstrapping state directories or
+        # an identity key. Allocation is checked again under the lock below.
+        existing_state = inventory.load(args.state_dir / 'inventory.json')
+        if inventory.find(existing_state, args.resume_id) is None:
+            raise RuntimeError('resume target is not allocated in the managed inventory')
     for folder in (args.state_dir, args.secret_dir):
         folder.mkdir(parents=True, exist_ok=True, mode=0o700)
         if folder.is_symlink() or folder.stat().st_uid != 0 or folder.stat().st_mode & 0o077:
@@ -199,7 +207,8 @@ def main():
         if direct:  # Added only here so existing proxy allocations keep their hash.
             immutable_request['egress'] = 'direct'
         request_hash = digest(json.dumps(immutable_request, sort_keys=True) + proxy_identity)
-        record, created = inventory.choose(inventory_state, digest(phone), digest(proxy_identity), request_hash)
+        record, created = inventory.choose(inventory_state, digest(phone), digest(proxy_identity), request_hash,
+                                           resume_id=args.resume_id)
         device = record['id']
         if created:
             # Persist the monotonic reservation before touching the proxy

@@ -45,7 +45,7 @@ export const statusText: Record<DeviceStatus, string> = { running: 'روشن', o
 export const jobStateText: Record<JobState, string> = { queued: 'در صف', running: 'در حال اجرا', succeeded: 'موفق',
   failed: 'ناموفق', interrupted: 'متوقف‌شده پس از وقفه', cancelled: 'لغوشده' };
 export const actionText: Record<string, string> = { up: 'روشن‌کردن', down: 'خاموش‌کردن', restart: 'راه‌اندازی مجدد', check: 'بررسی ADB',
-  'check-ip': 'بررسی IP خروجی', backup: 'پشتیبان‌گیری', provision: 'آماده‌سازی دستگاه',
+  'check-ip': 'بررسی IP خروجی', backup: 'پشتیبان‌گیری', provision: 'آماده‌سازی دستگاه', resume: 'ادامهٔ آماده‌سازی دستگاه',
   'proxy-add': 'ثبت پراکسی', 'proxy-test': 'تست پراکسی', 'proxy-enable': 'فعال‌کردن پراکسی', 'proxy-disable': 'غیرفعال‌کردن پراکسی',
   'credential-rotate': 'تغییر اطلاعات ورود', 'proxy-credentials': 'تغییر رمز پراکسی', 'core-activate': 'راه‌اندازی سرویس‌های مرکزی', release: 'رفع توقف حفاظتی',
   'artifact-import': 'ثبت APK در مخزن', 'artifact-remove': 'حذف APK از مخزن', remove: 'حذف دستگاه از فارم' };
@@ -71,7 +71,7 @@ export function deviceStatus(device: Device, jobs: Job[]): DeviceStatus {
   if (job?.state === 'running') {
     if (job.action === 'down') return 'stopping';
     if (job.action === 'backup') return 'backup';
-    if (job.action === 'up' || job.action === 'provision' || job.action === 'restart') return 'booting';
+    if (job.action === 'up' || job.action === 'provision' || job.action === 'resume' || job.action === 'restart') return 'booting';
   }
   if (device.hold || Object.values(device.containers).includes('unhealthy')) return 'error';
   if (device.containers.android === 'paused') return 'error';
@@ -83,7 +83,7 @@ export function deviceStatus(device: Device, jobs: Job[]): DeviceStatus {
   return 'unknown';
 }
 
-const canonicalDeviceId = (id: string) => /^num(?:0[1-9]|[1-9]\d+)$/.test(id);
+export const canonicalDeviceId = (id: string) => /^num(?:0[1-9]|[1-9]\d+)$/.test(id);
 // Only a canonical device ID may be included in a copyable host command.
 export const diagnoseCommand = (id: string): string | null => canonicalDeviceId(id) ? `sudo device-provisioner diagnose --id ${id}` : null;
 // Only canonical, same-origin device paths may be embedded in the console.

@@ -532,6 +532,8 @@ def build_parser():
     choice = up.add_mutually_exclusive_group(required=True)
     choice.add_argument('--id', dest='device')
     choice.add_argument('--request', type=Path)
+    up.add_argument('--resume-id', type=canonical_device,
+                    help='with --request, continue only this existing device using its original settings')
     up.add_argument('--apk', type=Path, help='optional approved QA APK installed after start')
     up.add_argument('--apk-sha256')
     up.add_argument('--package')
@@ -665,7 +667,10 @@ def rotate_managed_proxy_password(store, proxy_id, password_file, config):
 
 
 def main(argv=None):
-    args = build_parser().parse_args(argv)
+    parser = build_parser()
+    args = parser.parse_args(argv)
+    if args.command == 'up' and args.resume_id is not None and args.request is None:
+        parser.error('--resume-id requires --request; it cannot be used with --id')
     require_host_root()
     if args.command == 'resources':
         report = resources.probe()
@@ -754,6 +759,7 @@ def main(argv=None):
         if not config.apk_trust_file:
             raise RuntimeError('request provisioning requires configured apk_trust_file')
         result = invoke('provision.py', '--request', args.request, '--compose', config.compose_file,
+                        *(('--resume-id', args.resume_id) if args.resume_id is not None else ()),
                         *(( '--env-file', config.compose_env_file) if config.compose_env_file else ()),
                         '--project', config.compose_project, '--access-mode', config.access_mode,
                         '--secret-dir', config.secret_dir,

@@ -54,9 +54,9 @@ class ProvisionResumeTests(unittest.TestCase):
         self.stack.enter_context(patch.object(provision, 'os', SimpleNamespace(
             name='posix', geteuid=lambda: 0, chmod=os.chmod)))
         self.stack.enter_context(patch.object(provision, 'Path', side_effect=self.path))
-        self.stack.enter_context(patch.object(provision.argparse.ArgumentParser, 'parse_args',
+        self.parse_args = self.stack.enter_context(patch.object(provision.argparse.ArgumentParser, 'parse_args',
                                             return_value=SimpleNamespace(
-            request=self.request_path, compose=self.root / 'compose.json', env_file=None,
+            request=self.request_path, resume_id=None, compose=self.root / 'compose.json', env_file=None,
             project='synthetic-resume-test', access_mode='domain', secret_dir=self.secret_dir,
             proxy_registry=self.root / 'proxies.json', proxy_store_dir=self.root / 'proxies',
             apk_trust_file=self.root / 'trust.json')))
@@ -177,6 +177,45 @@ class ProvisionResumeTests(unittest.TestCase):
         self.install.assert_called_once()
         self.validate_volume.assert_called_once()
         self.assertEqual(json.loads((self.secret_dir / 'num01.json').read_text()), {'type': 'direct'})
+
+    def test_targeted_resume_reaches_guarded_start_for_the_existing_allocation(self):
+        self.fail_initial_start()
+        self.parse_args.return_value.resume_id = 'num01'
+        self.run_main()
+        self.assertEqual(self.assert_same_allocation()['phase'], 'ready_for_operator')
+        self.guarded.assert_called_once()
+        self.assertEqual(self.guarded.call_args.args[:2], ('start', 'num01'))
+
+    def test_targeted_resume_cannot_bootstrap_a_missing_allocation(self):
+        self.parse_args.return_value.resume_id = 'num01'
+        with self.assertRaisesRegex(RuntimeError, 'resume target is not allocated'):
+            self.run_main()
+        self.assertFalse(self.state.exists())
+        self.assertFalse(self.secret_dir.exists())
+        self.assertFalse(self.data_root.exists())
+        self.assertIsNone(self.volume)
+        self.guarded.assert_not_called()
+        self.install.assert_not_called()
+
+    def test_targeted_resume_mismatch_preserves_state_before_any_start(self):
+        self.fail_initial_start()
+        before = (self.state / 'inventory.json').read_bytes()
+        secret_before = (self.secret_dir / 'num01.json').read_bytes()
+        key_before = (self.state / 'identity.key').read_bytes()
+        for target, phone, error in (
+                ('num01', '+12025550124', 'resume phone does not match the selected device'),
+                ('num02', '+12025550123', 'resume target is not allocated')):
+            with self.subTest(target=target):
+                self.parse_args.return_value.resume_id = target
+                self.request['phone'] = phone
+                with self.assertRaisesRegex(RuntimeError, error):
+                    self.run_main()
+                self.assertEqual((self.state / 'inventory.json').read_bytes(), before)
+                self.assertEqual((self.secret_dir / 'num01.json').read_bytes(), secret_before)
+                self.assertEqual((self.state / 'identity.key').read_bytes(), key_before)
+                self.assert_same_allocation()
+        self.guarded.assert_not_called()
+        self.install.assert_not_called()
 
     def test_direct_resume_rejects_altered_or_mixed_installed_secret(self):
         self.fail_initial_start()

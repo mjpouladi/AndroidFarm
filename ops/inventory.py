@@ -68,7 +68,24 @@ def find(inventory, device):
     return inventory['devices'].get(device)
 
 
-def choose(inventory, phone_hash, proxy_hash, request_hash):
+def choose(inventory, phone_hash, proxy_hash, request_hash, resume_id=None):
+    if resume_id is not None:
+        # A targeted continuation must never fall through to another device
+        # with the supplied phone, or allocate a new identifier.
+        try:
+            canonical = device_id(device_index(resume_id, aliases=False))
+        except (TypeError, ValueError) as exc:
+            raise RuntimeError('resume target must be a canonical device identifier') from exc
+        if canonical != resume_id:
+            raise RuntimeError('resume target must be a canonical device identifier')
+        record = find(inventory, resume_id)
+        if record is None:
+            raise RuntimeError('resume target is not allocated in the managed inventory')
+        if record['phone_hash'] != phone_hash:
+            raise RuntimeError('resume phone does not match the selected device; use its original request')
+        if record['request_hash'] != request_hash or record['proxy_hash'] != proxy_hash:
+            raise RuntimeError('resume request differs from the selected device; use its original egress and application')
+        return record, False
     for record in records(inventory):
         if record['phone_hash'] == phone_hash:
             if record['request_hash'] != request_hash:

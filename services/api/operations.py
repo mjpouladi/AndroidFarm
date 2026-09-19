@@ -52,6 +52,11 @@ HOST_FAILURES = (
     ('device absent from Coolify Compose catalog', 'device capacity catalog needs regeneration through the installer'),
     ('resume the incomplete device', 'finish the existing incomplete device request before adding another'),
     ('resume or quarantine the incomplete device', 'finish or review the existing incomplete device before adding another'),
+    ('resume target is not allocated', 'the selected resume device no longer exists; refresh the device list'),
+    ('resume phone does not match the selected device', 'the phone does not match the selected device; '
+                                                       'enter that device\'s original phone'),
+    ('resume request differs from the selected device', 'the original device request differs; resume with '
+                                                       'the same egress and exact approved application version'),
     ('existing phone has a different request', 'the original device request differs; resume with the same phone, '
                                              'egress and approved application'),
     ('existing device proxy endpoint/session differs', 'the saved device network configuration differs from the '
@@ -253,7 +258,7 @@ class Operations:
         _fields(payload, {'action'}, {'device', 'params', 'auth_revision'} if trusted else {'device', 'params'})
         action = payload['action']
         if not isinstance(action, str) or action not in LIFECYCLE | PROXY_ACTIONS | {
-                'provision', 'proxy-add', 'credential-rotate', 'proxy-credentials', 'core-activate',
+                'provision', 'resume', 'proxy-add', 'credential-rotate', 'proxy-credentials', 'core-activate',
                 'artifact-import', 'artifact-remove', 'remove'}:
             raise ValueError('unsupported action')
         params = payload.get('params', {})
@@ -283,7 +288,13 @@ class Operations:
             if not inventory.find(inventory.load(config.state_dir / 'inventory.json'), device):
                 raise ValueError('device is not allocated in the managed inventory')
             return {'action': action, 'device': device, 'params': dict(params)}
-        if 'device' in payload:
+        if action == 'resume':
+            # Resume is bound to an existing allocation. The host checks the
+            # original phone/request hashes under the provisioning lock, too.
+            device = _device(payload.get('device'))
+            if not inventory.find(inventory.load(config.state_dir / 'inventory.json'), device):
+                raise ValueError('selected resume device is not allocated in the managed inventory')
+        elif 'device' in payload:
             raise ValueError('this action does not accept a device field')
         if action == 'core-activate':
             _fields(params, set())
@@ -335,7 +346,7 @@ class Operations:
                 raise ValueError('ابتدا یا انتهای رمز نباید فاصله داشته باشد.')
             if 'current_password' in params:
                 _text(params['current_password'], 'current password', 4096)
-        elif action == 'provision':
+        elif action in {'provision', 'resume'}:
             _fields(params, {'phone', 'owner_authorized', 'artifact_id'}, {'proxy_id', 'egress'})
             if (not isinstance(params['phone'], str) or
                     not re.fullmatch(r'\+[1-9][0-9]{9,14}', params['phone']) or
@@ -377,7 +388,10 @@ class Operations:
         else:
             _fields(params, {'id'})
             self._store(config).show(_identifier(params['id']))
-        return {'action': action, 'params': dict(params)}
+        result = {'action': action, 'params': dict(params)}
+        if action == 'resume':
+            result['device'] = device
+        return result
 
     def _keep_host_log(self, command, arguments, output):
         """Keep the retained output of a failed host command in a root-only host file.
@@ -388,7 +402,8 @@ class Operations:
         """
         try:
             directory = require_private_directory(self.host_log_dir, 'host job log directory', create=True)
-            subject = next((arguments[i + 1] for i, flag in enumerate(arguments[:-1]) if flag == '--id'), None)
+            subject = next((arguments[i + 1] for i, flag in enumerate(arguments[:-1])
+                            if flag in {'--id', '--resume-id'}), None)
             if subject is not None and not re.fullmatch(r'[a-z][a-z0-9-]{2,62}', str(subject)):
                 subject = None
             stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
@@ -520,7 +535,7 @@ class Operations:
             purge = params.get('purge_data') is True
             self._command('remove', '--id', device, *(('--purge-data',) if purge else ()))
             return {'action': action, 'device': device, 'completed': True, 'data_purged': purge}
-        if action == 'provision':
+        if action in {'provision', 'resume'}:
             app = self._catalog()[params['artifact_id']]
             request = {key: value for key, value in app.items() if key.startswith('apk_')}
             request.update(phone=params['phone'], owner_authorized=True, egress=params['egress'])
@@ -531,13 +546,16 @@ class Operations:
             path = directory / (uuid.uuid4().hex + '.json')
             atomic_json(path, request)
             try:
-                output = self._command('up', '--request', str(path))
+                target = ('--resume-id', job['device']) if action == 'resume' else ()
+                output = self._command('up', '--request', str(path), *target)
             finally:
                 path.unlink(missing_ok=True)
             matches = re.findall(r'^(num\d{2,}):', output, re.MULTILINE)
             if not matches:
                 raise OperationError('host returned no provisioned device identifier; refresh inventory')
             device = _device(matches[-1])
+            if action == 'resume' and device != job['device']:
+                raise OperationError('host returned a different device for the resume request; refresh inventory')
             return {'action': action, 'device': device, 'completed': True,
                     'screen_path': f'/d/{device}/'}
         store = self._store(config)

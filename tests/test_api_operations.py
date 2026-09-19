@@ -207,6 +207,82 @@ class ApiOperationsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             self.ops.validate_job(job)
 
+    def resume_job(self):
+        self.app_catalog()
+        return {'action': 'resume', 'device': 'num01', 'params': {
+            'phone': '+12025551234', 'owner_authorized': True,
+            'artifact_id': 'qa-app', 'egress': 'direct'}}
+
+    def test_resume_requires_an_existing_canonical_target(self):
+        job = self.resume_job()
+        self.assertEqual(self.ops.validate_job(job), job)
+        for target in (None, 'num02', 'dev01', 'num01;false'):
+            payload = dict(job, device=target)
+            if target is None:
+                payload.pop('device')
+            with self.subTest(target=target), self.assertRaises(ValueError):
+                self.ops.validate_job(payload)
+        with self.assertRaisesRegex(ValueError, 'does not accept a device'):
+            self.ops.validate_job(dict(job, action='provision'))
+        with self.assertRaisesRegex(ValueError, 'unsupported request fields'):
+            self.ops.validate_job(dict(job, params=dict(job['params'], apk_path='/tmp/unreviewed.apk')))
+        self.runner.assert_not_called()
+
+    def test_resume_forwards_target_and_removes_private_request(self):
+        job = self.resume_job()
+        paths = []
+
+        def run(argv, **_):
+            self.assertEqual(argv[-5:-3], ['up', '--request'])
+            self.assertEqual(argv[-2:], ['--resume-id', 'num01'])
+            self.assertNotIn(job['params']['phone'], argv)
+            path = Path(argv[-3])
+            paths.append(path)
+            request = json.loads(path.read_text())
+            self.assertEqual(request['phone'], job['params']['phone'])
+            self.assertEqual(request['egress'], 'direct')
+            self.assertEqual(request['apk_sha256'], 'a' * 64)
+            self.assertNotIn('proxy_id', request)
+            return subprocess.CompletedProcess(argv, 0, 'num01: ready\n', '')
+
+        self.runner.side_effect = run
+        result = self.ops.execute(job)
+        self.assertEqual(result, {'action': 'resume', 'device': 'num01',
+                                 'completed': True, 'screen_path': '/d/num01/'})
+        self.assertFalse(paths[0].exists())
+        self.assertNotIn(job['params']['phone'], json.dumps(result))
+
+    def test_resume_failure_names_target_log_and_cleans_up_request(self):
+        job = self.resume_job()
+        paths = []
+
+        def run(argv, **_):
+            paths.append(Path(argv[argv.index('--request') + 1]))
+            return subprocess.CompletedProcess(argv, 1,
+                'resume phone does not match the selected device; use its original request\n'
+                'private-diagnostic-canary', '')
+
+        self.runner.side_effect = run
+        with self.assertRaisesRegex(OperationError, 'phone does not match the selected device') as failure:
+            self.ops.execute(job)
+        self.assertFalse(paths[0].exists())
+        self.assertNotIn('private-diagnostic-canary', str(failure.exception))
+        logs = list(self.ops.host_log_dir.glob('*-up-num01.log'))
+        self.assertEqual(len(logs), 1)
+        self.assertIn(logs[0].name, str(failure.exception))
+
+    def test_resume_revalidates_target_before_work_and_rejects_wrong_result(self):
+        job = self.resume_job()
+        self.runner.return_value.stdout = 'num02: ready\n'
+        with self.assertRaisesRegex(OperationError, 'different device'):
+            self.ops.execute(job)
+        self.assertFalse(list((self.root / 'web-requests').glob('*.json')))
+        inventory.save(self.root / 'inventory.json', inventory.empty_inventory())
+        self.runner.reset_mock()
+        with self.assertRaises(OperationError):
+            self.ops.execute(job)
+        self.runner.assert_not_called()
+
     def test_direct_egress_provisioning_needs_no_proxy_and_rejects_mixed_requests(self):
         self.app_catalog()
         seen = {}

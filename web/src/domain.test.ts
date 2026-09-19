@@ -78,6 +78,8 @@ describe('وضعیت واقعی و مرز اعتماد API', () => {
     expect(deviceStatus(device, [job])).toBe('running');
     expect(deviceStatus(device, [{ ...job, state: 'running' }])).toBe('stopping');
     expect(deviceStatus(device, [{ ...job, action: 'restart', state: 'running' }])).toBe('booting');
+    expect(deviceStatus({ ...device, phase: 'failed' }, [{ ...job, action: 'resume', state: 'running' }])).toBe('booting');
+    expect(actionText.resume).toBe('ادامهٔ آماده‌سازی دستگاه');
     expect(activeDevices([device])).toBe(1);
     expect(deviceStatus({ ...device, containers: { ...device.containers, android: 'stopped' } }, [])).toBe('off');
   });
