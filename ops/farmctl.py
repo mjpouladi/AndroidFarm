@@ -261,6 +261,26 @@ def _global_ipv4(text):
     return valid[-1]
 
 
+def host_egress_ip(timeout=15):
+    """The host's own public IPv4: the reference for direct host egress."""
+    import urllib.request
+    try:
+        with urllib.request.urlopen('https://api.ipify.org', timeout=timeout) as response:
+            return _global_ipv4(response.read(64).decode('ascii', 'replace'))
+    except OSError as exc:
+        raise RuntimeError(f'host egress probe failed: {exc}') from None
+
+
+def namespace_egress_ip(device, direct):
+    """Public IPv4 the device namespace leaves through.
+
+    A proxy sidecar answers for itself through its tunnel. A direct-egress
+    namespace has no tunnel and, once Android owns its routing policy, the
+    sidecar's probe is not the reference: the host address is.
+    """
+    return host_egress_ip() if direct else proxy_egress_ip(device)
+
+
 def proxy_egress_ip(device):
     result = run('docker', 'exec', f'proxy-{device}', 'curl', '--noproxy', '*', '-4', '-fsS',
                  '--max-time', '15', 'https://api.ipify.org', capture=True, timeout=25)
@@ -708,7 +728,9 @@ def main():
         elif args.action == 'check':
             check(d)
         elif args.action == 'ip':
-            print(json.dumps({'device': d, 'proxy_namespace': proxy_egress_ip(d),
+            record = inventory.find(inventory.load(), d) or {}
+            print(json.dumps({'device': d,
+                              'proxy_namespace': namespace_egress_ip(d, record.get('egress') == 'direct'),
                               'android_shell': android_egress_ip(d), 'checked_at': int(time.time())}))
         elif args.action == 'backup':
             backup(d, args.backup_dir)
@@ -823,21 +845,32 @@ def main():
                 run(*compose, 'up', '-d', '--no-deps', '--force-recreate', f'screen-{d}')
                 verify_identity(d)
                 assert_not_held(d)
-                # Freeze all guest processes before the first permitted egress.
-                # This lets the gateway prove its sticky public IP without any app
-                # in the Android guest being able to send a concurrent request.
-                run('docker', 'pause', f'android-{d}', timeout=30)
-                android_paused = True
-                guard(d, args.secret_dir, allow_upstream=True)
-                wait_proxy(d)
-                proxy_ip = proxy_egress_ip(d)
-                if proxy_ip != (expected_ip or first_ip):
-                    raise RuntimeError('approved sticky egress IP mismatch; device returned to stopped state')
-                run('docker', 'unpause', f'android-{d}', timeout=30)
-                android_paused = False
-                android_ip = android_egress_ip(d)
-                if android_ip != proxy_ip:
-                    raise RuntimeError('Android-shell egress IP mismatch; device returned to stopped state')
+                if direct:
+                    # Direct host egress: there is no sticky upstream to prove and the
+                    # sidecar runs no tunnel. Once Android owns the namespace's routing
+                    # policy the sidecar's own probe stops being meaningful, so the
+                    # attestation is Android's shell leaving through the host address
+                    # that the namespace showed before boot.
+                    guard(d, args.secret_dir, allow_upstream=True)
+                    android_ip = android_egress_ip(d)
+                    if android_ip != (expected_ip or first_ip):
+                        raise RuntimeError('Android-shell egress IP mismatch; device returned to stopped state')
+                else:
+                    # Freeze all guest processes before the first permitted egress.
+                    # This lets the gateway prove its sticky public IP without any app
+                    # in the Android guest being able to send a concurrent request.
+                    run('docker', 'pause', f'android-{d}', timeout=30)
+                    android_paused = True
+                    guard(d, args.secret_dir, allow_upstream=True)
+                    wait_proxy(d)
+                    proxy_ip = proxy_egress_ip(d)
+                    if proxy_ip != (expected_ip or first_ip):
+                        raise RuntimeError('approved sticky egress IP mismatch; device returned to stopped state')
+                    run('docker', 'unpause', f'android-{d}', timeout=30)
+                    android_paused = False
+                    android_ip = android_egress_ip(d)
+                    if android_ip != proxy_ip:
+                        raise RuntimeError('Android-shell egress IP mismatch; device returned to stopped state')
                 if expected_profile is not None and expected_profile.timezone:
                     # The timezone is a persisted guest property; an unchanged
                     # value is only verified, a change restarts the framework.

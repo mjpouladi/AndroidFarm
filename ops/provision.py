@@ -298,12 +298,11 @@ def main():
             if not record or not record.get('identity_baseline_created'):
                 raise RuntimeError('identity baseline was not committed by the guarded start')
             stage = FAILURE_STAGES[1]
-            observed = farmctl.run('docker', 'exec', f'proxy-{device}', 'curl', '--noproxy', '*',
-                                  '-4', '-fsS', '--max-time', '15', 'https://api.ipify.org', capture=True).strip()
+            # The proxy sidecar answers through its tunnel; a direct namespace is
+            # attested by Android's shell leaving through the host address.
+            observed = farmctl.android_egress_ip(device) if direct else farmctl.proxy_egress_ip(device)
             if expected_ip is not None and observed != expected_ip:
                 raise RuntimeError('sticky proxy egress differs from approved IP')
-            if direct:
-                observed = farmctl._global_ipv4(observed)
             record['phase'] = 'installing_apk'
             inventory.save(registry, inventory_state)
             stage = FAILURE_STAGES[2]

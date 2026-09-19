@@ -717,6 +717,36 @@ class OperationsTests(unittest.TestCase):
             self.assertEqual(report['record']['last_error'], 'guarded start failed')
             self.assertFalse(report['files']['volume'])
 
+    def test_direct_namespace_egress_is_the_host_address_not_the_sidecar_probe(self):
+        import io
+        from ops import farmctl
+
+        class Response(io.BytesIO):
+            def __enter__(self):
+                return self
+
+            def __exit__(self, *_):
+                return False
+
+        with patch('urllib.request.urlopen', return_value=Response(b'8.8.8.8\n')) as opened, \
+                patch('ops.farmctl.run') as sidecar:
+            self.assertEqual(farmctl.namespace_egress_ip('num01', True), '8.8.8.8')
+            sidecar.assert_not_called()
+        self.assertEqual(opened.call_args.args[0], 'https://api.ipify.org')
+        with patch('ops.farmctl.run', return_value='8.8.4.4\n') as sidecar, patch('urllib.request.urlopen') as opened:
+            self.assertEqual(farmctl.namespace_egress_ip('num01', False), '8.8.4.4')
+            opened.assert_not_called()
+        self.assertEqual(sidecar.call_args.args[:3], ('docker', 'exec', 'proxy-num01'))
+        with patch('urllib.request.urlopen', side_effect=OSError('unreachable')), \
+                self.assertRaisesRegex(RuntimeError, 'host egress probe failed'):
+            farmctl.host_egress_ip()
+
+    def test_sidecar_healthcheck_accepts_a_booted_direct_namespace(self):
+        script = (Path(__file__).resolve().parents[1] / 'images' / 'proxy' / 'healthcheck.sh').read_text()
+        self.assertIn('if [ -f /run/direct ]; then', script)
+        self.assertIn('("127.0.0.1", 5555)', script)
+        self.assertTrue(script.rstrip().endswith('https://api.ipify.org >/dev/null'))
+
 
 if __name__ == '__main__':
     unittest.main()
