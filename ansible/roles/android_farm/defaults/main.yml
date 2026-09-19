@@ -5,6 +5,8 @@ farm_release_dir: ""
 farm_install_state_file: /var/lib/android-farm/install-state.json
 farm_python_venv: /opt/android-farm/venv
 farm_provisioner_config: /etc/android-farm/provisioner.json
+farm_api_config: /etc/android-farm/api.json
+farm_api_enabled: true
 farm_worker_enabled: true
 farm_health_enabled: true
 farm_manage_redis: true

@@ -82,7 +82,7 @@ class GatewayTests(unittest.TestCase):
                              for pattern in patterns))
         self.assertIn('if ($unsafe_path) { return 400; }', CONFIG)
 
-    def test_public_routes_share_auth_and_do_not_forward_credentials(self):
+    def test_public_routes_share_auth_and_only_api_forwards_credentials(self):
         public = CONFIG.split('listen 8080 default_server;', 1)[1].split(
             '# Container-only liveness listener', 1)[0]
         self.assertIn('auth_basic "Android Farm";', public)
@@ -94,6 +94,37 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('proxy_set_header Connection $connection_upgrade;', public)
         self.assertIn('resolver 127.0.0.11 ipv6=off valid=10s;', CONFIG)
         self.assertIn('listen 127.0.0.1:8081;', CONFIG)
+        api = public.split('location ^~ /api/ {', 1)[1].split('}', 1)[0]
+        self.assertIn('proxy_set_header Authorization $http_authorization;', api)
+        self.assertIn('proxy_set_header Host $http_host;', api)
+        self.assertIn('proxy_set_header X-Forwarded-Proto $scheme;', api)
+        self.assertIn('proxy_pass $console_api_upstream$request_uri;', api)
+        self.assertEqual(public.count('proxy_set_header Authorization $http_authorization;'), 1)
+
+    def test_console_api_is_unix_only_and_reauthenticates_preserved_credentials(self):
+        console = yaml.safe_load(COMPOSE)['services']['console']
+        self.assertIn('/run/android-farm-api:/run/farm-api:ro', console['volumes'])
+        self.assertNotIn('ports', console)
+        self.assertNotIn('docker.sock', repr(console))
+        self.assertIn('traefik.http.routers.farm-console.middlewares=farm-console-auth@file',
+                      console['labels'])
+        middleware = yaml.safe_load((ROOT / 'traefik/farm-auth.yml').read_text())['http']['middlewares']
+        self.assertFalse(middleware['farm-console-auth']['basicAuth']['removeHeader'])
+        self.assertTrue(middleware['farm-auth']['basicAuth']['removeHeader'])
+        nginx = (ROOT / 'web/nginx.conf').read_text()
+        self.assertIn('proxy_pass http://unix:/run/farm-api/control.sock;', nginx)
+        self.assertIn('proxy_set_header Authorization $http_authorization;', nginx)
+        self.assertIn('proxy_next_upstream off;', nginx)
+        self.assertIn('resolver 127.0.0.11 ipv6=off valid=10s;', nginx)
+        self.assertIn('proxy_pass $screen_gateway$request_uri;', nginx)
+        self.assertIn('proxy_set_header Upgrade $http_upgrade;', nginx)
+        self.assertIn('proxy_set_header Connection $console_connection_upgrade;', nginx)
+        screen = nginx.split('location ^~ /d/ {', 1)[1].split('}', 1)[0]
+        self.assertIn('add_header X-Content-Type-Options nosniff always;', screen)
+        self.assertIn('add_header Referrer-Policy same-origin always;', screen)
+        self.assertIn('add_header X-Frame-Options SAMEORIGIN always;', screen)
+        self.assertNotIn('add_header Content-Security-Policy', screen)
+        self.assertIn("script-src 'self'", nginx.split('location /api/', 1)[0])
 
     def test_deployment_defaults_do_not_publish_public_http_or_adb(self):
         self.assertIn('${FARM_HTTP_BIND:-127.0.0.1}:${FARM_HTTP_PORT:-18080}:8080', COMPOSE)

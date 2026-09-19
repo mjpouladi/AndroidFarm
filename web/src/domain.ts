@@ -1,95 +1,105 @@
-export type DeviceStatus = 'running' | 'off' | 'booting' | 'queued' | 'stopping' | 'backup' | 'error';
-export type Device = { id: string; label: string; phone: string; status: DeviceStatus; region: string;
-  proxyHealthy: boolean; cpu: number; ram: number; latency: number; backup: string | null; queueOrder?: number; };
-export type FarmEvent = { id: string; device: string; text: string; at: number; kind: 'success' | 'info' | 'warning' };
-export type Backup = { id: string; device: string; at: number; size: string };
-export type FarmState = { devices: Device[]; events: FarmEvent[]; backups: Backup[]; message: string; capacity: number };
-export type Action = { type: 'start' | 'stop' | 'cancel' | 'backup' | 'tick' | 'proxy' | 'reset'; id?: string; now?: number }
-  | { type: 'add'; label: string; phone: string; now?: number }
-  | { type: 'capacity'; capacity: number; now?: number };
-export const fa = (value: number) => new Intl.NumberFormat('fa-IR').format(value);
-export const reserved = (devices: Device[]) => devices.filter(d => ['running', 'booting', 'stopping'].includes(d.status)).length;
-export const maskPhone = (phone: string) => `${phone.slice(0, 3)} ••• ••• ${phone.slice(-4)}`;
-export const statusText: Record<DeviceStatus, string> = { running: 'آماده به کار', off: 'خاموش', booting: 'در حال راه‌اندازی',
-  queued: 'در صف', stopping: 'در حال توقف', backup: 'پشتیبان‌گیری', error: 'نیاز به بررسی' };
+import { parseResourceReport, type ResourceReport } from './resources';
 
-export function initialState(): FarmState {
-  return { devices: [], events: [], backups: [], message: '', capacity: 1 };
+export type Device = {
+  id: string; phase: string; hold: { reason?: string } | null;
+  containers: { android: string; proxy: string; screen: string };
+  adb: string | null; screen_path: string; screen_ready: boolean;
+  proxy: string | null; proxy_id?: string; expected_egress_ip: string | null;
+  phone: string | null; cpu: string | null; memory: string | null;
+  running?: boolean;
+};
+export type ProxyRecord = {
+  id: string; label: string; type: 'http' | 'socks' | 'socks5'; server: string; server_port: number;
+  expected_egress_ip: string; assigned_device: string | null; state: 'enabled' | 'disabled';
+  last_health?: { status: string; checked_at: number; observed_egress_ip: string | null } | null;
+};
+export type JobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'interrupted' | 'cancelled';
+export type Job = { id: string; action: string; device: string | null; state: JobState;
+  created_at: number; updated_at: number; error: string | null; result: Record<string, unknown> | null };
+export type Backup = { id: string; device: string; created_at: number; size_bytes: number };
+export type Artifact = { id: string; label: string; package: string; available: boolean };
+export type Snapshot = { schema_version: 1; collected_at: number; csrf_token: string; resources: ResourceReport | null;
+  devices: Device[]; proxies: ProxyRecord[]; backups: Backup[]; artifacts: Artifact[];
+  errors: { component: string; message: string }[]; jobs: Job[];
+  settings: { console_url?: string | null; access_mode?: string | null }; queue?: Record<string, unknown> };
+export type DeviceStatus = 'running' | 'off' | 'booting' | 'queued' | 'stopping' | 'backup' | 'error' | 'unknown';
+export const fa = (value: number) => new Intl.NumberFormat('fa-IR', { maximumFractionDigits: 1 }).format(value);
+export const statusText: Record<DeviceStatus, string> = { running: 'روشن', off: 'خاموش', booting: 'در حال راه‌اندازی',
+  queued: 'در صف', stopping: 'در حال توقف', backup: 'پشتیبان‌گیری', error: 'نیاز به بررسی', unknown: 'نامشخص' };
+export const jobStateText: Record<JobState, string> = { queued: 'در صف', running: 'در حال اجرا', succeeded: 'موفق',
+  failed: 'ناموفق', interrupted: 'متوقف‌شده پس از وقفه', cancelled: 'لغوشده' };
+export const actionText: Record<string, string> = { up: 'روشن‌کردن', down: 'خاموش‌کردن', check: 'بررسی ADB',
+  'check-ip': 'بررسی IP خروجی', backup: 'پشتیبان‌گیری', provision: 'آماده‌سازی دستگاه',
+  'proxy-add': 'ثبت پراکسی', 'proxy-test': 'تست پراکسی', 'proxy-enable': 'فعال‌کردن پراکسی', 'proxy-disable': 'غیرفعال‌کردن پراکسی', release: 'رفع توقف حفاظتی' };
+export const runningContainer = (state: string) => ['running', 'healthy', 'starting', 'unhealthy', 'paused', 'restarting'].includes(state);
+export const activeDevices = (devices: Device[]) => devices.filter(d => d.running ?? runningContainer(d.containers.android)).length;
+export const activeJob = (job: Job) => job.state === 'queued' || job.state === 'running';
+export const formatTime = (stamp: number) => new Date(stamp * 1000).toLocaleString('fa-IR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+export const formatSize = (bytes: number) => bytes >= 1024 ** 3 ? `${fa(bytes / 1024 ** 3)} GB` : `${fa(bytes / 1024 ** 2)} MB`;
+export const provisionableProxies = (proxies: ProxyRecord[], devices: Device[]) => proxies.filter(proxy => {
+  if (proxy.state !== 'enabled') return false;
+  if (!proxy.assigned_device) return true;
+  const device = devices.find(item => item.id === proxy.assigned_device);
+  return !!device && ['reserved', 'volume_created', 'secret_installed', 'identity_baselining', 'starting', 'installing_apk', 'failed'].includes(device.phase);
+});
+
+export function deviceStatus(device: Device, jobs: Job[]): DeviceStatus {
+  const job = jobs.find(j => j.device === device.id && activeJob(j));
+  if (job?.state === 'running') {
+    if (job.action === 'down') return 'stopping';
+    if (job.action === 'backup') return 'backup';
+    if (job.action === 'up' || job.action === 'provision') return 'booting';
+  }
+  if (device.hold || Object.values(device.containers).includes('unhealthy')) return 'error';
+  if (device.containers.android === 'paused') return 'error';
+  if (device.containers.android === 'restarting') return 'booting';
+  if (runningContainer(device.containers.android)) return 'running';
+  if (job?.state === 'queued') return 'queued';
+  if (device.phase === 'failed') return 'error';
+  if (['stopped', 'missing', 'exited', 'created'].includes(device.containers.android)) return 'off';
+  return 'unknown';
 }
 
-// Explicit demonstration fixture, never used as the initial fleet.
-export function demoState(): FarmState {
-  return { capacity: 10, devices: Array.from({ length: 70 }, (_, index) => {
-    const n = index + 1;
-    return { id: `num${String(n).padStart(2, '0')}`, label: n <= 12 ? ['رجیستری تهران', 'ورود مجدد', 'تست نشست', 'رجیستری جدید', 'عملیات تیم اول', 'کنترل کیفیت', 'ذخیره', 'رجیستری شیراز', 'ذخیره', 'تست اتصال', 'عملیات تیم دوم', 'ذخیره'][index] : `دستگاه ${fa(n)}`,
-      phone: `+98900000${String(4100 + n)}`, status: [1, 2, 3, 5, 6, 8, 11].includes(n) ? 'running' : [4, 19].includes(n) ? 'error' : 'off',
-      region: ['آلمان', 'هلند', 'آلمان', 'فنلاند'][index % 4], proxyHealthy: ![4, 19].includes(n),
-      cpu: 12 + n % 19, ram: +(1.2 + (n % 12) / 10).toFixed(1), latency: 82 + (n * 7) % 65,
-      backup: n % 4 ? 'امروز، ۰۳:۰۰' : null };
-  }), events: [
-    { id: 'e1', device: 'num11', text: 'دستگاه آمادهٔ شروع جلسه است', at: Date.now() - 60000, kind: 'success' },
-    { id: 'e2', device: 'num04', text: 'اتصال پراکسی نیاز به بررسی دارد', at: Date.now() - 180000, kind: 'warning' },
-    { id: 'e3', device: 'num03', text: 'پشتیبان داده‌ها ثبت شد', at: Date.now() - 600000, kind: 'info' },
-  ], backups: [1, 2, 3, 5, 6, 7].map(n => ({ id: `b${n}`, device: `num0${n}`, at: Date.now() - n * 3600000, size: `${(1.1 + n / 10).toFixed(1)} GB` })), message: '' };
+// Only canonical, same-origin device paths may be embedded in the console.
+export function screenPath(device: Pick<Device, 'id' | 'screen_path'>): string | null {
+  return /^num(?:0[1-9]|[1-9]\d+)$/.test(device.id) && device.screen_path === `/d/${device.id}/` ? device.screen_path : null;
 }
+export const isSnapshotFresh = (snapshot: Snapshot | null, now = Date.now()) => !!snapshot &&
+  now / 1000 - snapshot.collected_at <= 20 && snapshot.collected_at - now / 1000 <= 5;
 
-export function reducer(state: FarmState, action: Action): FarmState {
-  const now = action.now ?? Date.now();
-  if (action.type === 'reset') return { ...initialState(), capacity: state.capacity };
-  if (action.type === 'capacity') {
-    if (!Number.isInteger(action.capacity) || action.capacity < 0) return { ...state, message: 'ظرفیت میزبان نامعتبر است.' };
-    return { ...state, capacity: action.capacity, message: 'ظرفیت امن میزبان به‌روزرسانی شد.' };
+const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
+const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+const text = (value: unknown): value is string => typeof value === 'string';
+const nullableText = (value: unknown) => value === null || text(value);
+const jobStates = new Set(['queued', 'running', 'succeeded', 'failed', 'interrupted', 'cancelled']);
+export function parseJob(value: unknown): Job {
+  if (!object(value) || !text(value.id) || !text(value.action) || !nullableText(value.device) || !jobStates.has(String(value.state)) ||
+      !finite(value.created_at) || !finite(value.updated_at) || !nullableText(value.error) || !(value.result === null || object(value.result))) {
+    throw new Error('پاسخ وضعیت عملیات نامعتبر است.');
   }
-  let devices = state.devices.map(d => ({ ...d }));
-  let events = [...state.events];
-  let backups = [...state.backups];
-  let message = '';
-  const event = (device: string, text: string, kind: FarmEvent['kind'] = 'info') => {
-    events.unshift({ id: `${now}-${events.length}`, device, text, at: now, kind });
-    message = text;
-  };
-  if (action.type === 'add') {
-    if (!/^\+\d{10,15}$/.test(action.phone)) return { ...state, message: 'شماره را با + و کد کشور وارد کنید.' };
-    if (devices.some(d => d.phone === action.phone)) return { ...state, message: 'این شماره قبلاً به یک دستگاه اختصاص یافته است.' };
-    const n = devices.length + 1;
-    devices.push({ id: `num${String(n).padStart(2, '0')}`, label: action.label.trim() || `دستگاه ${fa(n)}`,
-      phone: action.phone, status: 'off', region: 'آلمان', proxyHealthy: true, cpu: 0, ram: 0,
-      latency: 95, backup: null });
-    event(devices.at(-1)!.id, 'دستگاه آزمایشی به فارم اضافه شد', 'success');
-  } else if (action.type === 'tick') {
-    for (const d of devices) {
-      if (d.status === 'booting') { d.status = 'running'; d.cpu = 18; d.ram = 1.8; event(d.id, 'دستگاه آماده به کار است', 'success'); }
-      else if (d.status === 'stopping') { d.status = 'off'; event(d.id, 'جلسه پایان یافت؛ داده‌ها حفظ شدند', 'success'); }
-      else if (d.status === 'backup') {
-        d.status = 'off'; d.backup = 'همین حالا';
-        backups.unshift({ id: `b-${now}-${d.id}`, device: d.id, at: now, size: '1.4 GB' });
-        event(d.id, 'پشتیبان آزمایشی ثبت شد', 'success');
-      }
-    }
-    for (const d of devices.filter(d => d.status === 'queued').sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0))) if (reserved(devices) < state.capacity && d.proxyHealthy) {
-      d.status = 'booting'; event(d.id, 'جایگاه آزاد شد؛ راه‌اندازی آغاز شد');
-    }
-    if (!message) return state;
-  } else {
-    const d = devices.find(d => d.id === action.id);
-    if (!d) return state;
-    if (action.type === 'start' && ['off', 'error'].includes(d.status)) {
-      if (!d.proxyHealthy) return { ...state, message: 'ابتدا اتصال پراکسی این دستگاه را بررسی کنید.' };
-      d.status = reserved(devices) >= state.capacity ? 'queued' : 'booting';
-      if (d.status === 'queued') d.queueOrder = Math.max(0, ...devices.map(item => item.queueOrder ?? 0)) + 1;
-      event(d.id, d.status === 'queued' ? 'ظرفیت تکمیل است؛ دستگاه به صف اضافه شد' : 'راه‌اندازی دستگاه آغاز شد');
-    } else if (action.type === 'stop' && ['running', 'booting'].includes(d.status)) {
-      d.status = 'stopping'; event(d.id, 'پایان امن جلسه آغاز شد');
-    } else if (action.type === 'cancel' && d.status === 'queued') {
-      d.status = 'off'; event(d.id, 'درخواست از صف خارج شد');
-    } else if (action.type === 'backup') {
-      if (d.status !== 'off') return { ...state, message: 'برای بکاپ سازگار، ابتدا دستگاه را خاموش کنید.' };
-      d.status = 'backup'; event(d.id, 'پشتیبان‌گیری آزمایشی آغاز شد');
-    } else if (action.type === 'proxy') {
-      d.proxyHealthy = true;
-      if (d.status === 'error') d.status = 'off';
-      event(d.id, 'آزمون شبیه‌سازی‌شدهٔ پراکسی موفق بود', 'success');
-    }
+  return value as Job;
+}
+export function parseSnapshot(value: unknown): Snapshot {
+  const invalid = () => { throw new Error('پاسخ API با نسخهٔ کنسول سازگار نیست؛ استقرار هسته را بررسی کنید.'); };
+  if (!object(value) || value.schema_version !== 1 || !finite(value.collected_at) || !text(value.csrf_token) || !value.csrf_token ||
+      !object(value.settings) || !(value.settings.console_url === undefined || nullableText(value.settings.console_url)) ||
+      !(value.settings.access_mode === undefined || nullableText(value.settings.access_mode))) return invalid();
+  for (const key of ['devices', 'proxies', 'backups', 'artifacts', 'errors', 'jobs']) if (!Array.isArray(value[key])) return invalid();
+  for (const item of value.devices as unknown[]) {
+    if (!object(item) || !text(item.id) || !text(item.phase) || !(item.hold === null || object(item.hold)) || !object(item.containers) ||
+        !['android', 'proxy', 'screen'].every(key => text((item.containers as Record<string, unknown>)[key])) ||
+        !nullableText(item.adb) || !text(item.screen_path) || typeof item.screen_ready !== 'boolean' || !nullableText(item.proxy) ||
+        !nullableText(item.expected_egress_ip) || !nullableText(item.phone) || !nullableText(item.cpu) || !nullableText(item.memory)) return invalid();
   }
-  return { ...state, devices, events: events.slice(0, 100), backups, message };
+  for (const item of value.proxies as unknown[]) {
+    if (!object(item) || !['id', 'label', 'server', 'expected_egress_ip'].every(key => text(item[key])) || !finite(item.server_port) ||
+        !['http', 'socks', 'socks5'].includes(String(item.type)) || !['enabled', 'disabled'].includes(String(item.state)) || !nullableText(item.assigned_device)) return invalid();
+    if (item.last_health != null && (!object(item.last_health) || !text(item.last_health.status) ||
+        !finite(item.last_health.checked_at) || !nullableText(item.last_health.observed_egress_ip))) return invalid();
+  }
+  for (const item of value.backups as unknown[]) if (!object(item) || !text(item.id) || !text(item.device) || !finite(item.created_at) || !finite(item.size_bytes)) return invalid();
+  for (const item of value.artifacts as unknown[]) if (!object(item) || !text(item.id) || !text(item.label) || !text(item.package) || typeof item.available !== 'boolean') return invalid();
+  for (const item of value.errors as unknown[]) if (!object(item) || !text(item.component) || !text(item.message)) return invalid();
+  (value.jobs as unknown[]).forEach(parseJob);
+  return { ...value, resources: value.resources === null ? null : parseResourceReport(value.resources) } as Snapshot;
 }

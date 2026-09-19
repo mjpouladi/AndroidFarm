@@ -368,14 +368,14 @@ def run_setup(settings: install.Settings, client, state: dict, *, state_path: Pa
     state.update(deployment_finished=True, phase="core_deployed")
     save_state(state, state_path)
     wait_anchor(result["release_id"])
-    say("۴/۵ — فعال‌سازی CLI، صف Redis و بررسی خودکار سلامت…")
+    say("۴/۵ — فعال‌سازی API کنسول، CLI، صف Redis و بررسی خودکار سلامت…")
     finalized = install.apply(settings)["result"]
     if not finalized["configured"]:
         raise RuntimeError("فعال‌سازی کامل نشد: " + str(finalized.get("waiting_reason", "unknown")))
     control_installer(Path(finalized["release_dir"]))
     state.update(phase="control_plane_ready", control_plane_release=finalized["release_id"])
     save_state(state, state_path)
-    say("۵/۵ — بررسی نهایی میزبان و احراز هویت وب…")
+    say("۵/۵ — بررسی نهایی میزبان و احراز هویت کنسول عملیاتی…")
     health = install.doctor(settings)
     core = core_runtime_status()
     urls = access_urls(settings, env)
@@ -496,7 +496,7 @@ def main(argv=None) -> int:
             for name, passed in outcome["core"].items():
                 if not passed:
                     say(f"  سرویس {name} هنوز سالم/فعال نیست؛ لاگ آن را در Coolify ببینید.")
-            say(f"کنسول نمایشی: {outcome['urls']['console']}")
+            say(f"کنسول عملیاتی: {outcome['urls']['console']}")
             say(f"مانیتورینگ: {outcome['urls']['monitoring']}")
             if settings.access_mode == "ip":
                 say("بررسی وب از داخل میزبان انجام شد؛ دسترسی از شبکهٔ خودتان را با بازکردن لینک‌ها بررسی کنید.")
@@ -506,7 +506,7 @@ def main(argv=None) -> int:
                 say("رمز را فقط روی سرور از فایل خصوصی بخوانید و در password manager نگه دارید؛ آن را در چت یا لاگ نفرستید.")
             else:
                 say("ورود وب از همان حساب Basic Auth قبلی استفاده می‌کند.")
-            say("عملیات واقعی: sudo device-provisioner status")
+            say("مدیریت دستگاه‌ها و پراکسی‌ها از کنسول؛ بررسی CLI: sudo device-provisioner status")
             say("برای ادامه پس از هر توقف: sudo bash /opt/android-farm/source/install.sh")
             return 0 if outcome["ready"] else 2
     except (RuntimeError, ValueError, OSError, subprocess.SubprocessError, EOFError) as exc:

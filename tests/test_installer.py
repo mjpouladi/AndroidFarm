@@ -295,7 +295,8 @@ class InstallerFilesystemTests(unittest.TestCase):
             release_root=root / "releases", config_dir=root / "etc",
             state_dir=root / "state", backup_dir=root / "backups",
             data_root=root / "data", wrapper=root / "bin" / "device-provisioner",
-            traefik_dynamic_dir=dynamic)
+            traefik_dynamic_dir=dynamic, api_runtime_dir=root / "run" / "android-farm-api",
+            tmpfiles_dir=root / "tmpfiles.d")
         return install.Settings(source, "farm.example.com", "console.example.com",
                                 "coolify", "project", paths, True)
 
@@ -484,9 +485,44 @@ class InstallerFilesystemTests(unittest.TestCase):
             self.assertFalse(result["configured"])
             self.assertEqual(result["status"], "waiting_for_coolify")
             self.assertFalse((settings.paths.config_dir / "provisioner.json").exists())
+            self.assertFalse((settings.paths.config_dir / "api.json").exists())
+            self.assertTrue(settings.paths.api_runtime_dir.is_dir())
+            self.assertTrue((settings.paths.tmpfiles_dir / "android-farm-api.conf").is_file())
             self.assertFalse(settings.paths.wrapper.exists())
             self.assertTrue((settings.paths.config_dir / "compose.env").exists())
             self.assertTrue((settings.paths.config_dir / "coolify.env").exists())
+
+    def test_api_activation_preserves_runtime_directory_and_reviewed_app_catalog(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings = self.settings(root, self.make_source(root))
+            discovered = {"coolify_network": "coolify", "compose_project": "project",
+                          "anchor_present": True, "anchor_release": None, "sizing": {}}
+            install.install_managed_files(settings, discovered)
+            api = json.loads((settings.paths.config_dir / "api.json").read_text())
+            self.assertEqual(api, {
+                "schema_version": 1,
+                "provisioner_config": str(settings.paths.config_dir / "provisioner.json"),
+                "auth_file": str(settings.paths.traefik_dynamic_dir / "farm-users.htpasswd"),
+                "allowed_origins": ["https://console.example.com"],
+                "socket_path": str(settings.paths.api_runtime_dir / "control.sock"),
+                "state_dir": str(settings.paths.state_dir / "web"),
+            })
+            # A file standing in for a live socket must never be deleted by reapply.
+            socket_marker = settings.paths.api_runtime_dir / "control.sock"
+            socket_marker.write_text("keep live socket inode", encoding="utf-8")
+            inode = settings.paths.api_runtime_dir.stat().st_ino
+            catalog = settings.paths.config_dir / "apps.json"
+            self.assertEqual(json.loads(catalog.read_text()), {"schema_version": 1, "apps": []})
+            reviewed = b'{"schema_version":1,"apps":[{"id":"reviewed-app"}]}\n'
+            catalog.write_bytes(reviewed)
+            install.install_managed_files(settings, discovered)
+            self.assertEqual(catalog.read_bytes(), reviewed)
+            self.assertEqual(settings.paths.api_runtime_dir.stat().st_ino, inode)
+            self.assertEqual(socket_marker.read_text(), "keep live socket inode")
+            ip = replace(settings, access_mode="ip", public_ip="10.20.30.40", http_port=18090)
+            self.assertEqual(install.build_api_config(ip)["allowed_origins"],
+                             ["http://10.20.30.40:18090"])
 
     def test_doctor_checks_binderfs_without_mounting_or_requiring_host_nodes(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -555,6 +591,7 @@ class InstallerFilesystemTests(unittest.TestCase):
                            "anchor_present": True, "anchor_release": None, "sizing": {}})
             live_env = (settings.paths.config_dir / "compose.env").read_bytes()
             live_config = (settings.paths.config_dir / "provisioner.json").read_bytes()
+            live_api = (settings.paths.config_dir / "api.json").read_bytes()
             live_wrapper = settings.paths.wrapper.read_bytes()
             source.joinpath("provisioner.py").write_text("new release\n", encoding="utf-8")
             monitoring_file.write_text("global: {scrape_interval: 30s}\n", encoding="utf-8")
@@ -566,6 +603,7 @@ class InstallerFilesystemTests(unittest.TestCase):
             self.assertNotEqual(staged["release_id"], first["release_id"])
             self.assertEqual((settings.paths.config_dir / "compose.env").read_bytes(), live_env)
             self.assertEqual((settings.paths.config_dir / "provisioner.json").read_bytes(), live_config)
+            self.assertEqual((settings.paths.config_dir / "api.json").read_bytes(), live_api)
             self.assertEqual(settings.paths.wrapper.read_bytes(), live_wrapper)
             staged_env = install.parse_env((settings.paths.config_dir / "coolify.env").read_text())
             self.assertEqual(staged_env["FARM_RELEASE_ID"], staged["release_id"])

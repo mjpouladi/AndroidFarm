@@ -16,6 +16,7 @@ import shutil
 import stat
 import subprocess
 import tempfile
+import time
 from typing import Callable, Mapping, Sequence
 
 try:
@@ -111,6 +112,8 @@ def _validate_release(
         resolved / "ansible" / "site.yml",
         resolved / "ansible" / "roles" / "android_farm" / "tasks" / "main.yml",
         resolved / "services" / "worker" / "requirements.txt",
+        resolved / "services" / "api" / "requirements.txt",
+        resolved / "services" / "api" / "server.py",
     )
     if any(item.is_symlink() or not item.is_file() for item in required):
         raise RuntimeError("immutable release is missing the reviewed control-plane role")
@@ -298,6 +301,27 @@ def _private_ansible_config(directory: Path) -> Path:
                 pass
 
 
+def _wait_api_listener(runner: Runner, *, timeout: float = 30) -> None:
+    """Wait for the authenticated Unix listener without reading any password."""
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            response = runner(
+                ["curl", "--disable", "--noproxy", "*", "--silent", "--show-error", "--max-time", "3",
+                 "--output", "/dev/null", "--write-out", "%{http_code}",
+                 "--unix-socket", "/run/android-farm-api/control.sock",
+                 "http://localhost/api/v1/health"],
+                check=False, text=True, capture_output=True, timeout=5,
+            )
+            if response.returncode == 0 and response.stdout.strip() == "401":
+                return
+        except (OSError, subprocess.SubprocessError):
+            pass
+        if time.monotonic() >= deadline:
+            raise RuntimeError("web API Unix listener is not ready with authentication required")
+        time.sleep(1)
+
+
 def install_control_plane(
     release_dir: Path | str,
     *,
@@ -342,6 +366,7 @@ def install_control_plane(
         "farm_devices": [],
         "farm_worker_enabled": True,
         "farm_health_enabled": True,
+        "farm_api_enabled": True,
         "farm_fail_on_device_drift": True,
     }
     inventory_file: Path | None = None
@@ -380,6 +405,7 @@ def install_control_plane(
         )
         units = (
             "redis-server.service",
+            "android-farm-api.service",
             "android-farm-worker.service",
             "android-farm-health.timer",
         )
@@ -394,6 +420,7 @@ def install_control_plane(
             _run_quiet(runner, ["systemctl", "is-enabled", "--quiet", unit],
                        env=environment, timeout=30,
                        stage=f"enabled-state validation for {unit}")
+        _wait_api_listener(runner)
     finally:
         for temporary in (variables_file, inventory_file, ansible_config):
             if temporary is None:

@@ -21,6 +21,10 @@ class ControlPlaneTests(unittest.TestCase):
         (release / "services" / "worker").mkdir(parents=True)
         (release / "services" / "worker" / "requirements.txt").write_text(
             "redis==6.4.0\n", encoding="utf-8")
+        (release / "services" / "api").mkdir(parents=True)
+        (release / "services" / "api" / "requirements.txt").write_text(
+            "gunicorn==26.2.0\n", encoding="utf-8")
+        (release / "services" / "api" / "server.py").write_text("# reviewed fixture\n", encoding="utf-8")
         return release
 
     def test_control_plane_uses_private_files_and_never_puts_secret_in_argv(self):
@@ -39,6 +43,10 @@ class ControlPlaneTests(unittest.TestCase):
                 self.assertTrue(kwargs["capture_output"])
                 self.assertTrue(kwargs["text"])
                 self.assertIn("timeout", kwargs)
+                if argv[0] == "curl":
+                    self.assertIn("--unix-socket", argv)
+                    self.assertNotIn("--user", argv)
+                    return subprocess.CompletedProcess(argv, 0, "401", "")
                 if argv[0] == "systemctl":
                     if not redis_probe_complete:
                         redis_probe_complete = True
@@ -55,6 +63,7 @@ class ControlPlaneTests(unittest.TestCase):
                 password = variables["farm_redis_worker_password"]
                 self.assertNotIn(password, repr(argv))
                 self.assertEqual(variables["farm_devices"], [])
+                self.assertTrue(variables["farm_api_enabled"])
                 self.assertEqual(variables["farm_release_dir"], str(release.resolve()))
                 self.assertIn("localhost", inventory["all"]["children"]["android_farm_hosts"]["hosts"])
                 self.assertTrue(ansible_config.name.endswith(".cfg"))
@@ -85,7 +94,9 @@ class ControlPlaneTests(unittest.TestCase):
             self.assertEqual(result["devices_declared"], 0)
             self.assertTrue(result["services_validated"])
             self.assertEqual([item[1] for item in observed["systemctl"]],
-                             ["is-active", "is-enabled"] * 3)
+                             ["is-active", "is-enabled"] * 4)
+            self.assertIn(["systemctl", "is-active", "--quiet", "android-farm-api.service"],
+                          observed["systemctl"])
             self.assertFalse(observed["inventory"].exists())
             self.assertFalse(observed["variables"].exists())
             self.assertFalse(observed["ansible_config"].exists())
@@ -183,6 +194,17 @@ class ControlPlaneTests(unittest.TestCase):
                 control_plane._validate_release(
                     outside, release_root=root, verifier=lambda _: (True, "ok")
                 )
+
+    def test_api_listener_retries_startup_and_requires_authentication(self):
+        runner = Mock(side_effect=[subprocess.CompletedProcess([], 7, "000", "starting"),
+                                  subprocess.CompletedProcess([], 0, "401", "")])
+        with patch("installer.control_plane.time.sleep"):
+            control_plane._wait_api_listener(runner)
+        self.assertEqual(runner.call_count, 2)
+        for status in ("200", "404", "503"):
+            runner = Mock(return_value=subprocess.CompletedProcess([], 0, status, ""))
+            with self.subTest(status=status), self.assertRaisesRegex(RuntimeError, "authentication"):
+                control_plane._wait_api_listener(runner, timeout=0)
 
     def test_root_launcher_contract_is_non_destructive_and_forwards_arguments(self):
         script = Path("install.sh").read_text(encoding="utf-8")

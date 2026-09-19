@@ -1,0 +1,470 @@
+"""Narrow host-side operations exposed by the authenticated farm API.
+
+The browser supplies identifiers, never executable arguments, APK paths or a
+Docker specification. All lifecycle work still crosses the provisioner's host
+guards. Subprocess output is bounded and never returned verbatim to a client.
+"""
+from collections import deque
+import ipaddress
+import json
+import os
+from pathlib import Path
+import re
+import signal
+import subprocess
+import sys
+import threading
+import time
+import uuid
+
+import provisioner
+from ops import app_installer, inventory, proxy_store, resources
+from ops.device_ids import canonical_device
+from ops.secureio import (atomic_json, read_private_json, require_private_directory,
+                          require_private_file, require_trusted_release_file)
+
+
+ROOT = Path(__file__).resolve().parents[2]
+CATALOG = Path('/etc/android-farm/apps.json')
+IDENTIFIER = re.compile(r'[a-z][a-z0-9-]{2,62}\Z')
+LIFECYCLE = frozenset({'up', 'down', 'check', 'check-ip', 'backup', 'release'})
+PROXY_ACTIONS = frozenset({'proxy-test', 'proxy-enable', 'proxy-disable'})
+ROLES = ('proxy', 'android', 'screen')
+HOST_FAILURES = (
+    ('calculated concurrent capacity reached', 'concurrent device capacity reached; stop a device before retrying'),
+    ('insufficient available RAM', 'available RAM is below the reserved headroom; stop a device or retry later'),
+    ('storage below', 'host storage is below the required free-space reserve'),
+    ('host load too high', 'host load is too high; retry after existing work completes'),
+    ('no safe capacity for another device', 'persistent storage has no safe capacity for another device'),
+    ('device on manual safety hold', 'device is on a safety hold; an operator must review and release it before starting'),
+    ('proxy enable failed health validation', 'proxy health validation failed; proxy remains disabled'),
+    ('egress mismatch', 'egress IP verification failed; the device was stopped or placed on a safety hold'),
+    ('does not match expected pinned IP', 'proxy egress differs from its configured fixed address'),
+    ('managed proxy is disabled', 'the allocated proxy is disabled or no longer assigned to this device'),
+    ('APK content hash mismatch', 'APK content differs from the approved catalog hash; review the artifact on the host'),
+    ('APK signer is not allowed', 'APK signing certificate is not approved by the independent trust policy'),
+    ('APK incompatible', 'the approved APK is incompatible with this Android SDK or CPU architecture'),
+    ('Android boot timed out', 'Android did not finish booting before the deadline; inspect the device state'),
+    ('device absent from Coolify Compose catalog', 'device capacity catalog needs regeneration through the installer'),
+    ('resume the incomplete device', 'finish the existing incomplete device request before adding another'),
+    ('resume or quarantine the incomplete device', 'finish or review the existing incomplete device before adding another'),
+)
+
+
+class OperationError(RuntimeError):
+    """A controlled, secret-free explanation that may be shown to an operator."""
+
+
+def _fields(value, required, optional=()):
+    if not isinstance(value, dict) or set(value) - set(required) - set(optional):
+        raise ValueError('unsupported request fields')
+    if set(required) - set(value):
+        raise ValueError('required request fields are missing')
+
+
+def _text(value, field, maximum=80):
+    if (not isinstance(value, str) or not value or len(value) > maximum or
+            any(ord(character) < 32 or ord(character) == 127 for character in value)):
+        raise ValueError(f'invalid {field}')
+    return value
+
+
+def _identifier(value):
+    if not isinstance(value, str) or not IDENTIFIER.fullmatch(value):
+        raise ValueError('invalid identifier')
+    return value
+
+
+def _device(value):
+    if not isinstance(value, str) or canonical_device(value) != value:
+        raise ValueError('device must be a canonical numNN identifier')
+    return value
+
+
+def _running_state(item):
+    if not item:
+        return 'missing'
+    state = item.get('State') or {}
+    if state.get('Restarting'):
+        return 'restarting'
+    if not state.get('Running'):
+        return 'stopped'
+    if state.get('Paused'):
+        return 'paused'
+    health = (state.get('Health') or {}).get('Status')
+    return health if health in {'healthy', 'unhealthy', 'starting'} else 'running'
+
+
+def bounded_process(argv, *, cwd, timeout=3600):
+    """Drain process output while retaining at most 64 KiB; kill its tree on timeout."""
+    chunks = deque(maxlen=16)
+    command = argv
+    if sys.platform == 'linux':
+        command = [sys.executable, str(ROOT / 'services/api/runner.py'),
+                   '--parent-pid', str(os.getpid()), '--', *argv]
+    process = subprocess.Popen(command, cwd=cwd, stdout=subprocess.PIPE,
+                               stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+                               start_new_session=(os.name == 'posix'))
+
+    def drain():
+        while True:
+            block = process.stdout.read(4096)
+            if not block:
+                break
+            chunks.append(block)
+
+    thread = threading.Thread(target=drain, daemon=True)
+    thread.start()
+    try:
+        process.wait(timeout=timeout)
+    except subprocess.TimeoutExpired:
+        if os.name == 'posix':
+            os.killpg(process.pid, signal.SIGTERM)
+        else:
+            process.terminate()
+        try:
+            process.wait(timeout=10)
+        except subprocess.TimeoutExpired:
+            if os.name == 'posix':
+                os.killpg(process.pid, signal.SIGKILL)
+            else:
+                process.kill()
+            process.wait(timeout=10)
+        raise OperationError('operation timed out; refresh device state before retrying') from None
+    finally:
+        thread.join(timeout=10)
+        process.stdout.close()
+    return subprocess.CompletedProcess(argv, process.returncode,
+                                       b''.join(chunks).decode('utf-8', errors='replace'), '')
+
+
+class Operations:
+    def __init__(self, config_path=Path('/etc/android-farm/provisioner.json'), *,
+                 catalog_path=CATALOG, runner=None):
+        self.config_path = Path(config_path)
+        self.catalog_path = Path(catalog_path)
+        self.runner = runner or bounded_process
+
+    def _config(self):
+        return provisioner.load_config(self.config_path)
+
+    @staticmethod
+    def _store(config):
+        return proxy_store.ProxyStore(config.proxy_registry, config.proxy_store_dir)
+
+    def _catalog(self):
+        """Load trusted metadata only; file/signature verification happens at install."""
+        if not self.catalog_path.exists() and not self.catalog_path.is_symlink():
+            return {}
+        require_trusted_release_file(self.catalog_path, 'application catalog')
+        value = read_private_json(self.catalog_path, 'application catalog')
+        _fields(value, {'schema_version', 'apps'})
+        if type(value['schema_version']) is not int or value['schema_version'] != 1 or not isinstance(value['apps'], list):
+            raise ValueError('invalid application catalog schema')
+        if len(value['apps']) > 256:
+            raise ValueError('application catalog exceeds 256 entries')
+        entries = {}
+        for app in value['apps']:
+            _fields(app, {'id', 'label', 'apk_path', 'apk_sha256', 'apk_package'},
+                    {'apk_activity', 'apk_permissions'})
+            identifier = _identifier(app['id'])
+            if identifier in entries:
+                raise ValueError('duplicate application identifier')
+            _text(app['label'], 'application label')
+            path = Path(_text(app['apk_path'], 'APK path', 4096))
+            if not path.is_absolute() or '..' in path.parts:
+                raise ValueError('APK path must be absolute without traversal')
+            package = app['apk_package']
+            if not isinstance(package, str) or not app_installer.PACKAGE_RE.fullmatch(package):
+                raise ValueError('invalid Android package name')
+            digest = app['apk_sha256']
+            if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', digest):
+                raise ValueError('invalid APK SHA-256')
+            activity = app.get('apk_activity')
+            if activity is not None and (not isinstance(activity, str) or
+                                         not app_installer.ACTIVITY_RE.fullmatch(activity)):
+                raise ValueError('invalid Android activity')
+            permissions = app.get('apk_permissions', [])
+            if (not isinstance(permissions, list) or len(permissions) > 3 or
+                    any(not isinstance(p, str) or p not in app_installer.ALLOWED_GRANTS
+                        for p in permissions) or len(set(permissions)) != len(permissions)):
+                raise ValueError('unsupported Android runtime permissions')
+            entries[identifier] = dict(app, apk_sha256=digest.lower(), apk_permissions=permissions)
+        return entries
+
+    @staticmethod
+    def _artifact_available(app):
+        try:
+            path = require_trusted_release_file(Path(app['apk_path']), 'APK artifact')
+            require_private_file(path, 'APK artifact')
+            return 0 < path.stat().st_size <= 500 * 1024 ** 2
+        except (OSError, RuntimeError):
+            return False
+
+    def validate_job(self, payload):
+        _fields(payload, {'action'}, {'device', 'params'})
+        action = payload['action']
+        if not isinstance(action, str) or action not in LIFECYCLE | PROXY_ACTIONS | {'provision', 'proxy-add'}:
+            raise ValueError('unsupported action')
+        params = payload.get('params', {})
+        if not isinstance(params, dict):
+            raise ValueError('params must be an object')
+        config = self._config()
+        if action in LIFECYCLE:
+            if action == 'release':
+                _fields(params, {'review_completed'})
+                if params['review_completed'] is not True:
+                    raise ValueError('explicit confirmation of the completed operator review is required')
+            else:
+                _fields(params, set())
+            device = _device(payload.get('device'))
+            if not inventory.find(inventory.load(config.state_dir / 'inventory.json'), device):
+                raise ValueError('device is not allocated in the managed inventory')
+            return {'action': action, 'device': device, 'params': dict(params)}
+        if 'device' in payload:
+            raise ValueError('this action does not accept a device field')
+        if action == 'provision':
+            _fields(params, {'phone', 'owner_authorized', 'proxy_id', 'artifact_id'})
+            if (not isinstance(params['phone'], str) or
+                    not re.fullmatch(r'\+[1-9][0-9]{9,14}', params['phone']) or
+                    params['owner_authorized'] is not True):
+                raise ValueError('valid E.164 phone and explicit owner authorization are required')
+            _identifier(params['proxy_id'])
+            app = self._catalog().get(_identifier(params['artifact_id']))
+            if app is None or not self._artifact_available(app):
+                raise ValueError('approved APK is unavailable; configure the private application catalog')
+            if not config.apk_trust_file:
+                raise ValueError('APK signer trust policy is not configured')
+            metadata = self._store(config).show(params['proxy_id'])
+            if metadata['state'] != 'enabled':
+                raise ValueError('proxy must be enabled before provisioning')
+        elif action == 'proxy-add':
+            _fields(params, {'id', 'label', 'type', 'server', 'server_port', 'username',
+                             'password', 'expected_egress_ip'})
+            _identifier(params['id'])
+            _text(params['label'], 'proxy label')
+            if not isinstance(params['type'], str):
+                raise ValueError('invalid proxy type')
+            proxy_store._kind(params['type'])
+            proxy_store._public_ipv4(params['server'], 'server')
+            proxy_store._port(params['server_port'])
+            proxy_store._public_ipv4(params['expected_egress_ip'], 'expected_egress_ip')
+            _text(params['username'], 'username', 512)
+            _text(params['password'], 'password', 4096)
+        else:
+            _fields(params, {'id'})
+            self._store(config).show(_identifier(params['id']))
+        return {'action': action, 'params': dict(params)}
+
+    def _command(self, command, *arguments):
+        argv = [sys.executable, str(ROOT / 'provisioner.py'), '--config',
+                str(self.config_path), command, *arguments]
+        result = self.runner(argv, cwd=str(ROOT), timeout=3600)
+        if result.returncode:
+            # Docker/ADB errors may contain credentials or environment values.
+            # Never copy their raw output into the job store or HTTP response.
+            output = result.stdout or ''
+            for marker, message in HOST_FAILURES:
+                if marker in output:
+                    raise OperationError(message)
+            raise OperationError('host operation failed; check device-provisioner on the host for details')
+        return result.stdout or ''
+
+    def execute(self, job):
+        try:
+            return self._execute(job)
+        except OperationError:
+            raise
+        except (ValueError, OSError, RuntimeError, KeyError, subprocess.SubprocessError):
+            raise OperationError('operation could not complete; refresh state and check the host configuration and proxy health') from None
+
+    def _execute(self, job):
+        job = self.validate_job(job)  # Recheck queued identifiers against current state.
+        action, params = job['action'], job['params']
+        config = self._config()
+        if action in LIFECYCLE:
+            device = job['device']
+            flags = ('--json',) if action == 'check-ip' else ('--review-completed',) if action == 'release' else ()
+            output = self._command(action, '--id', device, *flags)
+            result = {'action': action, 'device': device, 'completed': True}
+            if action == 'up':
+                result['screen_path'] = f'/d/{device}/'
+            if action == 'check-ip':
+                try:
+                    evidence = json.loads(output)
+                    for key in ('proxy_namespace', 'android_shell', 'expected'):
+                        result[key] = str(ipaddress.IPv4Address(evidence[key]))
+                    result['matches'] = evidence.get('matches') is True
+                except (ValueError, KeyError, TypeError):
+                    raise OperationError('host returned invalid IP check evidence') from None
+            return result
+        if action == 'provision':
+            app = self._catalog()[params['artifact_id']]
+            request = {key: value for key, value in app.items() if key.startswith('apk_')}
+            request.update(phone=params['phone'], owner_authorized=True, proxy_id=params['proxy_id'])
+            directory = require_private_directory(config.state_dir / 'web-requests',
+                                                   'web request directory', create=True)
+            path = directory / (uuid.uuid4().hex + '.json')
+            atomic_json(path, request)
+            try:
+                output = self._command('up', '--request', str(path))
+            finally:
+                path.unlink(missing_ok=True)
+            matches = re.findall(r'^(num\d{2,}):', output, re.MULTILINE)
+            if not matches:
+                raise OperationError('host returned no provisioned device identifier; refresh inventory')
+            device = _device(matches[-1])
+            return {'action': action, 'device': device, 'completed': True,
+                    'screen_path': f'/d/{device}/'}
+        store = self._store(config)
+        if action == 'proxy-add':
+            with provisioner.host_lifecycle_lock():
+                record = store.add(params['id'], label=params['label'], proxy_type=params['type'],
+                                   server=params['server'], server_port=params['server_port'],
+                                   username=params['username'], password=params['password'],
+                                   expected_egress_ip=params['expected_egress_ip'])
+            return {'action': action, 'completed': True, 'proxy': record}
+        with provisioner.host_lifecycle_lock():
+            if action == 'proxy-test':
+                result = store.check_health(params['id'])
+            elif action == 'proxy-disable':
+                assigned = store.show(params['id']).get('assigned_device')
+                if assigned:
+                    self._command('hold', '--id', _device(assigned), '--reason', 'maintenance')
+                result = store.disable(params['id'])
+                result['assigned_device_stopped'] = bool(assigned)
+                result['safety_hold_created'] = bool(assigned)
+            else:
+                store.enable(params['id'])
+                try:
+                    result = store.check_health(params['id'])
+                except Exception:
+                    store.disable(params['id'])
+                    raise OperationError('proxy health validation failed; proxy remains disabled') from None
+        return {'action': action, 'completed': True, 'proxy': result}
+
+    @staticmethod
+    def _backups(config):
+        root = config.backup_dir
+        if not root.exists():
+            return []
+        require_private_directory(root, 'backup directory')
+        entries = []
+        for folder in root.iterdir():
+            try:
+                device = _device(folder.name)
+            except ValueError:
+                continue
+            if folder.is_symlink() or not folder.is_dir():
+                continue
+            require_private_directory(folder, 'device backup directory')
+            for path in folder.glob('*.tar'):
+                if path.is_symlink() or not path.is_file():
+                    continue
+                metadata = require_private_file(path, 'device backup').stat()
+                entries.append({'id': f'{device}/{path.name}', 'device': device,
+                                'created_at': int(metadata.st_mtime), 'size_bytes': metadata.st_size})
+        return sorted(entries, key=lambda row: row['created_at'], reverse=True)
+
+    def snapshot(self):
+        result = {'collected_at': int(time.time()), 'resources': None, 'devices': [], 'proxies': [],
+                  'backups': [], 'artifacts': [], 'errors': [], 'settings': {}}
+
+        def failure(component, message):
+            result['errors'].append({'component': component, 'message': message})
+
+        try:
+            config = self._config()
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            failure('configuration', 'private host configuration is missing or invalid')
+            return result
+        result['settings'] = {'console_url': config.console_url, 'access_mode': config.access_mode}
+        try:
+            result['resources'] = resources.probe()
+        except (OSError, RuntimeError, subprocess.SubprocessError, ValueError, KeyError):
+            failure('resources', 'host capacity probe is unavailable')
+        try:
+            result['proxies'] = self._store(config).list()
+        except (OSError, RuntimeError, ValueError, KeyError):
+            failure('proxies', 'private proxy registry is unavailable or invalid')
+        try:
+            result['backups'] = self._backups(config)
+        except (OSError, RuntimeError, ValueError):
+            failure('backups', 'backup catalog could not be read safely')
+        try:
+            catalog = self._catalog()
+            result['artifacts'] = [{'id': app['id'], 'label': app['label'],
+                                    'package': app['apk_package'], 'available': self._artifact_available(app)}
+                                   for app in catalog.values()]
+            if not catalog:
+                failure('artifacts', 'no approved application catalog; add reviewed APK metadata to /etc/android-farm/apps.json')
+        except (OSError, RuntimeError, ValueError, KeyError, TypeError):
+            failure('artifacts', 'private application catalog is invalid')
+        try:
+            records = inventory.records(inventory.load(config.state_dir / 'inventory.json'))
+        except (OSError, RuntimeError, ValueError, KeyError):
+            failure('inventory', 'private device inventory is unavailable or invalid')
+            return result
+        try:
+            hold_file = config.state_dir / 'holds.json'
+            holds = read_private_json(hold_file, 'safety holds') if hold_file.exists() else {}
+            if not isinstance(holds, dict):
+                raise ValueError('invalid holds')
+        except (OSError, RuntimeError, ValueError):
+            holds = {record['id']: {'reason': 'unavailable'} for record in records}
+            failure('holds', 'safety hold state is unavailable; device readiness cannot be established')
+        inspections = {}
+        docker_available = True
+        try:
+            inspections = provisioner.bulk_managed_inspections([record['id'] for record in records])
+        except (OSError, RuntimeError, ValueError, KeyError, subprocess.SubprocessError):
+            docker_available = False
+            failure('docker', 'managed container state is unavailable')
+        running = []
+        proxies = {item['id']: item for item in result['proxies']}
+        for record in records:
+            device = record['id']
+            states = {role: _running_state(inspections.get(f'{role}-{device}'))
+                      if docker_available else 'unknown' for role in ROLES}
+            proxy = inspections.get(f'proxy-{device}') or {}
+            ports = (proxy.get('NetworkSettings') or {}).get('Ports') or {}
+            bindings = ports.get('5555/tcp') or []
+            port = next((str(b.get('HostPort')) for b in bindings
+                         if str(b.get('HostPort', '')).isdigit() and b.get('HostIp') == '127.0.0.1'), None)
+            metadata = proxies.get(record.get('proxy_id')) or {}
+            hold = holds.get(device)
+            has_hold = device in holds
+            # Return only the documented reason/timestamp, not arbitrary private JSON.
+            safe_hold = None
+            if has_hold:
+                reasons = {'account-restriction', 'ip-change', 'ownership-review', 'maintenance', 'unavailable'}
+                reason = hold.get('reason') if isinstance(hold, dict) else None
+                held_at = hold.get('at') if isinstance(hold, dict) else None
+                safe_hold = {'reason': reason if isinstance(reason, str) and reason in reasons else 'unknown',
+                             'at': held_at if isinstance(held_at, (int, float)) else None}
+            active = bool((inspections.get(f'android-{device}') or {}).get('State', {}).get('Running'))
+            row = {'id': device, 'phase': record.get('phase', 'unknown'), 'hold': safe_hold,
+                   'containers': states, 'adb': f'127.0.0.1:{port}' if port else None,
+                   'screen': provisioner.web_url(config, device), 'screen_path': f'/d/{device}/',
+                   'proxy_id': record.get('proxy_id'),
+                   'proxy': f"{metadata['type']}://{metadata['server']}:{metadata['server_port']}" if metadata else None,
+                   'expected_egress_ip': record.get('expected_egress_ip'),
+                   'phone': record.get('phone_masked'), 'cpu': None, 'memory': None,
+                   'running': active,
+                   'screen_ready': not has_hold and all(state in {'running', 'healthy'} for state in states.values())}
+            result['devices'].append(row)
+            if active:
+                running.append(f'android-{device}')
+        if running:
+            try:
+                values = subprocess.run(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *running],
+                                        capture_output=True, text=True, check=True, timeout=45)
+                stats = {item['Name']: item for item in
+                         (json.loads(line) for line in values.stdout.splitlines() if line.strip())}
+                for row in result['devices']:
+                    item = stats.get(f'android-{row["id"]}')
+                    if item:
+                        row['cpu'], row['memory'] = item.get('CPUPerc'), item.get('MemUsage')
+            except (OSError, ValueError, KeyError, subprocess.SubprocessError):
+                failure('metrics', 'live container resource measurements are unavailable')
+        return result

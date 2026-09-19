@@ -33,6 +33,10 @@ services:
       - /tmp
       - /var/cache/nginx
       - /var/run
+    volumes:
+      # Only the authenticated, allowlisted host API is reachable here.
+      # The directory bind survives atomic socket replacement after restart.
+      - /run/android-farm-api:/run/farm-api:ro
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     mem_limit: 128m
@@ -48,7 +52,7 @@ services:
       - "traefik.http.routers.farm-console.entrypoints=https"
       - "traefik.http.routers.farm-console.tls=true"
       - "traefik.http.routers.farm-console.tls.certresolver=letsencrypt"
-      - "traefik.http.routers.farm-console.middlewares=farm-auth@file"
+      - "traefik.http.routers.farm-console.middlewares=farm-console-auth@file"
       - "traefik.http.services.farm-console.loadbalancer.server.port=8080"
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]

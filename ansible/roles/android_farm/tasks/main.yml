@@ -179,6 +179,9 @@
     - {path: /etc/android-farm, mode: '0700'}
     - {path: /etc/android-farm/device-profiles, mode: '0700'}
     - {path: /var/lib/android-farm, mode: '0700'}
+    - {path: /var/lib/android-farm/docker-client, mode: '0700'}
+    - {path: /var/lib/android-farm/web, mode: '0700'}
+    - {path: /run/android-farm-api, mode: '0755'}
     - {path: /var/lib/node_exporter/textfile_collector, mode: '0755'}
     - {path: /opt/android-farm, mode: '0755'}
 
@@ -238,6 +241,40 @@
     argv: [python3, -m, venv, "{{ farm_python_venv }}"]
     creates: "{{ farm_python_venv }}/bin/python"
   when: not ansible_check_mode
+
+- name: Inspect finalized API configuration
+  ansible.builtin.stat:
+    path: "{{ farm_api_config }}"
+    follow: false
+  register: farm_api_configuration
+  when: farm_api_enabled | bool
+
+- name: Require private finalized API configuration
+  ansible.builtin.assert:
+    that:
+      - farm_api_configuration.stat.exists
+      - farm_api_configuration.stat.isreg
+      - not (farm_api_configuration.stat.islnk | default(false))
+      - farm_api_configuration.stat.pw_name == 'root'
+      - farm_api_configuration.stat.mode == '0600'
+    fail_msg: "Complete installer activation to create the private web API configuration."
+  when: farm_api_enabled | bool
+
+- name: Install pinned web API server dependency
+  ansible.builtin.pip:
+    requirements: "{{ farm_effective_release_dir }}/services/api/requirements.txt"
+    virtualenv: "{{ farm_python_venv }}"
+  when: farm_api_enabled | bool and not ansible_check_mode
+  notify: Restart farm API
+
+- name: Preserve the API socket directory across boot and service restarts
+  ansible.builtin.copy:
+    dest: /etc/tmpfiles.d/android-farm-api.conf
+    content: |
+      d "/run/android-farm-api" 0755 root root -
+    owner: root
+    group: root
+    mode: '0644'
 
 - name: Install pinned worker dependency
   ansible.builtin.pip:
@@ -309,10 +346,12 @@
     group: root
     mode: '0644'
   loop:
+    - {source: android-farm-api.service.j2, destination: android-farm-api.service}
     - {source: android-farm-worker.service.j2, destination: android-farm-worker.service}
     - {source: android-farm-health.service.j2, destination: android-farm-health.service}
     - {source: android-farm-health.timer.j2, destination: android-farm-health.timer}
   notify:
+    - Restart farm API
     - Restart farm worker
     - Reload health timer
 
@@ -321,6 +360,14 @@
     name: android-farm-worker.service
     enabled: "{{ farm_worker_enabled | bool }}"
     state: "{{ 'started' if farm_worker_enabled else 'stopped' }}"
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Enable authenticated web API
+  ansible.builtin.systemd:
+    name: android-farm-api.service
+    enabled: "{{ farm_api_enabled | bool }}"
+    state: "{{ 'started' if farm_api_enabled else 'stopped' }}"
     daemon_reload: true
   when: not ansible_check_mode
 

@@ -1,0 +1,67 @@
+# Template: move to .github/workflows/validate.yml using a GitHub credential
+# with workflow-write permission to enable automatic validation.
+name: Validate Android Farm
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: validate-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  console:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: '24'
+          package-manager-cache: false
+      - run: npm ci
+        working-directory: web
+      - run: npm test
+        working-directory: web
+      - run: npm run build
+        working-directory: web
+
+  host:
+    # Disposable hosted runner only. Never point this test job at the farm.
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - name: Prepare isolated test dependencies
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends python3-venv apache2-utils
+          python3 -m venv "$RUNNER_TEMP/farm-venv"
+          "$RUNNER_TEMP/farm-venv/bin/pip" install PyYAML==6.0.3 -r services/api/requirements.txt -r services/worker/requirements.txt
+          cat > "$RUNNER_TEMP/farm-compose" <<'EOF'
+          #!/bin/sh
+          exec docker compose "$@"
+          EOF
+          chmod 755 "$RUNNER_TEMP/farm-compose"
+          sudo install -d -m 700 /run/android-farm-ci
+      - name: Build read-only gateway for real startup test
+        run: docker build -f images/gateway/Dockerfile -t android-farm/gateway:ci .
+      - name: Build console for authenticated Unix proxy test
+        run: docker build -t android-farm/console:ci web
+      - name: Test host control plane, Unix API and container startup
+        run: |
+          sudo env PYTHONDONTWRITEBYTECODE=1 TMPDIR=/run/android-farm-ci \
+            COMPOSE_BIN="$RUNNER_TEMP/farm-compose" \
+            FARM_GATEWAY_TEST_IMAGE=android-farm/gateway:ci \
+            FARM_CONSOLE_TEST_IMAGE=android-farm/console:ci FARM_API_RUNTIME_TEST=1 \
+            "$RUNNER_TEMP/farm-venv/bin/python" -m unittest discover -s tests -v

@@ -15,7 +15,7 @@ sudo bash install-android-farm.sh --domain commex-box.com
 
 4. پس از پایان پنج مرحله، **[پلتفرم](https://commex-box.com)** و **[مانیتورینگ](https://metrics.commex-box.com)** را باز کنید. کاربر وب `operator` است؛ رمز را فقط در ترمینال خصوصی با `sudo cat /etc/android-farm/web-login-password` ببینید و به گفتگو یا لاگ اشتراکی نفرستید. `sudo device-provisioner status` وضعیت واقعی را نشان می‌دهد. صفحهٔ دستگاه پس از تخصیص/روشن‌شدن در `https://commex-box.com/d/num01/` است.
 
-نصب تازه کنسول را روی خود دامنه و API Coolify را روی `http://127.0.0.1:8000` تنظیم می‌کند. اگر هر مرحله مبهم بود، **بخش ۵ همین سند** تمام مراحل DNS، توکن، نصب، آزمون و نخستین دستگاه را با جزئیات دارد. کنسول فعلی دموی UX است؛ عملیات واقعی از CLI انجام می‌شود.
+نصب تازه کنسول را روی خود دامنه و API Coolify را روی `http://127.0.0.1:8000` تنظیم می‌کند. اگر هر مرحله مبهم بود، **بخش ۵ همین سند** تمام مراحل DNS، توکن، نصب، آزمون و نخستین دستگاه را با جزئیات دارد. کنسول به API عملیاتی میزبان وصل است؛ همان عملیات از CLI نیز قابل انجام است. در نصب تازه فهرست دستگاه و برنامهٔ تأییدشده خالی است؛ آماده‌سازی برنامه در بخش ۹ آمده است.
 
 این پروژه دورزدن محدودیت‌های Meta، Play Integrity یا سامانه‌های ضدسوءاستفاده را انجام نمی‌دهد و احتمال مسدودشدن هیچ حسابی را تضمین نمی‌کند. تولید/تغییر IMEI، جا زدن کانتینر به‌عنوان گوشی تجاری، جعل شناسهٔ سخت‌افزاری، پنهان‌کردن root/container، خودکارسازی OTP یا ثبت‌نام انبوه و نصب خودکار WhatsApp در محدودهٔ این پیاده‌سازی نیست. نصب برنامه فقط برای APK عمومی/داخلیِ تأییدشده، با hash و signer از پیش مجاز، انجام می‌شود.
 
@@ -23,7 +23,7 @@ sudo bash install-android-farm.sh --domain commex-box.com
 
 | بخش | وضعیت | توضیح دقیق |
 |---|---|---|
-| نصب هدایت‌شده | پیاده‌سازی و آزمون واحد با API شبیه‌سازی‌شده | `install.sh`، حالت پیش‌فرض دامنه و HTTPS، IP/پورت اختیاری، ساخت و deploy برنامه در Coolify، ادامه پس از قطع، فعال‌سازی خودکار Worker و health؛ پذیرش روی Coolify واقعی لازم است |
+| نصب هدایت‌شده | پیاده‌سازی؛ اتصال API Coolify در تست‌ها شبیه‌سازی می‌شود | `install.sh`، حالت پیش‌فرض دامنه و HTTPS، IP/پورت اختیاری، ساخت و deploy برنامه در Coolify، ادامه پس از قطع، فعال‌سازی خودکار API وب، Worker و health؛ پذیرش روی Coolify واقعی لازم است |
 | installer میزبان | پیاده‌سازی و آزمون واحد | `plan/apply/doctor`، release تغییرناپذیر مبتنی بر محتوا، نصب Docker و ابزارهای لازم، Binder و تنظیم Basic Auth؛ دو مرحله را راه‌انداز ساده هماهنگ می‌کند |
 | کاتالوگ و ظرفیت | پیاده‌سازی و آزمون واحد | ظرفیت فعال بر اساس منابع زنده و ظرفیت کاتالوگ بر اساس دیسک؛ کاتالوگ نصب‌شده خودکار کوچک نمی‌شود |
 | lifecycle دستگاه | پیاده‌سازی و آزمون واحد | start/stop/check/check-ip/status/hold/release/backup با حفظ `/data` و کنترل topology Compose |
@@ -32,8 +32,8 @@ sudo bash install-android-farm.sh --domain commex-box.com
 | صف Redis Worker | پیاده‌سازی و آزمون واحد | صف قابل‌بازیابی، idempotency، lease، retry/backoff، dead-letter و lock مجزای هر دستگاه؛ فقط فرمان‌های allowlist |
 | بازیابی سلامت ADB | پیاده‌سازی و آزمون واحد | مشاهدهٔ ADB/boot/screen/proxy، restart محدود، boot grace و cooldown نمایی؛ دستگاه خاموش را روشن نمی‌کند |
 | Prometheus/Grafana | پیکربندی آماده | CPU، uptime، سلامت ADB، latency و سلامت proxy و تعداد recovery؛ باید روی سرور مقصد scrape و dashboard تأیید شود |
-| Ansible | پیکربندی آماده | Redis محلی، worker، timer سلامت، پروفایل‌های دستگاه و تشخیص drift؛ اجرا به‌صورت `serial: 1` و بدون حذف data |
-| کنسول وب | **دموی تعاملی** | ظاهر و جریان UX را نشان می‌دهد؛ به Docker/API/Redis وصل نیست و دکمه‌های آن عملیات واقعی انجام نمی‌دهند |
+| Ansible | پیکربندی آماده | API وب، Redis محلی، worker، timer سلامت، پروفایل‌های دستگاه و تشخیص drift؛ اجرا به‌صورت `serial: 1` و بدون حذف data |
+| کنسول وب | متصل به کنترل‌پلین میزبان | وضعیت و منابع واقعی، پراکسی، دستگاه، نصب APK تأییدشده و درخواست‌های پایدار؛ خطای backend آشکار است و با دادهٔ نمونه جایگزین نمی‌شود |
 | پذیرش production | نیازمند اجرای Ubuntu | بوت Redroid، Binder، proxy واقعی، HTTP/Nginx یا TLS/Traefik، noVNC/WebSocket، kill-switch و restore باید روی میزبان واقعی با pilot تأیید شوند |
 
 وجود تست واحد یا parse شدن Compose جای آزمون پذیرش روی سرور مقصد را نمی‌گیرد.
@@ -44,7 +44,7 @@ sudo bash install-android-farm.sh --domain commex-box.com
 flowchart TB
   U[اپراتور مجاز] -->|HTTPS + Basic Auth| T[Traefik داخلی Coolify]
   U -->|IP:18080 + Basic Auth| GW[درگاه Nginx حالت بدون دامنه]
-  T --> C[کنسول نمایشی]
+  T --> C[کنسول عملیاتی]
   T --> G[Grafana]
   T -->|/d/numXX/| S[screen-numXX\nnoVNC + scrcpy]
   GW --> C
@@ -64,12 +64,15 @@ flowchart TB
   end
 
   subgraph Host[کنترل‌پلین root-owned روی میزبان]
+    API[API احراز هویت‌شده روی Unix socket]
+    J[(صف پایدار درخواست‌های وب)]
     CLI[device-provisioner]
     Q[Redis روی 127.0.0.1]
     W[Worker systemd]
     H[Health timer]
     I[(inventory / proxy registry)]
     Q --> W --> CLI
+    API --> J --> CLI
     H --> CLI
     CLI --> I
   end
@@ -85,11 +88,14 @@ flowchart TB
   end
 
   CLI --> Device
+  C -->|/api/| API
   X -->|فقط endpoint تأییدشده| UP[upstream اختصاصی]
   H -->|textfile metrics| N
 ```
 
 در Coolify فقط فایل ریشهٔ `docker-compose.yml` به‌عنوان یک Application وارد می‌شود. این stack شامل `farm-anchor`، کنسول، درگاه Nginx، Prometheus، node-exporter، cAdvisor، آماده‌سازهای یک‌بارهٔ secret و Grafana است. در حالت IP درگاه فقط یک پورت منتشر می‌کند و نیازی به تغییر proxy سراسری Coolify نیست؛ در حالت دامنه، دسترسی اصلی با Traefik است و درگاه HTTP فقط روی loopback می‌ماند. کاتالوگ `docker-compose.farm.yml` را agent میزبان با project ثابت `android-farm-runtime` مدیریت می‌کند؛ Coolify آن را deploy نمی‌کند تا redeploy هسته دستگاه‌های on-demand را orphan یا حذف نکند.
+
+کنترل‌پلین وب سرویس systemd روی میزبان است و با همان راه‌انداز نصب می‌شود؛ کانتینر کنسول فقط به socket محدود آن دسترسی دارد. اگر `CONSOLE_DOMAIN` جدا از `FARM_DOMAIN` باشد، Nginx کنسول مسیر `/d/numXX/` را با WebSocket به gateway داخلی می‌رساند تا صفحهٔ دستگاه همچنان داخل همان origin پنل باز شود. gateway فقط ID و مسیر معتبر را قبول می‌کند؛ خطای دستگاه خاموش به صفحهٔ کنسول تبدیل نمی‌شود.
 
 Coolify ابتدا imageهای کنسول و درگاه را از checkout مخزن می‌سازد و سپس هسته را با project ثابت `android-farm-core` اجرا می‌کند. نام imageهای محلی صریح است: `android-farm/console:<FARM_RELEASE_ID>` و `android-farm/gateway:<FARM_RELEASE_ID>`. بنابراین تغییر نام project یا مسیر بین مرحلهٔ build و start، image دیگری را انتخاب نمی‌کند. `pull_policy: never` برای این دو سرویس، دریافت image از registry را غیرفعال می‌کند؛ مرحلهٔ build همچنان اجرا می‌شود و start از image ساخته‌شدهٔ همان release استفاده می‌کند.
 
@@ -212,8 +218,8 @@ sudo bash install-android-farm.sh --domain commex-box.com
 1. `۱/۵`: بررسی منابع، Binder، شبکه، پورت‌ها و آماده‌سازی میزبان/release؛
 2. `۲/۵`: ساخت یا بازیابی Project `android-farm` و Application `farm-core`؛
 3. `۳/۵`: انتقال ENV و Deploy از commit دقیق source؛ ساخت نخستین imageها ممکن است چند دقیقه طول بکشد؛
-4. `۴/۵`: فعال‌سازی CLI، Redis محلی، Worker و timer سلامت؛
-5. `۵/۵`: doctor، وضعیت سرویس‌ها، TLS و پاسخ 401 وب بدون credential.
+4. `۴/۵`: فعال‌سازی API وب، CLI، Redis محلی، Worker و timer سلامت؛
+5. `۵/۵`: doctor، وضعیت سرویس‌ها، آمادگی socket خصوصی API با پاسخ 401، TLS و پاسخ 401 وب بدون credential.
 
 source موجود با تغییر محلی بازنویسی نمی‌شود؛ راه‌انداز در تعارض متوقف می‌شود. اگر Redis متعلق به سرویس دیگری روی میزبان باشد نیز آن را تصاحب نمی‌کند؛ برای آن نصب سفارشی از بخش ۱۴ استفاده کنید.
 
@@ -247,7 +253,7 @@ sudo cat /etc/android-farm/monitoring/grafana-admin-password
 
 | مقصد | نشانی شما | ورود |
 |---|---|---|
-| کنسول نمایشی | `https://commex-box.com/` | Basic Auth با `operator` |
+| کنسول عملیاتی | `https://commex-box.com/` | Basic Auth با `operator` |
 | Grafana | `https://metrics.commex-box.com/` | ابتدا Basic Auth، سپس `admin` و رمز اولیهٔ Grafana |
 | صفحهٔ دستگاه، پس از ساخت و روشن‌کردن | `https://commex-box.com/d/num01/` | Basic Auth با `operator` |
 
@@ -263,7 +269,14 @@ curl -u operator -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
 
 اگر پاسخ عمومی `403` و متن `error code: 1010` بود، بخش «خطای 1010 در Cloudflare» را ببینید؛ این پاسخ با `401` موردانتظار احراز هویت فرق دارد.
 
-**کنسول فعلی دموی UX است:** دکمه‌های آن به سرور وصل نیستند. مدیریت واقعی با `sudo device-provisioner ...` انجام می‌شود. ریشهٔ `https://commex-box.com/` کنسول را نشان می‌دهد و گواهی همین دامنه همراه Deploy هسته ایجاد می‌شود. مسیر `/d/num01/` تا پیش از ایجاد و روشن‌شدن دستگاه می‌تواند 404 بدهد؛ صفحه و WebSocket دستگاه را پس از گام بعد آزمایش کنید.
+کنسول از `/api/v1/snapshot` وضعیت واقعی میزبان را می‌خواند. دکمه‌های عملیاتی یک درخواست قابل پیگیری می‌سازند؛ موفقیت فقط پس از نتیجهٔ واقعی backend نمایش داده می‌شود. مدیریت CLI نیز با `sudo device-provisioner ...` برقرار است. اگر API پاسخ نداد، ابتدا سرویس میزبان را بررسی کنید؛ دیدن صفحهٔ React به‌تنهایی نشانهٔ آماده‌بودن کنترل‌پلین نیست:
+
+```bash
+sudo systemctl status android-farm-api.service --no-pager
+curl -u operator -fsS https://commex-box.com/api/v1/health
+```
+
+پاسخ API باید `{"status":"ok"}` باشد. مسیر `/d/num01/` تا پیش از ساخت و روشن‌شدن دستگاه می‌تواند 404 بدهد؛ صفحه و WebSocket دستگاه را پس از گام بعد آزمایش کنید.
 
 ### گام ۷ — نخستین دستگاه QA را به‌ترتیب آماده کنید
 
@@ -274,7 +287,9 @@ sudo device-provisioner resources
 sudo device-provisioner status
 ```
 
-سپس فقط یک pilot بسازید:
+برای مسیر وب، ابتدا یک APK تأییدشده را طبق بخش ۹ در کاتالوگ مدیر معرفی کنید. سپس در پنل یک پراکسی اضافه و آن را آزمایش کنید؛ هنگام ساخت دستگاه، پراکسی و برنامه را انتخاب و مجوز مالک را تأیید کنید. درخواست در صف وب دیده می‌شود و پس از موفقیت، دستگاه با ID ترتیبی و لینک صفحهٔ واقعی ظاهر می‌شود. کاتالوگ خالی، پراکسی ناسالم یا کمبود منابع مانع ساخت می‌شود؛ دادهٔ نمونه جای آن‌ها قرار نمی‌گیرد.
+
+برای انجام همان pilot از CLI:
 
 1. مطابق **بخش ۷**، یک upstream HTTP CONNECT/SOCKS5 مجاز را با `proxy add` ثبت و با `proxy test` تأیید کنید. IP عمومی endpoint، port، username/password و IP خروجی sticky واقعی لازم‌اند؛ نصب‌کننده اشتراک پراکسی نمی‌خرد.
 2. مطابق **بخش ۸**، پیش از اولین provisioning پروفایل `/etc/android-farm/device-profiles/num01.json` را نصب کنید. از مدل شفاف QA، Android 11/12، resolution، DPI و locale همان سناریوی آزمایش استفاده کنید.
@@ -437,7 +452,7 @@ installer فایل `traefik/farm-auth.yml` و bcrypt user را در dynamic dire
 | مقصد | URL | لایه‌های ورود |
 |---|---|---|
 | کنترل دستگاه | `https://commex-box.com/d/numXX/` | Basic Auth؛ prefix سپس برای noVNC حذف می‌شود |
-| کنسول نمایشی | `https://commex-box.com/` | Basic Auth |
+| کنسول عملیاتی | `https://commex-box.com/` | Basic Auth و تأیید مجدد credential در API |
 | Grafana | `https://metrics.commex-box.com/` | Basic Auth بیرونی + login خود Grafana |
 
 نمونهٔ label دستگاه:
@@ -451,7 +466,13 @@ traefik.http.middlewares.farm-num01-strip.stripprefix.prefixes: /d/num01
 traefik.http.services.farm-num01.loadbalancer.server.port: "6080"
 ```
 
-این release از یک credential مشترک Basic Auth استفاده می‌کند و RBAC جداگانهٔ per-device یا MFA ندارد. اگر سطح دسترسی چندتیمی لازم است، middleware را با ForwardAuth/Authelia/OIDC و policyهای مسیرمحور جایگزین کنید؛ تا آن زمان credential را محدود و دوره‌ای rotate کنید.
+این release از یک credential مشترک Basic Auth استفاده می‌کند و RBAC جداگانهٔ per-device یا MFA ندارد. `farm-console-auth@file` هدر Authorization را برای تأیید مستقل API نگه می‌دارد؛ `farm-auth@file` برای screen و Grafana آن را حذف می‌کند. تغییر به OIDC/ForwardAuth نیازمند هماهنگ‌کردن احراز هویت API نیز هست؛ فقط تعویض middleware کافی نیست. [تنظیم removeHeader در Traefik](https://doc.traefik.io/traefik/reference/routing-configuration/http/middlewares/basicauth/#removeheader)
+
+API روی پورت TCP گوش نمی‌دهد. سرویس میزبان `android-farm-api.service` با Gunicorn روی `/run/android-farm-api/control.sock` اجرا می‌شود؛ فقط directory همان socket به‌صورت read-only در Nginx کنسول mount شده است. فایل `/etc/android-farm/api.json` شامل origin مجاز همان کنسول و مسیرهای خصوصی است؛ installer آن را پس از تأیید release نهایی می‌کند. پوشهٔ socket پیش از Deploy ساخته و با tmpfiles و `RuntimeDirectoryPreserve=yes` در restart حفظ می‌شود، بنابراین تعویض socket نیازمند redeploy کنسول نیست. [اتصال Nginx به Unix socket](https://nginx.org/en/docs/http/ngx_http_proxy_module.html#proxy_pass)
+
+صفحهٔ دستگاه فقط با وضعیت واقعی آمادهٔ screen نمایش داده می‌شود؛ بارگذاری iframe به‌تنهایی معیار سلامت نیست. صفحه‌های رویداد و صف، تاریخچهٔ عملیات وب را نشان می‌دهند و جای logهای Docker نیستند. صفحهٔ backup فعلاً metadata واقعی و درخواست ساخت backup دارد؛ دانلود/restore از وب ارائه نمی‌شود و بازیابی مطابق runbook میزبان انجام می‌شود. تنظیم‌های میزبان در وب فقط‌خواندنی‌اند.
+
+درخواست‌های تغییر وضعیت به Basic Auth، origin دقیق، توکن CSRF و idempotency key نیاز دارند. API shell دلخواه، Docker endpoint یا مسیر APK دلخواه از مرورگر نمی‌پذیرد. صف درخواست‌های وب در `/var/lib/android-farm/web/jobs.sqlite3` پایدار است و از Redis Worker مستقل است. پس از restart API، درخواست‌های queued/running قبلی `interrupted` می‌شوند و خودکار تکرار نمی‌شوند؛ وضعیت دستگاه را بررسی و در صورت نیاز درخواست تازه ثبت کنید.
 
 ### حالت اختیاری IP و پورت
 
@@ -466,7 +487,7 @@ GRAFANA_ROOT_URL=http://185.208.172.141:18080/metrics/
 GRAFANA_SERVE_FROM_SUB_PATH=true
 ```
 
-در این حالت Traefik labels وب غیرفعال‌اند. Nginx پس از Basic Auth، `/` را به کنسول، `/metrics/` را با همان prefix به Grafana و `/d/numXX/` را پس از حذف prefix به screen می‌رساند. اتصال WebSocket پشتیبانی می‌شود؛ نام backend فقط از ID معتبر دستگاه ساخته می‌شود و DNS داخلی Docker برای دستگاه‌هایی که بعداً روشن می‌شوند دوباره resolve می‌شود. درخواست برای دستگاه خاموش معمولاً `502` می‌گیرد؛ از `device-provisioner status` وضعیت را بررسی کنید. هدر Basic Auth به برنامه‌های داخلی منتقل نمی‌شود.
+در این حالت Traefik labels وب غیرفعال‌اند. Nginx پس از Basic Auth، `/` را به کنسول، `/api/` را با حفظ credential به API همان کنسول، `/metrics/` را با همان prefix به Grafana و `/d/numXX/` را پس از حذف prefix به screen می‌رساند. اتصال WebSocket پشتیبانی می‌شود؛ نام backend فقط از ID معتبر دستگاه ساخته می‌شود و DNS داخلی Docker برای دستگاه‌هایی که بعداً روشن می‌شوند دوباره resolve می‌شود. درخواست برای دستگاه خاموش معمولاً `502` می‌گیرد؛ از وضعیت واقعی پنل یا CLI بررسی کنید. هدر Basic Auth فقط در مسیر API حفظ می‌شود و به Grafana یا screen منتقل نمی‌شود.
 
 تنظیم `root_url` همراه `serve_from_sub_path=true` مطابق [راهنمای رسمی Grafana برای مسیر فرعی](https://grafana.com/tutorials/run-grafana-behind-a-proxy/#alternative-for-serving-grafana-under-a-sub-path) است. هدرهای Upgrade و Connection در درگاه مطابق [مستندات WebSocket در Nginx](https://nginx.org/en/docs/http/websocket.html) ارسال می‌شوند.
 
@@ -485,14 +506,14 @@ GRAFANA_SERVE_FROM_SUB_PATH=true
 ```bash
 sudo install -d -m 0700 /root/farm-input
 sudo bash -c 'umask 077; read -rsp "Proxy password: " p; printf "\n"; printf "%s\n" "$p" > /root/farm-input/proxy-01.pass'
-read -rp "Pinned public IPv4 of proxy endpoint: " PROXY_185.208.172.141
+read -rp "Pinned public IPv4 of proxy endpoint: " PROXY_ENDPOINT_IPV4
 read -rp "Expected sticky public egress IPv4: " PROXY_EGRESS_IPV4
 
 sudo device-provisioner proxy add \
   --id isp-frankfurt-01 \
   --label "ISP Frankfurt 01" \
   --type socks5 \
-  --server "$PROXY_185.208.172.141" \
+  --server "$PROXY_ENDPOINT_IPV4" \
   --port 1080 \
   --username qa-num01 \
   --password-file /root/farm-input/proxy-01.pass \
@@ -501,7 +522,7 @@ sudo device-provisioner proxy add \
 sudo device-provisioner proxy test --id isp-frankfurt-01
 sudo device-provisioner proxy show --id isp-frankfurt-01
 sudo device-provisioner proxy list --enabled-only
-unset PROXY_185.208.172.141 PROXY_EGRESS_IPV4
+unset PROXY_ENDPOINT_IPV4 PROXY_EGRESS_IPV4
 ```
 
 هر دو مقدار تعاملی باید IPv4 عمومی واقعی باشند. `test` درخواست HTTPS را با credential از stdin داخلی curl می‌فرستد، IP مشاهده‌شده را با `expected-ip` مقایسه و secret را در log چاپ نمی‌کند. در مسیر معمول، `up --request` با `proxy_id` همین record را به ID تازه تخصیص می‌دهد؛ `proxy assign` را برای پیش‌تخصیص دستی device جدید استفاده نکنید.
@@ -561,6 +582,48 @@ sudo device-provisioner render \
 ```
 
 ## ۹. APK عمومی/داخلیِ تأییدشده و تخصیص دستگاه
+
+### معرفی برنامهٔ قابل انتخاب در پنل
+
+این آماده‌سازی را مدیر میزبان یک‌بار برای هر نسخهٔ APK انجام می‌دهد. فایل APK باید از منبع مورداعتماد شما آمده باشد؛ پنل نسخه‌ای را از سایت ناشناس دانلود نمی‌کند. برای اینکه سرویس systemd به فایل دسترسی داشته باشد، APK را در مسیر مدیریت‌شدهٔ خارج از `/root` نگه دارید:
+
+```bash
+sudo install -d -m 0700 /opt/android-farm/apks
+sudo install -m 0600 /root/farm-input/approved-qa-app.apk /opt/android-farm/apks/qa-app.apk
+sudo sha256sum /opt/android-farm/apks/qa-app.apk
+sudo aapt dump badging /opt/android-farm/apks/qa-app.apk
+sudo apksigner verify --print-certs /opt/android-farm/apks/qa-app.apk
+```
+
+از خروجی `aapt` نام package و از `sha256sum` hash فایل را بردارید. fingerprint امضاکننده را با منبع مستقل منتشرکننده تطبیق دهید و در policy قسمت بعد مجاز کنید. سپس کاتالوگ خصوصی را ویرایش کنید:
+
+```bash
+sudoedit /etc/android-farm/apps.json
+sudo chown root:root /etc/android-farm/apps.json
+sudo chmod 0600 /etc/android-farm/apps.json
+```
+
+ساختار آن چنین است؛ `64_HEX_APK_SHA256` و package نمونه را با hash واقعی ۶۴ کاراکتری و package تأییدشده جایگزین کنید. `apk_activity` و `apk_permissions` اختیاری‌اند؛ بدون نیاز آزمون permission اضافه نکنید:
+
+```json
+{
+  "schema_version": 1,
+  "apps": [
+    {
+      "id": "qa-app",
+      "label": "برنامهٔ آزمون تأییدشده",
+      "apk_path": "/opt/android-farm/apks/qa-app.apk",
+      "apk_sha256": "64_HEX_APK_SHA256",
+      "apk_package": "com.example.qaapp",
+      "apk_permissions": []
+    }
+  ]
+}
+```
+
+صفحهٔ پنل را تازه کنید تا برنامه در فرم ساخت دستگاه دیده شود. انتخاب برنامه فقط به ID همین کاتالوگ اشاره می‌کند؛ مرورگر مسیر فایل، package یا signer دلخواه ارسال نمی‌کند. هنگام نصب، hash و امضای واقعی APK دوباره بررسی می‌شوند. نصب‌کننده در شروع کاتالوگ خالی می‌سازد و هنگام ارتقا محتوای بازبینی‌شدهٔ شما را حفظ می‌کند.
+
+### مجازکردن امضاکننده و مسیر جایگزین CLI
 
 ابتدا نمونهٔ policy را به مسیر خصوصی نصب و سپس `/etc/android-farm/apk-trust.json` را با package و SHA-256 گواهی signer که از کانال مستقل بررسی کرده‌اید تنظیم کنید:
 
@@ -779,7 +842,7 @@ sudo cat /etc/android-farm/monitoring/grafana-admin-password
 
 ## ۱۴. اعمال desired state با Ansible
 
-Ansible برای کنترل‌پلین میزبان است، نه جایگزین lifecycle on-demand. play با `serial: 1` اجرا می‌شود، Redis/worker/timer را نگه می‌دارد، profileهای QA را نصب و drift دستگاه‌های فعال را گزارش می‌کند. role کانتینرهای فارم را دسته‌جمعی recreate و `/data` را حذف نمی‌کند.
+Ansible برای کنترل‌پلین میزبان است، نه جایگزین lifecycle on-demand. play با `serial: 1` اجرا می‌شود، API وب و Redis/worker/timer را نگه می‌دارد، profileهای QA را نصب و drift دستگاه‌های فعال را گزارش می‌کند. role کانتینرهای فارم را دسته‌جمعی recreate و `/data` را حذف نمی‌کند. API با root و مسیرهای محدود قابل‌نوشتن اجرا می‌شود؛ Apache htpasswd برای احراز هویت، Gunicorn برای سرو HTTP روی Unix socket و همان release تأییدشده برای عملیات استفاده می‌شوند. سرویس‌ها `DOCKER_CONFIG=/var/lib/android-farm/docker-client` دارند تا Compose/Buildx بتواند وضعیت داخلی خود را در پوشهٔ خصوصی `0700` بنویسد؛ دسترسی به `/root` همچنان بسته است.
 
 روی یک controller مجزای user-owned یک checkout بازبینی‌شده داشته باشید. inventory، Vault و vars خصوصی را داخل `/opt/android-farm/source` سرور نسازید؛ آن tree root-owned است و محتویات زیر `ansible/` آن در release digest وارد می‌شود. نمونه:
 
@@ -812,6 +875,7 @@ desired state غیرحساس را در `$HOME/.config/android-farm-ansible/vars.
 ```yaml
 farm_redis_worker_password: "{{ vault_farm_redis_worker_password }}"
 farm_manage_redis: true
+farm_api_enabled: true
 farm_worker_enabled: true
 farm_health_enabled: true
 farm_health_interval: 1min
@@ -905,6 +969,8 @@ installer هیچ data، proxy secret، APK trust، inventory یا backup موج�
 
 ## ۱۸. چک‌لیست پذیرش روی Ubuntu واقعی
 
+قالب اعتبارسنجی توسعه در [`ci/validate.yml`](../ci/validate.yml) آماده است؛ فعلاً CI فعال نیست، چون مجوز اتصال GitHub اجازهٔ نوشتن workflow نمی‌دهد. برای فعال‌سازی بعدی، این فایل باید با دسترسی مجاز به `.github/workflows/validate.yml` منتقل شود. قالب برای تست/build رابط، تست‌های پایتون با کاربر root روی Ubuntu موقت، اجرای واقعی Gunicorn روی Unix socket، بررسی احراز هویت و بازیابی worker، و آزمون Nginx داخل کانتینر read-only تنظیم شده است؛ وجود آن به معنی موفقیت این آزمون‌های Linux نیست. تست و build محلی رابط با `cd web`، سپس `npm ci`، `npm test` و `npm run build` انجام می‌شود. این بررسی‌ها جای اجرای آزمایشی روی سرور را نمی‌گیرند: بوت Redroid، مسیر خروجی پراکسی و قطع امن آن، اتصال ADB و نمایش و کنترل واقعی صفحه باید با یک دستگاه روی میزبان مقصد تأیید شوند.
+
 قبل از production، با `num01` و یک APK QA کم‌خطر این موارد را مستند کنید:
 
 ### Host و release
@@ -983,7 +1049,7 @@ ss -ltnp | grep ':5551'
 ## ۱۹. امنیت و محدودیت‌های عملیاتی
 
 - Redroid privileged است و VM یا مرز multi-tenant امن محسوب نمی‌شود؛ فقط APK مورداعتماد QA اجرا کنید.
-- Docker group معادل root است. اپراتور روزمره نباید عضو آن باشد و socket نباید mount/publish شود.
+- Docker group معادل root است. اپراتور روزمره نباید عضو آن باشد؛ Docker socket در رابط وب mount نمی‌شود و پورت عمومی ندارد. API میزبان فقط عملیات محدود و احراز هویت‌شده را با دسترسی لازم اجرا می‌کند.
 - secretهای فارم در `/etc/android-farm` و state حساس در `/var/lib/android-farm` با مالک root و مجوز محدود نگهداری می‌شوند. استثنا، فایل bcrypt احراز هویت وب در dynamic directory خود Coolify است که فقط با مالک root یا UID `9999` و بدون دسترسی گروه/دیگران پذیرفته می‌شود.
 - شماره، password، token، APK و certificate خصوصی را در Git، Docker label، Coolify ENV یا log قرار ندهید.
 - `REDROID_IMAGE` در ENV فقط image کاتالوگ پایه را تعیین می‌کند. profile نسخهٔ Android را از نگاشت `REDROID_IMAGES` در `ops/device_profiles.py` انتخاب می‌کند؛ برای pin کردن profile، همان مقدار نسخه‌دار را در source بازبینی‌شده به `tag@sha256:...` تغییر دهید و release جدید بسازید. `PROXY_IMAGE` و `SCREEN_IMAGE` نام build محلی‌اند و باید tag قابل‌نوشتن باقی بمانند. imageهای upstream را پس از pilot با digest تأییدشده ثابت کنید.
@@ -1004,6 +1070,11 @@ ss -ltnp | grep ':5551'
 | gateway: `mkdir() "/var/cache/nginx/fastcgi_temp" failed (30: Read-only file system)` | مسیر موقت Nginx در نسخهٔ قبلی خارج از tmpfs است؛ بخش «توقف درگاه به‌دلیل مسیر موقت Nginx» را ببینید |
 | پاسخ دامنه `403` با `error code: 1010` | سیاست Browser Integrity Check لبهٔ Cloudflare؛ بخش «خطای 1010 در Cloudflare» را ببینید |
 | `doctor: blocked` | remediation همان check را اجرا کنید؛ معمولاً Binder، release mismatch، auth file یا local Docker context است |
+| کنسول باز می‌شود ولی API خطا دارد | `sudo systemctl status android-farm-api.service --no-pager` و `sudo journalctl -u android-farm-api.service -n 100 --no-pager`؛ سپس `/api/v1/health` را با credential وب بررسی کنید |
+| API پشت HTTPS دائماً 401 می‌دهد | label کنسول باید `farm-console-auth@file` باشد تا Authorization برای تأیید مستقل API حفظ شود؛ همان راه‌انداز را برای هماهنگ‌کردن middleware و Compose دوباره اجرا کنید |
+| API برای عملیات 403 می‌دهد | صفحه را تازه‌سازی کنید؛ origin باید دقیقاً با دامنه/پورت نصب‌شده در `api.json` برابر باشد. برای تغییر آدرس، راه‌انداز را با گزینهٔ دامنه/IP صحیح اجرا کنید |
+| فهرست برنامهٔ پنل خالی است | کاتالوگ `/etc/android-farm/apps.json`، فایل APK خصوصی خارج از `/root` و policy signer را طبق بخش ۹ آماده کنید |
+| درخواست وب `interrupted` شده | API هنگام درخواست restart شده است؛ ابتدا وضعیت واقعی دستگاه را ببینید، سپس در صورت نیاز درخواست تازه بسازید؛ تکرار خودکار انجام نمی‌شود |
 | راه‌انداز: نتیجهٔ Deploy نامعلوم | راه‌انداز ابتدا تاریخچهٔ API را بررسی می‌کند. فقط اگر در Coolify مطمئن شدید هیچ Deploy ساخته نشده، همان فرمان را با `--retry-deploy` تکرار کنید؛ درخواست نامعلوم خودکار تکرار نمی‌شود |
 | apply در `waiting_for_coolify` | `coolify.env` را در همان یک App وارد، همان release را deploy و apply یکسان را دوباره اجرا کنید |
 | start با capacity رد می‌شود | `resources --json`، RAM آزاد، load، disk و inode؛ limitها را دور نزنید |
@@ -1214,6 +1285,7 @@ modinfo -k "$(uname -r)" binder_linux
 | `services/worker/worker.py` | صف Redis و اجرای allowlist |
 | `monitoring/` | Prometheus، alert rules و provisioning Grafana |
 | `ansible/` | desired state کنترل‌پلین و profileها |
-| `web/` | کنسول UX نمایشی، بدون backend عملیاتی |
+| `web/` | کنسول متصل به API و Nginx با مسیر محدود Unix socket |
+| `services/api/` | API احراز هویت‌شده، صف پایدار وب و عملیات مجاز میزبان |
 
 منابع رسمی مرتبط: [Docker Compose در Coolify](https://next.coolify.io/docs/applications/builds/docker-compose)، [Traefik در Coolify](https://coolify.io/docs/core/networking/proxy/traefik/overview)، [مستندات Redroid](https://github.com/remote-android/redroid-doc)، [Prometheus](https://github.com/prometheus/prometheus/releases)، [Grafana](https://github.com/grafana/grafana/releases)، [node-exporter](https://github.com/prometheus/node_exporter/releases) و [cAdvisor](https://github.com/google/cadvisor).

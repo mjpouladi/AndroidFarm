@@ -1,4 +1,11 @@
 ---
+- name: Restart farm API
+  ansible.builtin.systemd:
+    name: android-farm-api.service
+    state: restarted
+    daemon_reload: true
+  when: farm_api_enabled | bool and not ansible_check_mode
+
 - name: Restart redis
   ansible.builtin.systemd:
     name: redis-server

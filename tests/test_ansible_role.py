@@ -44,7 +44,30 @@ class AnsibleRoleContractTests(unittest.TestCase):
 
     def test_check_mode_does_not_restart_services(self):
         handlers = (ROLE / "handlers" / "main.yml").read_text(encoding="utf-8")
-        self.assertEqual(handlers.count("not ansible_check_mode"), 3)
+        self.assertEqual(handlers.count("not ansible_check_mode"), 4)
+
+    def test_api_keeps_directory_inode_and_uses_reviewed_release(self):
+        unit = (ROLE / "templates" / "android-farm-api.service.j2").read_text(encoding="utf-8")
+        tasks = (ROLE / "tasks" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("RuntimeDirectoryPreserve=yes", unit)
+        self.assertIn("RuntimeDirectoryMode=0755", unit)
+        self.assertIn("WorkingDirectory={{ farm_effective_release_dir }}", unit)
+        self.assertIn("-m services.api.server --config {{ farm_api_config }}", unit)
+        self.assertIn("ReadWritePaths=/etc/android-farm /var/lib/android-farm", unit)
+        self.assertIn("services/api/requirements.txt", tasks)
+        self.assertIn("farm_api_configuration.stat.mode == '0600'", tasks)
+
+    def test_sandboxed_services_have_writable_docker_client_state(self):
+        tasks = (ROLE / "tasks" / "main.yml").read_text(encoding="utf-8")
+        self.assertIn("{path: /var/lib/android-farm/docker-client, mode: '0700'}", tasks)
+        for service in ('api', 'worker', 'health'):
+            unit = (ROLE / 'templates' / f'android-farm-{service}.service.j2').read_text(encoding='utf-8')
+            with self.subTest(service=service):
+                self.assertIn('ProtectHome=true', unit)
+                self.assertIn('ProtectSystem=strict', unit)
+                self.assertIn('Environment=DOCKER_CONFIG=/var/lib/android-farm/docker-client', unit)
+                paths = next(line for line in unit.splitlines() if line.startswith('ReadWritePaths='))
+                self.assertIn('/var/lib/android-farm', paths)
 
 
 if __name__ == "__main__":

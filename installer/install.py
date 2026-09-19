@@ -100,6 +100,8 @@ class Paths:
     data_root: Path = Path("/opt/farm/data/instances")
     wrapper: Path = Path("/usr/local/sbin/device-provisioner")
     traefik_dynamic_dir: Path = Path("/data/coolify/proxy/dynamic")
+    api_runtime_dir: Path = Path("/run/android-farm-api")
+    tmpfiles_dir: Path = Path("/etc/tmpfiles.d")
 
 
 @dataclass(frozen=True)
@@ -377,6 +379,37 @@ def build_provisioner_config(existing: Mapping[str, object], *, release_dir: Pat
         "proxy_store_dir": str(paths.config_dir / "proxies"),
     })
     return value
+
+
+def build_api_config(settings: Settings) -> dict[str, object]:
+    """Bind the web API to the reviewed host config and exact console origin."""
+    paths = settings.paths
+    origin = access_origin(access_mode=settings.access_mode,
+                           farm_domain=settings.console_domain,
+                           public_ip=settings.public_ip, http_port=settings.http_port)
+    return {
+        "schema_version": 1,
+        "provisioner_config": str(paths.config_dir / "provisioner.json"),
+        "auth_file": str(paths.traefik_dynamic_dir / "farm-users.htpasswd"),
+        "allowed_origins": [origin],
+        "socket_path": str(paths.api_runtime_dir / "control.sock"),
+        "state_dir": str(paths.state_dir / "web"),
+    }
+
+
+def prepare_api_runtime(paths: Paths) -> None:
+    """Create the bind-mount source before Coolify deploys, preserving its inode.
+
+    A directory bind, rather than an individual socket bind, allows the API to
+    replace its socket on restart without leaving Nginx with a stale inode.
+    tmpfiles recreates the directory during boot before Docker starts.
+    """
+    _safe_existing_directory(paths.api_runtime_dir, 0o755)
+    _safe_existing_directory(paths.tmpfiles_dir, 0o755)
+    # tmpfiles uses C-style quoting. Quote every path and escape its specifiers.
+    runtime = json.dumps(str(paths.api_runtime_dir).replace("%", "%%"))
+    _atomic_write(paths.tmpfiles_dir / "android-farm-api.conf",
+                  f"d {runtime} 0755 root root -\n".encode("utf-8"), 0o644)
 
 
 def sizing_summary(resource_report: Mapping[str, object] | None, catalog_count: int,
@@ -1360,9 +1393,11 @@ def install_managed_files(settings: Settings, discovered: Mapping[str, object]) 
     for path, mode in ((paths.config_dir, 0o700), (paths.config_dir / "secrets", 0o700),
                        (paths.config_dir / "proxies", 0o700),
                        (paths.config_dir / "monitoring", 0o700),
-                       (paths.state_dir, 0o700), (paths.backup_dir, 0o700),
+                       (paths.state_dir, 0o700), (paths.state_dir / "web", 0o700),
+                       (paths.backup_dir, 0o700),
                        (paths.data_root, 0o700)):
         _safe_existing_directory(path, mode)
+    prepare_api_runtime(paths)
     grafana_password = paths.config_dir / "monitoring" / "grafana-admin-password"
     if not grafana_password.exists():
         _atomic_write(grafana_password, (secrets.token_urlsafe(36) + "\n").encode(), 0o600)
@@ -1400,6 +1435,13 @@ def install_managed_files(settings: Settings, discovered: Mapping[str, object]) 
         if os.name == "posix" and trust_file.stat().st_uid != 0:
             raise RuntimeError(f"APK trust policy must be root-owned: {trust_file}")
         trust_file.chmod(0o600)
+    apps_file = paths.config_dir / "apps.json"
+    if not apps_file.exists() and not apps_file.is_symlink():
+        _atomic_write(apps_file, b'{"schema_version": 1, "apps": []}\n', 0o600)
+    else:
+        valid, detail = private_path_status(apps_file)
+        if not valid:
+            raise RuntimeError(f"reviewed application catalog is unsafe: {detail}")
     project = discovered.get("compose_project")
     anchor_release = discovered.get("anchor_release")
     config_path = paths.config_dir / "provisioner.json"
@@ -1434,6 +1476,9 @@ def install_managed_files(settings: Settings, discovered: Mapping[str, object]) 
                                           public_ip=settings.public_ip,
                                           http_port=settings.http_port)
         _atomic_write(config_path, (json.dumps(config, indent=2, sort_keys=True) + "\n").encode(), 0o600)
+        _atomic_write(paths.config_dir / "api.json",
+                      (json.dumps(build_api_config(settings), indent=2, sort_keys=True) + "\n").encode(),
+                      0o600)
         wrapper = ("#!/bin/sh\nset -eu\nexec /usr/bin/python3 " +
                    shlex.quote(str(release_dir / "provisioner.py")) + ' "$@"\n')
         _atomic_write(paths.wrapper, wrapper.encode(), 0o755)

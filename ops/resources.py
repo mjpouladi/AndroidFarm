@@ -48,7 +48,7 @@ def _existing_path(path):
 
 def local_docker():
     endpoint = subprocess.check_output(
-        ['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], text=True).strip()
+        ['docker', 'context', 'inspect', '--format', '{{.Endpoints.docker.Host}}'], text=True, timeout=15).strip()
     if not os.environ.get('DOCKER_CONTEXT'):
         endpoint = os.environ.get('DOCKER_HOST', endpoint)
     if endpoint != 'unix:///var/run/docker.sock':
@@ -88,7 +88,7 @@ def probe(data_root=Path('/opt/farm/data/instances'), policy_limit=None):
             used = int((node / 'memory.current').read_text())
             total, available = min(total, limit), min(available, max(0, limit - used))
     docker_root = subprocess.check_output(
-        ['docker', 'info', '--format', '{{.DockerRootDir}}'], text=True).strip()
+        ['docker', 'info', '--format', '{{.DockerRootDir}}'], text=True, timeout=15).strip()
     storage_path = _existing_path(data_root)
     docker_storage_path = _existing_path(docker_root)
     disk = shutil.disk_usage(storage_path)

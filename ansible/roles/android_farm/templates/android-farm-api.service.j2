@@ -1,0 +1,33 @@
+[Unit]
+Description=Android Farm authenticated management API
+After=network-online.target docker.service systemd-tmpfiles-setup.service
+Wants=network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory={{ farm_effective_release_dir }}
+Environment=PYTHONDONTWRITEBYTECODE=1
+# Compose/Buildx needs writable client state while /root remains inaccessible.
+Environment=DOCKER_CONFIG=/var/lib/android-farm/docker-client
+# Re-render/restart when installer-owned origins or paths change in api.json.
+Environment=FARM_API_CONFIGURATION_REVISION={{ (farm_api_configuration.stat | default({})).checksum | default('disabled') }}
+ExecStart={{ farm_python_venv }}/bin/python -m services.api.server --config {{ farm_api_config }}
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=60s
+# Nginx bind-mounts this directory. Never replace it during service restart.
+RuntimeDirectory=android-farm-api
+RuntimeDirectoryMode=0755
+RuntimeDirectoryPreserve=yes
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/etc/android-farm /var/lib/android-farm /var/backups/android-farm /opt/farm/data/instances /run /var/run
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

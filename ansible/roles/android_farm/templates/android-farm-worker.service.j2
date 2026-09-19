@@ -13,6 +13,7 @@ Group=root
 WorkingDirectory={{ farm_effective_release_dir }}
 EnvironmentFile=/etc/android-farm/worker.env
 Environment=PYTHONDONTWRITEBYTECODE=1
+Environment=DOCKER_CONFIG=/var/lib/android-farm/docker-client
 ExecStart={{ farm_python_venv }}/bin/python -m services.worker.worker --config {{ farm_provisioner_config }} run
 Restart=on-failure
 RestartSec=5s

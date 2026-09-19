@@ -4,3 +4,9 @@ http:
       basicAuth:
         usersFile: /traefik/dynamic/farm-users.htpasswd
         removeHeader: true
+    # The host API verifies credentials itself on every request.
+    # Screen/Grafana routes keep using farm-auth, which strips credentials.
+    farm-console-auth:
+      basicAuth:
+        usersFile: /traefik/dynamic/farm-users.htpasswd
+        removeHeader: false
