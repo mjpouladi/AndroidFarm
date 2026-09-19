@@ -469,6 +469,88 @@ def backup(device, destination):
     print(f'Backup: {final}; manifest: {manifest}; device remains stopped')
 
 
+def remove(device, secret_dir, registry, store_dir, *, purge_data=False,
+           state_dir=Path('/var/lib/android-farm'), profile_dir=Path('/etc/android-farm/device-profiles')):
+    """Decommission a device: stop it, drop its containers, registry links and secrets.
+
+    The inventory index stays monotonic, so the identifier is never reused. Persistent
+    data (the bind-mounted directory and its named volume) is kept unless
+    ``purge_data`` is set; a backup taken beforehand is the operator's decision.
+    """
+    device = canonical_device(device)
+    inventory_path = state_dir / 'inventory.json'
+    state = inventory.load(inventory_path)
+    record = inventory.find(state, device)
+    if not record:
+        raise RuntimeError('device is not allocated in the managed inventory')
+    try:
+        stop(device)
+    except RuntimeError as exc:
+        # The chain is deleted below anyway; a guard failure must not leave a half-removed device.
+        print(f'{device}: {exc}; continuing with removal', file=sys.stderr)
+    removed = {'device': device, 'containers': [], 'networks': [], 'files': [], 'volume': None,
+               'data_directory': None, 'proxy_released': None}
+    for kind in ('screen', 'android', 'proxy'):
+        name = f'{kind}-{device}'
+        if inspect(name) is not None:
+            run('docker', 'rm', '-f', name, timeout=120)
+            removed['containers'].append(name)
+    plan = network_plan(device_index(device, aliases=False))
+    # Host guard: drop the per-device chain and its DOCKER-USER jump (best effort).
+    subprocess.run(['iptables', '-w', '-D', 'DOCKER-USER', '-i', plan['bridge'], '-j', plan['iptables_chain']],
+                   capture_output=True)
+    for argv in (['iptables', '-w', '-F', plan['iptables_chain']], ['iptables', '-w', '-X', plan['iptables_chain']]):
+        subprocess.run(argv, capture_output=True)
+    for network in (f'farm-egress-{device}', f'farm-control-{device}'):
+        if subprocess.run(['docker', 'network', 'inspect', network], capture_output=True).returncode == 0:
+            subprocess.run(['docker', 'network', 'rm', network], capture_output=True, timeout=60)
+            removed['networks'].append(network)
+    volume = f'redroid-data-{device}'
+    if purge_data:
+        if subprocess.run(['docker', 'volume', 'inspect', volume], capture_output=True).returncode == 0:
+            run('docker', 'volume', 'rm', volume, timeout=120)
+            removed['volume'] = volume
+        directory = DATA_ROOT / device
+        if directory.exists() and not directory.is_symlink():
+            import shutil
+            shutil.rmtree(directory)
+            removed['data_directory'] = str(directory)
+    for path in (Path(secret_dir) / f'{device}.json',
+                 state_dir / 'device-overrides' / f'{device}.json',
+                 *([state_dir / 'identities' / f'{device}.json'] if purge_data else []),
+                 Path(profile_dir) / f'{device}.json' if purge_data else None):
+        if path is not None and path.exists() and not path.is_symlink():
+            path.unlink()
+            removed['files'].append(str(path))
+    # Registry links: the proxy becomes free for another device; hold and intent go away.
+    proxy_id = record.get('proxy_id')
+    if proxy_id:
+        try:
+            ProxyStore(registry, store_dir).unassign(proxy_id, device)
+            removed['proxy_released'] = proxy_id
+        except (KeyError, RuntimeError) as exc:
+            print(f'{device}: proxy {proxy_id} was not released: {exc}', file=sys.stderr)
+    holds_path = state_dir / 'holds.json'
+    if holds_path.exists():
+        holds = read_private_json(holds_path, 'safety holds')
+        if isinstance(holds, dict) and device in holds:
+            holds.pop(device)
+            atomic_json(holds_path, holds)
+    try:
+        desired = desired_state.load(state_dir / 'desired-state.json')
+        if device in desired['devices']:
+            desired['devices'].pop(device)
+            atomic_json(state_dir / 'desired-state.json', desired)
+    except (OSError, RuntimeError):
+        pass
+    state['devices'].pop(device)
+    inventory.save(inventory_path, state)
+    events.note('device-removed', device, 'data purged' if purge_data else 'data kept')
+    print(f"{device} removed; {'data purged' if purge_data else 'persistent data kept'}; "
+          f"proxy {'released: ' + proxy_id if proxy_id else 'none'}")
+    return removed
+
+
 def _sha256(path):
     import hashlib
     digest = hashlib.sha256()
@@ -481,7 +563,7 @@ def _sha256(path):
 def main():
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument('action', choices=['start', 'recover', 'recover-crashed', 'recover-screen', 'stop',
-                                      'check', 'ip', 'backup', 'status'])
+                                      'check', 'ip', 'backup', 'status', 'remove'])
     p.add_argument('device', nargs='?')
     p.add_argument('--compose', default='docker-compose.farm.yml')
     p.add_argument('--env-file', type=Path)
@@ -492,6 +574,8 @@ def main():
     p.add_argument('--proxy-store-dir', type=Path, default=Path('/etc/android-farm/proxies'))
     p.add_argument('--profile-dir', type=Path, default=Path('/etc/android-farm/device-profiles'))
     p.add_argument('--backup-dir', type=Path, default=Path('/var/backups/android-farm'))
+    p.add_argument('--purge-data', action='store_true',
+                   help='with remove: also delete the persistent data, volume, identity baseline and profile')
     args = p.parse_args()
     if os.name != 'posix' or os.geteuid() != 0:
         p.error('run on the Ubuntu Docker host as root')
@@ -517,6 +601,9 @@ def main():
                               'android_shell': android_egress_ip(d), 'checked_at': int(time.time())}))
         elif args.action == 'backup':
             backup(d, args.backup_dir)
+        elif args.action == 'remove':
+            remove(d, args.secret_dir, args.proxy_registry, args.proxy_store_dir,
+                   purge_data=args.purge_data, profile_dir=args.profile_dir)
         elif args.action == 'recover-screen':
             # Health recovery must never recreate a missing container or start
             # a screen after an operator intentionally stopped Android.  This

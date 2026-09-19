@@ -331,6 +331,10 @@ def build_parser():
     status.add_argument('--json', action='store_true')
     backup = sub.add_parser('backup', help='create a consistent offline data backup')
     backup.add_argument('--id', dest='device', required=True)
+    remove = sub.add_parser('remove', help='decommission a device: stop it, release its proxy and drop it from the inventory')
+    remove.add_argument('--id', dest='device', required=True)
+    remove.add_argument('--purge-data', action='store_true',
+                        help='also delete the persistent data, volume, identity baseline and profile (irreversible)')
     hold = sub.add_parser('hold', help='persist a safety hold, then stop the device')
     hold.add_argument('--id', dest='device', required=True)
     hold.add_argument('--reason', required=True,
@@ -594,6 +598,8 @@ def main(argv=None):
             print_status(payload)
     elif args.command == 'backup':
         farmctl(config, 'backup', canonical_device(args.device))
+    elif args.command == 'remove':
+        farmctl(config, 'remove', canonical_device(args.device), *(('--purge-data',) if args.purge_data else ()))
     elif args.command == 'hold':
         invoke('account_policy.py', 'hold', canonical_device(args.device), '--reason', args.reason)
     elif args.command == 'release':

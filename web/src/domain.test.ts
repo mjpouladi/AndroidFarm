@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activeDevices, deviceStatus, egressText, isSnapshotFresh, parseSnapshot, provisionableProxies, screenPath, type Device, type Job, type ProxyRecord } from './domain';
+import { actionText, activeDevices, deviceStatus, egressText, eventText, isSnapshotFresh, parseSnapshot, provisionableProxies, resumablePhases, screenPath, startablePhases, type Device, type Job, type ProxyRecord } from './domain';
 
 const device: Device = { id: 'num01', phase: 'ready_for_operator', hold: null,
   containers: { android: 'running', proxy: 'healthy', screen: 'running' }, adb: '127.0.0.1:5551',
@@ -110,5 +110,14 @@ describe('وضعیت واقعی و مرز اعتماد API', () => {
     expect(provisionableProxies([{ ...proxy, state: 'disabled' }], [{ ...device, phase: 'failed' }])).toEqual([]);
     expect(provisionableProxies([proxy], [])).toEqual([]);
     expect(provisionableProxies([{ ...proxy, assigned_device: null }], [])).toHaveLength(1);
+  });
+
+  it('مرحلهٔ ناتمام را از مرحلهٔ قابل روشن‌شدن جدا می‌کند و حذف دستگاه را می‌شناسد', () => {
+    expect(startablePhases).toContain('ready_for_operator');
+    expect(startablePhases).not.toContain('failed');
+    expect(resumablePhases).toContain('failed');
+    for (const phase of ['reserved', 'volume_created', 'secret_installed', 'installing_apk', 'failed']) expect(startablePhases).not.toContain(phase);
+    expect(actionText.remove).toBe('حذف دستگاه از فارم');
+    expect(eventText['device-removed']).toBe('دستگاه از فارم حذف شد');
   });
 });

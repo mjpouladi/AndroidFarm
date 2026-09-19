@@ -906,7 +906,16 @@ sudo device-provisioner restart --id num01
 
 # پایان کار؛ /data و inventory حفظ می‌شود
 sudo device-provisioner down --id num01
+
+# حذف دستگاه از فارم: stop محافظت‌شده، حذف کانتینرها/شبکه/گارد، آزادکردن پراکسی و حذف از inventory
+sudo device-provisioner remove --id num01
+# همان حذف به‌همراه پاک‌کردن دادهٔ پایدار، ولوم، baseline هویت و پروفایل (برگشت‌ناپذیر)
+sudo device-provisioner remove --id num01 --purge-data
 ```
+
+**«روشن‌کردن» ساده فقط برای دستگاهی کار می‌کند که آماده‌سازی‌اش کامل شده باشد** (`ready_for_operator`) یا در میانهٔ `starting`/`identity_baselining` مانده باشد. اگر دستگاه در مرحلهٔ `failed`، `reserved`، `volume_created`، `secret_installed` یا `installing_apk` باشد، `up` با پیام «the device preparation is incomplete; resume it through provisioning … or remove the device» رد می‌شود. دو راه دارید: در کنسول دکمهٔ «ادامهٔ آماده‌سازی» را بزنید و همان شماره، همان مسیر خروجی (پراکسی یا مستقیم) و همان برنامهٔ درخواست اول را دوباره تأیید کنید (میزبان سازگاری درخواست را با `request_hash` بررسی می‌کند)؛ یا اگر آن دستگاه را نمی‌خواهید، آن را با دکمهٔ «حذف دستگاه از فارم» (تایپ شناسه برای تأیید) یا `remove` حذف کنید. تا وقتی یک دستگاه ناتمام در inventory باشد، دستگاه جدید هم ساخته نمی‌شود («resume or quarantine the incomplete device before adding another»). مرحلهٔ فعلی هر دستگاه را با `sudo device-provisioner status` ببینید.
+
+حذف، شناسهٔ دستگاه را بازنشسته می‌کند: `next_index` موجودی یکنواخت است و `num01` دوباره تخصیص داده نمی‌شود (دستگاه بعدی `num02` می‌شود). بدون `--purge-data`، پوشهٔ `/opt/farm/data/instances/numXX`، ولوم `redroid-data-numXX` و baseline هویت روی میزبان می‌مانند و فقط با فرمان میزبان پاک می‌شوند؛ کنسول همین گزینه را با یک تیک جداگانه می‌گیرد. پیش از حذف با پاک‌کردن داده، در صورت نیاز `backup` بگیرید.
 
 `restart` در کنسول (دکمهٔ «راه‌اندازی مجدد» در جزئیات دستگاه)، در API و در Worker با همان مسیر اجرا می‌شود. ترتیب start عمداً fail-closed است: proxy بدون Android بالا می‌آید و IP آن بررسی می‌شود؛ guard بسته می‌شود؛ Android و screen boot و baseline بررسی می‌شوند؛ Android موقت pause، proxy دوباره آزمون و سپس IP shell Android با IP مصوب مقایسه می‌شود. هر mismatch باعث stop می‌شود. `check-ip` هنگام تغییر IP یک hold پایدار ثبت و device را متوقف می‌کند.
 
@@ -1347,6 +1356,8 @@ ss -ltnp | grep ':5551'
 | راه‌انداز: نتیجهٔ Deploy نامعلوم | راه‌انداز ابتدا تاریخچهٔ API را بررسی می‌کند. فقط اگر در Coolify مطمئن شدید هیچ Deploy ساخته نشده، همان فرمان را با `--retry-deploy` تکرار کنید؛ درخواست نامعلوم خودکار تکرار نمی‌شود |
 | apply در `waiting_for_coolify` | `coolify.env` را در همان یک App وارد، همان release را deploy و apply یکسان را دوباره اجرا کنید |
 | start با capacity رد می‌شود | `resources --json`، RAM آزاد، load، disk و inode؛ limitها را دور نزنید |
+| `the device preparation is incomplete; resume it through provisioning … or remove the device` | مرحلهٔ دستگاه در `status` ناتمام است (مثلاً `failed`)؛ در کنسول «ادامهٔ آماده‌سازی» را با همان شماره/پراکسی/برنامه بزنید یا با «حذف دستگاه از فارم» / `remove --id numXX` حذف کنید؛ بخش ۱۰ |
+| `resume or quarantine the incomplete device before adding another` | تا تکمیل یا حذف دستگاه ناتمام، دستگاه جدید ساخته نمی‌شود؛ همان دو راه بالا |
 | proxy test mismatch | expected IP، endpoint pin‌شده، sticky session و credential فروشنده؛ device را روشن نکنید |
 | ADB در booting است | تا پایان boot grace صبر کنید؛ سپس log Redroid، Binder و فشار CPU/RAM را بررسی کنید |
 | screen پاسخ نمی‌دهد | سلامت `screen-numXX`، route Traefik، middleware و WebSocket را بررسی کنید |

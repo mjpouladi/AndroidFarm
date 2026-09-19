@@ -464,6 +464,24 @@ class ApiOperationsTests(unittest.TestCase):
         self.assertLessEqual(len(result.stdout), 65536)
         self.assertGreater(len(result.stdout), 60000)
 
+    def test_remove_needs_the_repeated_identifier_and_forwards_the_purge_choice(self):
+        for payload, message in (({'action': 'remove', 'device': 'num01'}, 'required request fields'),
+                                 ({'action': 'remove', 'device': 'num01', 'params': {'confirm': 'num02'}}, 'repeat the device'),
+                                 ({'action': 'remove', 'device': 'num01', 'params': {'confirm': 'num01', 'purge_data': 'yes'}}, 'boolean'),
+                                 ({'action': 'remove', 'device': 'num02', 'params': {'confirm': 'num02'}}, 'not allocated'),
+                                 ({'action': 'remove', 'params': {'confirm': 'num01'}}, 'device')):
+            with self.subTest(payload=payload), self.assertRaisesRegex(ValueError, message):
+                self.ops.validate_job(payload)
+        result = self.ops.execute({'action': 'remove', 'device': 'num01', 'params': {'confirm': 'num01'}})
+        self.assertEqual(self.runner.call_args.args[0][-3:], ['remove', '--id', 'num01'])
+        self.assertEqual(result, {'action': 'remove', 'device': 'num01', 'completed': True, 'data_purged': False})
+        purged = self.ops.execute({'action': 'remove', 'device': 'num01', 'params': {'confirm': 'num01', 'purge_data': True}})
+        self.assertEqual(self.runner.call_args.args[0][-4:], ['remove', '--id', 'num01', '--purge-data'])
+        self.assertTrue(purged['data_purged'])
+        self.runner.return_value = subprocess.CompletedProcess([], 1, 'num01: device is not in a startable managed phase', '')
+        with self.assertRaisesRegex(OperationError, 'resume it through provisioning .* or remove the device'):
+            self.ops.execute({'action': 'up', 'device': 'num01'})
+
     def test_subprocess_timeout_is_safe(self):
         with self.assertRaisesRegex(OperationError, 'timed out'):
             bounded_process([sys.executable, '-c', 'import time; time.sleep(30)'],

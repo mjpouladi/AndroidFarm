@@ -60,7 +60,9 @@ HOST_FAILURES = (
     ('approved sticky egress IP mismatch', 'proxy egress differs from the approved sticky IP; the device was returned to the stopped state'),
     ('Android-shell egress IP mismatch', 'Android shell egress differs from the proxy namespace; the device was returned to the stopped state'),
     ('device has no valid approved egress IP', 'the device record has no valid approved egress IP; review its allocation'),
-    ('not in a startable managed phase', 'the device preparation is incomplete; resume it through provisioning, not a plain start'),
+    ('not in a startable managed phase', 'the device preparation is incomplete; resume it through provisioning '
+                                        '(same phone, egress and application) or remove the device, not a plain start'),
+    ('host egress guard update failed', 'the host iptables egress guard could not be updated; check iptables on the host'),
     ('device is not allocated in the managed inventory', 'the device is not allocated in the managed inventory'),
     ('managed proxy is disabled or no longer assigned', 'the allocated proxy is disabled or no longer assigned to this device'),
     ('installed proxy credential differs', 'the installed proxy credential differs from the registry; rotate or repair the proxy'),
@@ -227,7 +229,7 @@ class Operations:
         action = payload['action']
         if not isinstance(action, str) or action not in LIFECYCLE | PROXY_ACTIONS | {
                 'provision', 'proxy-add', 'credential-rotate', 'proxy-credentials', 'core-activate',
-                'artifact-import', 'artifact-remove'}:
+                'artifact-import', 'artifact-remove', 'remove'}:
             raise ValueError('unsupported action')
         params = payload.get('params', {})
         if not isinstance(params, dict):
@@ -241,6 +243,18 @@ class Operations:
             else:
                 _fields(params, set())
             device = _device(payload.get('device'))
+            if not inventory.find(inventory.load(config.state_dir / 'inventory.json'), device):
+                raise ValueError('device is not allocated in the managed inventory')
+            return {'action': action, 'device': device, 'params': dict(params)}
+        if action == 'remove':
+            # Decommissioning is irreversible for the identifier, so the caller
+            # repeats it explicitly; purging the persistent data is a second opt-in.
+            _fields(params, {'confirm'}, {'purge_data'})
+            device = _device(payload.get('device'))
+            if params['confirm'] != device:
+                raise ValueError('confirm must repeat the device identifier exactly')
+            if params.get('purge_data', False) is not False and params.get('purge_data') is not True:
+                raise ValueError('purge_data must be a boolean')
             if not inventory.find(inventory.load(config.state_dir / 'inventory.json'), device):
                 raise ValueError('device is not allocated in the managed inventory')
             return {'action': action, 'device': device, 'params': dict(params)}
@@ -439,6 +453,11 @@ class Operations:
                 except (ValueError, KeyError, TypeError):
                     raise OperationError('host returned invalid IP check evidence') from None
             return result
+        if action == 'remove':
+            device = job['device']
+            purge = params.get('purge_data') is True
+            self._command('remove', '--id', device, *(('--purge-data',) if purge else ()))
+            return {'action': action, 'device': device, 'completed': True, 'data_purged': purge}
         if action == 'provision':
             app = self._catalog()[params['artifact_id']]
             request = {key: value for key, value in app.items() if key.startswith('apk_')}

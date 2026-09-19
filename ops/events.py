@@ -30,6 +30,7 @@ KINDS = frozenset({
     'recovery-started', 'recovery-succeeded', 'recovery-failed', 'recovery-skipped',
     'device-held', 'device-released', 'provisioning-completed', 'provisioning-failed',
     'environment-applied', 'environment-failed', 'artifact-imported', 'artifact-removed',
+    'device-removed',
 })
 MAX_LINES = 5000
 KEEP_LINES = 2000

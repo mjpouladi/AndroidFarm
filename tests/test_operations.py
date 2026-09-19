@@ -389,6 +389,128 @@ class OperationsTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 app_installer.install('num01', artifact, ['android.permission.READ_SMS'])
 
+    def test_remove_decommissions_a_device_and_never_reuses_its_identifier(self):
+        import os
+        from unittest.mock import Mock
+        from ops import farmctl
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            os.environ['ANDROID_FARM_EVENT_LOG'] = str(root / 'events.jsonl')
+            self.addCleanup(os.environ.pop, 'ANDROID_FARM_EVENT_LOG', None)
+            state = inventory.empty_inventory()
+            record, _ = inventory.choose(state, 'phone-1', 'proxy-1', 'request-1')
+            record.update(phase='failed', proxy_id='qa-proxy')
+            inventory.save(root / 'inventory.json', state)
+            for name, payload in (('holds.json', {'num01': {'reason': 'maintenance', 'at': 1}}),
+                                  ('desired-state.json', {'schema_version': 1, 'devices': {'num01': {'running': True, 'updated_at': 1}}})):
+                (root / name).write_text(json.dumps(payload))
+                (root / name).chmod(0o600)
+            files = {'secret': root / 'secrets' / 'num01.json', 'override': root / 'device-overrides' / 'num01.json',
+                     'identity': root / 'identities' / 'num01.json', 'profile': root / 'profiles' / 'num01.json'}
+            for path in files.values():
+                path.parent.mkdir(mode=0o700, exist_ok=True)
+                path.write_text('{}')
+                path.chmod(0o600)
+            data_root = root / 'instances'
+            (data_root / 'num01' / 'data').mkdir(parents=True)
+            commands = []
+
+            def fake_subprocess(argv, **kwargs):
+                commands.append(list(argv))
+                missing = argv[:3] == ['docker', 'network', 'inspect'] and argv[3] == 'farm-control-num01'
+                return subprocess.CompletedProcess(argv, 1 if missing else 0, '', '')
+
+            def fake_inspect(name):
+                return {'State': {'Running': False}} if name != 'proxy-num01' else None
+
+            store = Mock()
+            with patch('ops.farmctl.stop', side_effect=RuntimeError('host egress guard update failed')) as stop, \
+                    patch('ops.farmctl.inspect', side_effect=fake_inspect), \
+                    patch('ops.farmctl.run', side_effect=lambda *argv, **kw: commands.append(list(argv))), \
+                    patch('ops.farmctl.subprocess.run', side_effect=fake_subprocess), \
+                    patch('ops.farmctl.ProxyStore', return_value=store), \
+                    patch('ops.farmctl.DATA_ROOT', data_root):
+                removed = farmctl.remove('dev01', root / 'secrets', root / 'proxies.json', root / 'proxies',
+                                         state_dir=root, profile_dir=root / 'profiles')
+            stop.assert_called_once_with('num01')
+            self.assertEqual(removed['containers'], ['screen-num01', 'android-num01'])
+            self.assertEqual(removed['networks'], ['farm-egress-num01'])
+            self.assertIsNone(removed['volume'])
+            self.assertIsNone(removed['data_directory'])
+            self.assertEqual(removed['proxy_released'], 'qa-proxy')
+            store.unassign.assert_called_once_with('qa-proxy', 'num01')
+            self.assertIn(['docker', 'rm', '-f', 'android-num01'], commands)
+            self.assertIn(['iptables', '-w', '-X', 'AF00001'], commands)
+            self.assertIn(['docker', 'network', 'rm', 'farm-egress-num01'], commands)
+            self.assertNotIn(['docker', 'network', 'rm', 'farm-control-num01'], commands)
+            self.assertFalse(any(argv[:3] == ['docker', 'volume', 'rm'] for argv in commands))
+            # Secrets and overrides are gone; the identity baseline, profile and data survive without --purge-data.
+            self.assertFalse(files['secret'].exists())
+            self.assertFalse(files['override'].exists())
+            self.assertTrue(files['identity'].exists() and files['profile'].exists())
+            self.assertTrue((data_root / 'num01' / 'data').exists())
+            self.assertEqual(json.loads((root / 'holds.json').read_text()), {})
+            self.assertEqual(json.loads((root / 'desired-state.json').read_text())['devices'], {})
+            after = inventory.load(root / 'inventory.json')
+            self.assertEqual(after['devices'], {})
+            self.assertEqual(after['next_index'], 2)
+            self.assertEqual(inventory.choose(after, 'phone-2', 'proxy-2', 'request-2')[0]['id'], 'num02')
+            self.assertIn('"kind":"device-removed"', (root / 'events.jsonl').read_text())
+            with self.assertRaisesRegex(RuntimeError, 'not allocated'):
+                with patch('ops.farmctl.stop'):
+                    farmctl.remove('num01', root / 'secrets', root / 'proxies.json', root / 'proxies', state_dir=root)
+
+    def test_remove_with_purge_drops_the_volume_data_identity_and_profile(self):
+        import os
+        from unittest.mock import Mock
+        from ops import farmctl
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            os.environ['ANDROID_FARM_EVENT_LOG'] = str(root / 'events.jsonl')
+            self.addCleanup(os.environ.pop, 'ANDROID_FARM_EVENT_LOG', None)
+            state = inventory.empty_inventory()
+            record, _ = inventory.choose(state, 'phone-1', 'direct:phone-1', 'request-1')
+            record.update(phase='ready_for_operator', egress='direct')
+            inventory.save(root / 'inventory.json', state)
+            for path in (root / 'identities' / 'num01.json', root / 'profiles' / 'num01.json'):
+                path.parent.mkdir(mode=0o700, exist_ok=True)
+                path.write_text('{}')
+                path.chmod(0o600)
+            data_root = root / 'instances'
+            (data_root / 'num01' / 'data').mkdir(parents=True)
+            (data_root / 'num01' / 'data' / 'file').write_text('x')
+            commands = []
+            with patch('ops.farmctl.stop'), patch('ops.farmctl.inspect', return_value=None), \
+                    patch('ops.farmctl.run', side_effect=lambda *argv, **kw: commands.append(list(argv))), \
+                    patch('ops.farmctl.subprocess.run',
+                          side_effect=lambda argv, **kw: (commands.append(list(argv)) or subprocess.CompletedProcess(argv, 0, '', ''))), \
+                    patch('ops.farmctl.ProxyStore', return_value=Mock()) as store, \
+                    patch('ops.farmctl.DATA_ROOT', data_root):
+                removed = farmctl.remove('num01', root / 'secrets', root / 'proxies.json', root / 'proxies',
+                                         purge_data=True, state_dir=root, profile_dir=root / 'profiles')
+            self.assertEqual(removed['volume'], 'redroid-data-num01')
+            self.assertEqual(removed['data_directory'], str(data_root / 'num01'))
+            self.assertIsNone(removed['proxy_released'])
+            store.assert_not_called()
+            self.assertIn(['docker', 'volume', 'rm', 'redroid-data-num01'], commands)
+            self.assertFalse((data_root / 'num01').exists())
+            self.assertFalse((root / 'identities' / 'num01.json').exists())
+            self.assertFalse((root / 'profiles' / 'num01.json').exists())
+            self.assertEqual(inventory.load(root / 'inventory.json')['devices'], {})
+
+    def test_provisioner_remove_forwards_only_the_explicit_purge_flag(self):
+        import provisioner
+        config = Config(Path('compose'), None, 'project', Path('secrets'), Path('backups'), 'https://farm.example.com')
+        with patch('provisioner.load_config', return_value=config), patch('provisioner.invoke') as invoke, \
+                patch('sys.argv', ['device-provisioner', '--config', 'config.json', 'remove', '--id', 'dev01']):
+            provisioner.main()
+        self.assertEqual(invoke.call_args.args[:3], ('farmctl.py', 'remove', 'num01'))
+        self.assertNotIn('--purge-data', invoke.call_args.args)
+        with patch('provisioner.load_config', return_value=config), patch('provisioner.invoke') as invoke, \
+                patch('sys.argv', ['device-provisioner', '--config', 'config.json', 'remove', '--id', 'num01', '--purge-data']):
+            provisioner.main()
+        self.assertEqual(invoke.call_args.args[-1], '--purge-data')
+
 
 if __name__ == '__main__':
     unittest.main()

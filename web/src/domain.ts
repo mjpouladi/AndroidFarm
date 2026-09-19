@@ -31,7 +31,8 @@ export const eventText: Record<string, string> = { 'device-started': 'دستگا
   'recovery-skipped': 'بازیابی لازم نبود', 'device-held': 'توقف حفاظتی ثبت شد', 'device-released': 'توقف حفاظتی رفع شد',
   'provisioning-completed': 'آماده‌سازی کامل شد', 'provisioning-failed': 'آماده‌سازی ناموفق', 'environment-applied': 'منطقهٔ زمانی/زبان اعمال شد',
   'environment-failed': 'منطقهٔ زمانی اعمال نشد',
-  'artifact-imported': 'APK در مخزن ثبت شد', 'artifact-removed': 'APK از مخزن حذف شد' };
+  'artifact-imported': 'APK در مخزن ثبت شد', 'artifact-removed': 'APK از مخزن حذف شد',
+  'device-removed': 'دستگاه از فارم حذف شد' };
 export type Snapshot = { schema_version: 1; collected_at: number; csrf_token: string; resources: ResourceReport | null;
   devices: Device[]; proxies: ProxyRecord[]; backups: Backup[]; artifacts: Artifact[];
   errors: { component: string; message: string }[]; jobs: Job[];
@@ -47,7 +48,7 @@ export const actionText: Record<string, string> = { up: 'روشن‌کردن', d
   'check-ip': 'بررسی IP خروجی', backup: 'پشتیبان‌گیری', provision: 'آماده‌سازی دستگاه',
   'proxy-add': 'ثبت پراکسی', 'proxy-test': 'تست پراکسی', 'proxy-enable': 'فعال‌کردن پراکسی', 'proxy-disable': 'غیرفعال‌کردن پراکسی',
   'credential-rotate': 'تغییر اطلاعات ورود', 'proxy-credentials': 'تغییر رمز پراکسی', 'core-activate': 'راه‌اندازی سرویس‌های مرکزی', release: 'رفع توقف حفاظتی',
-  'artifact-import': 'ثبت APK در مخزن', 'artifact-remove': 'حذف APK از مخزن' };
+  'artifact-import': 'ثبت APK در مخزن', 'artifact-remove': 'حذف APK از مخزن', remove: 'حذف دستگاه از فارم' };
 export const runningContainer = (state: string) => ['running', 'healthy', 'starting', 'unhealthy', 'paused', 'restarting'].includes(state);
 export const activeDevices = (devices: Device[]) => devices.filter(d => d.running ?? runningContainer(d.containers.android)).length;
 export const activeJob = (job: Job) => job.state === 'queued' || job.state === 'running';
@@ -55,6 +56,8 @@ export const formatTime = (stamp: number) => new Date(stamp * 1000).toLocaleStri
 export const formatSize = (bytes: number) => bytes >= 1024 ** 3 ? `${fa(bytes / 1024 ** 3)} GB` : `${fa(bytes / 1024 ** 2)} MB`;
 // Phases in which the same request may be replayed to finish an interrupted preparation.
 export const resumablePhases = ['reserved', 'volume_created', 'secret_installed', 'identity_baselining', 'starting', 'installing_apk', 'failed'];
+// Phases the host accepts for a plain start; every other phase needs provisioning to be resumed or the device removed.
+export const startablePhases = ['ready_for_operator', 'ready_for_manual_registration', 'starting', 'identity_baselining'];
 export const provisionableProxies = (proxies: ProxyRecord[], devices: Device[]) => proxies.filter(proxy => {
   if (proxy.state !== 'enabled') return false;
   if (!proxy.assigned_device) return true;
