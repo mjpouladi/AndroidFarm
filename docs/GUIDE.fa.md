@@ -2,13 +2,28 @@
 
 این سند مرجع واحد پلتفرم است. موضوع آن ساخت و نگهداری یک فارم Android/Redroid برای **QA و آزمون داخلیِ مجاز** روی Ubuntu 22.04/24.04 و Coolify است. تعداد دستگاه‌های پایدار از پیش روی ۷۰ قفل نشده است؛ installer با CPU، RAM، فضای دیسک و inodeهای همان میزبان، ظرفیت کاتالوگ و ظرفیت همزمان را محاسبه می‌کند و دستگاه‌ها را به‌ترتیب `num01`، `num02` و ... تخصیص می‌دهد.
 
+## شروع سریع روی سرور شما
+
+1. در DNS دامنهٔ `commex-box.com` دو رکورد **A با DNS only** بسازید/اصلاح کنید: `@ → 185.208.172.141` و `metrics → 185.208.172.141`. رکورد موجود `coolify` را نگه دارید و TCP `80/443` را در فایروال سرور قابل دسترس کنید.
+2. در [پنل Coolify شما](https://coolify.commex-box.com)، **Settings → Configuration → Advanced → API Access** را فعال کنید؛ سپس از **Keys & Tokens → API Tokens** توکن موقت `root` برای تیم پروژه بسازید.
+3. از SSH روی سرور `185.208.172.141` دو فرمان زیر را اجرا و توکن را فقط در ورودی مخفی راه‌انداز وارد کنید:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mjpouladi/AndroidFarm/main/install.sh -o install-android-farm.sh
+sudo bash install-android-farm.sh --domain commex-box.com
+```
+
+4. پس از پایان پنج مرحله، **[پلتفرم](https://commex-box.com)** و **[مانیتورینگ](https://metrics.commex-box.com)** را با اطلاعات ورود چاپ‌شده باز کنید؛ `sudo device-provisioner status` وضعیت واقعی را نشان می‌دهد. صفحهٔ دستگاه پس از تخصیص/روشن‌شدن در `https://commex-box.com/d/num01/` است.
+
+نصب تازه کنسول را روی خود دامنه و API Coolify را روی `http://127.0.0.1:8000` تنظیم می‌کند. اگر هر مرحله مبهم بود، **بخش ۵ همین سند** تمام مراحل DNS، توکن، نصب، آزمون و نخستین دستگاه را با جزئیات دارد. کنسول فعلی دموی UX است؛ عملیات واقعی از CLI انجام می‌شود.
+
 این پروژه دورزدن محدودیت‌های Meta، Play Integrity یا سامانه‌های ضدسوءاستفاده را انجام نمی‌دهد و احتمال مسدودشدن هیچ حسابی را تضمین نمی‌کند. تولید/تغییر IMEI، جا زدن کانتینر به‌عنوان گوشی تجاری، جعل شناسهٔ سخت‌افزاری، پنهان‌کردن root/container، خودکارسازی OTP یا ثبت‌نام انبوه و نصب خودکار WhatsApp در محدودهٔ این پیاده‌سازی نیست. نصب برنامه فقط برای APK عمومی/داخلیِ تأییدشده، با hash و signer از پیش مجاز، انجام می‌شود.
 
 ## ۱. وضعیت واقعی قابلیت‌ها
 
 | بخش | وضعیت | توضیح دقیق |
 |---|---|---|
-| نصب هدایت‌شده | پیاده‌سازی و آزمون واحد با API شبیه‌سازی‌شده | `install.sh`، دریافت دامنه/توکن، ساخت و deploy برنامه در Coolify، ادامه پس از قطع، فعال‌سازی خودکار Worker و health؛ پذیرش API روی Coolify واقعی لازم است |
+| نصب هدایت‌شده | پیاده‌سازی و آزمون واحد با API شبیه‌سازی‌شده | `install.sh`، حالت پیش‌فرض دامنه و HTTPS، IP/پورت اختیاری، ساخت و deploy برنامه در Coolify، ادامه پس از قطع، فعال‌سازی خودکار Worker و health؛ پذیرش روی Coolify واقعی لازم است |
 | installer میزبان | پیاده‌سازی و آزمون واحد | `plan/apply/doctor`، release تغییرناپذیر مبتنی بر محتوا، نصب Docker و ابزارهای لازم، Binder و تنظیم Basic Auth؛ دو مرحله را راه‌انداز ساده هماهنگ می‌کند |
 | کاتالوگ و ظرفیت | پیاده‌سازی و آزمون واحد | ظرفیت فعال بر اساس منابع زنده و ظرفیت کاتالوگ بر اساس دیسک؛ کاتالوگ نصب‌شده خودکار کوچک نمی‌شود |
 | lifecycle دستگاه | پیاده‌سازی و آزمون واحد | start/stop/check/check-ip/status/hold/release/backup با حفظ `/data` و کنترل topology Compose |
@@ -19,7 +34,7 @@
 | Prometheus/Grafana | پیکربندی آماده | CPU، uptime، سلامت ADB، latency و سلامت proxy و تعداد recovery؛ باید روی سرور مقصد scrape و dashboard تأیید شود |
 | Ansible | پیکربندی آماده | Redis محلی، worker، timer سلامت، پروفایل‌های دستگاه و تشخیص drift؛ اجرا به‌صورت `serial: 1` و بدون حذف data |
 | کنسول وب | **دموی تعاملی** | ظاهر و جریان UX را نشان می‌دهد؛ به Docker/API/Redis وصل نیست و دکمه‌های آن عملیات واقعی انجام نمی‌دهند |
-| پذیرش production | نیازمند اجرای Ubuntu | بوت Redroid، Binder، proxy واقعی، TLS/Traefik، noVNC/WebSocket، kill-switch و restore باید روی میزبان واقعی با pilot تأیید شوند |
+| پذیرش production | نیازمند اجرای Ubuntu | بوت Redroid، Binder، proxy واقعی، HTTP/Nginx یا TLS/Traefik، noVNC/WebSocket، kill-switch و restore باید روی میزبان واقعی با pilot تأیید شوند |
 
 وجود تست واحد یا parse شدن Compose جای آزمون پذیرش روی سرور مقصد را نمی‌گیرد.
 
@@ -28,14 +43,19 @@
 ```mermaid
 flowchart TB
   U[اپراتور مجاز] -->|HTTPS + Basic Auth| T[Traefik داخلی Coolify]
+  U -->|IP:18080 + Basic Auth| GW[درگاه Nginx حالت بدون دامنه]
   T --> C[کنسول نمایشی]
   T --> G[Grafana]
   T -->|/d/numXX/| S[screen-numXX\nnoVNC + scrcpy]
+  GW --> C
+  GW -->|/metrics/| G
+  GW -->|/d/numXX/| S
 
   subgraph Core[یک Compose Application در Coolify]
     A[farm-anchor]
     C
     G
+    GW
     P[Prometheus]
     N[node-exporter]
     D[cAdvisor]
@@ -69,16 +89,16 @@ flowchart TB
   H -->|textfile metrics| N
 ```
 
-در Coolify فقط فایل ریشهٔ `docker-compose.yml` به‌عنوان یک Application وارد می‌شود. این stack شامل `farm-anchor`، کنسول، Prometheus، node-exporter، cAdvisor، آماده‌ساز یک‌بارهٔ secret و Grafana است. کاتالوگ `docker-compose.farm.yml` را agent میزبان با project ثابت `android-farm-runtime` مدیریت می‌کند؛ Coolify آن را deploy نمی‌کند تا redeploy هسته دستگاه‌های on-demand را orphan یا حذف نکند.
+در Coolify فقط فایل ریشهٔ `docker-compose.yml` به‌عنوان یک Application وارد می‌شود. این stack شامل `farm-anchor`، کنسول، درگاه Nginx، Prometheus، node-exporter، cAdvisor، آماده‌سازهای یک‌بارهٔ secret و Grafana است. در حالت IP درگاه فقط یک پورت منتشر می‌کند و نیازی به تغییر proxy سراسری Coolify نیست؛ در حالت دامنه، دسترسی اصلی با Traefik است و درگاه HTTP فقط روی loopback می‌ماند. کاتالوگ `docker-compose.farm.yml` را agent میزبان با project ثابت `android-farm-runtime` مدیریت می‌کند؛ Coolify آن را deploy نمی‌کند تا redeploy هسته دستگاه‌های on-demand را orphan یا حذف نکند.
 
 برای هر دستگاه این اجزا ساخته می‌شود:
 
 - `proxy-numXX`: gateway خروجی و تنها دارندهٔ مسیر اینترنت؛ `restart: "no"`.
 - `android-numXX`: Redroid privileged با `network_mode: service:proxy-numXX` و `restart: "no"`.
-- `screen-numXX`: scrcpy/Xvfb/noVNC، فقط پشت Traefik و `farm-auth@file`؛ `restart: "no"`.
+- `screen-numXX`: scrcpy/Xvfb/noVNC، پشت درگاه احراز هویت‌شدهٔ IP یا Traefik و `farm-auth@file`؛ `restart: "no"`.
 - `redroid-data-numXX`: volume خارجی با bind کنترل‌شده به `/opt/farm/data/instances/numXX/data`.
 
-ADB با فرمول `5550 + index` فقط روی loopback منتشر می‌شود؛ `num01` برابر `127.0.0.1:5551` است. route صفحه `https://farm.example.com/d/num01/` است. شمارهٔ تلفن در Docker label ذخیره نمی‌شود؛ inventory خصوصی فقط مقدار mask/HMAC را نگه می‌دارد.
+ADB با فرمول `5550 + index` فقط روی loopback منتشر می‌شود؛ `num01` برابر `127.0.0.1:5551` است. route صفحه در حالت بدون دامنه `http://185.208.172.141:18080/d/num01/` و در حالت دامنه `https://commex-box.com/d/num01/` است. شمارهٔ تلفن در Docker label ذخیره نمی‌شود؛ inventory خصوصی فقط مقدار mask/HMAC را نگه می‌دارد.
 
 Android و proxy شبکهٔ یکسان دارند. guard در chainهای اختصاصی `DOCKER-USER` فقط TCP به IPv4 و port تأییدشدهٔ upstream را عبور می‌دهد و بقیهٔ خروجی bridge را drop می‌کند. قطع proxy نباید باعث fallback به IP دیتاسنتر شود. شبکهٔ `coolify` یک شبکهٔ اشتراکی مورداعتماد است؛ workload غیرمورداعتماد را به آن وصل نکنید.
 
@@ -102,8 +122,8 @@ sudo device-provisioner status --json
 
 - Ubuntu Server 22.04 یا 24.04 روی خود host، نه داخل کانتینر.
 - Coolify و Traefik داخلی آن از قبل فعال باشند.
-- DNSهای `farm.example.com`، `console.farm.example.com` و `metrics.farm.example.com` به سرور اشاره کنند.
-- پورت‌های 80 و 443 از اینترنت مجاز سازمان در دسترس باشند؛ ADB عمومی نباشد.
+- برای مسیر اصلی، دامنهٔ `commex-box.com`، سرور `185.208.172.141` و TCP `80/443` قابل دسترس باشند. DNSهای `commex-box.com` و `metrics.commex-box.com` را مطابق بخش بعد به این سرور وصل کنید.
+- حالت اختیاری بدون دامنه به TCP `18080` از شبکهٔ مطمئن/VPN نیاز دارد. قواعد انتشار پورت Docker می‌توانند از قواعد معمول UFW عبور کنند؛ فایروال شبکه/ارائه‌دهنده را هم تنظیم کنید ([مستندات Docker](https://docs.docker.com/engine/network/packet-filtering-firewalls/#docker-and-ufw)). ADB عمومی نباشد.
 - kernel میزبان Binder را ارائه کند؛ cgroup v2 و Docker rootful محلی لازم است.
 - `/dev/kmsg` باید به‌صورت character device موجود باشد؛ Compose فعلی آن را برای cAdvisor mount می‌کند و روی VPS فاقد آن deploy هسته fail می‌شود.
 - `DOCKER_HOST` و `DOCKER_CONTEXT` نباید به daemon راه‌دور اشاره کنند.
@@ -111,54 +131,189 @@ sudo device-provisioner status --json
 
 installer در صورت نیاز Docker CE، Compose plugin و ابزارهای `iptables`، `htpasswd`، `apksigner`، `aapt`، `rsync` و `restic` را نصب می‌کند، `binder_linux` را load و persistent می‌کند و Compose نسخهٔ 2.33.1 یا بالاتر را الزام می‌کند. نصب/پارتیشن‌بندی خود Ubuntu و نصب خود Coolify خارج از installer است.
 
-## ۵. نصب ساده و هدایت‌شده
+## ۵. نصب قدم‌به‌قدم با دامنه و HTTPS
 
-مسیر پیشنهادی اجرای راه‌انداز روی **همان میزبان Docker/Coolify** است. خود Ubuntu و Coolify باید از قبل نصب باشند؛ هیچ رمز SSH یا API را در گفتگو ارسال نکنید.
+این مسیر اصلی نصب است؛ مراحل این بخش را به‌ترتیب انجام دهید. فقط **DNS، دسترسی API Coolify و اجرای راه‌انداز** بر عهدهٔ شماست؛ راه‌انداز Project، Application، ENV، Deploy و سرویس‌های میزبان را ایجاد می‌کند. بخش دستی انتهای همین فصل برای نصب سفارشی است و در مسیر ساده لازم نیست.
 
-ابتدا سه نام DNS را به IP سرور وصل کنید: دامنهٔ فارم، `console.` و `metrics.` زیر آن. برای مثال `farm.example.com`، `console.farm.example.com` و `metrics.farm.example.com`. رکورد wildcard زیر دامنهٔ فارم نیز برای دو نام آخر کافی است.
+این راهنما با اطلاعات سرور شما تنظیم شده است: **IPv4 برابر `185.208.172.141`، دامنهٔ اصلی پلتفرم `https://commex-box.com` و پنل موجود `https://coolify.commex-box.com`**. کنسول روی ریشهٔ دامنه، دستگاه‌ها زیر `/d/numXX/` و Grafana روی `https://metrics.commex-box.com` قرار می‌گیرند. راه‌انداز را روی **همین سرور Ubuntu که Docker/Coolify دارد** اجرا کنید. تنظیم DNS یا Deploy روی سرور هنوز از طرف این راهنما انجام نشده است.
 
-در Coolify دسترسی API را فعال کنید و از **Keys & Tokens → API tokens** یک توکن تیم مربوط با مجوز خواندن، نوشتن و Deploy بسازید. سپس روی ترمینال سرور:
+### گام ۱ — DNS دامنه را وصل کنید
+
+در پنل DNS دامنهٔ خود، zone مربوط به `commex-box.com` را باز کنید. این دو رکورد **صریح** را بسازید؛ اگر رکورد A/CNAME قدیمی با همین نام‌ها وجود دارد، آن را اصلاح کنید تا مقصد متناقض باقی نماند. رکورد موجود `coolify` را تغییر ندهید:
+
+| Type | Name در zone `commex-box.com` | IPv4 / Content | نتیجه |
+|---|---|---|---|
+| A | `@` | `185.208.172.141` | `commex-box.com` برای کنسول و دستگاه‌ها |
+| A | `metrics` | `185.208.172.141` | `metrics.commex-box.com` برای Grafana |
+
+TTL را روی `Auto` یا `300` بگذارید. بعضی پنل‌ها به‌جای `@` نام کامل `commex-box.com` می‌خواهند؛ ستون نتیجه نام نهایی است و نباید دوبار `commex-box.com` به آن اضافه شود. این انتخاب ریشهٔ دامنه را به پلتفرم منتقل می‌کند؛ اگر قبلاً سایتی روی آن بوده، محتوای ریشه پس از انتقال مربوط به این پلتفرم خواهد بود. در Coolify نیز App دیگری نباید router فعال برای همین دامنه داشته باشد.
+
+اگر DNS در Cloudflare است، برای شروع هر دو رکورد را **DNS only، ابر خاکستری** قرار دهید. DNS-only آدرس خود سرور را برمی‌گرداند؛ رکورد Proxied آدرس‌های Cloudflare را برمی‌گرداند. انتخاب DNS-only در مرحلهٔ نصب، بررسی DNS و صدور گواهی مستقیم را ساده می‌کند؛ این انتخاب توصیهٔ این راهنماست، نه الزام همیشگی Cloudflare ([توضیح رسمی Proxy status](https://developers.cloudflare.com/dns/proxy-status/)).
+
+اگر wildcard مانند `*` از قبل به‌صورت Proxied دارید، رکورد صریح `metrics` را اضافه کنید تا تنظیم مستقل داشته باشد؛ wildcard و رکورد پنل فعلی را صرفاً برای این نصب حذف نکنید. پس از DNS-only شدن، برای هر دو نام پلتفرم باید خود `185.208.172.141` را ببینید، نه IPهای لبهٔ Cloudflare.
+
+اگر IPv6 این سرور را واقعاً تنظیم نکرده‌اید، برای این دو نام رکورد **AAAA نسازید**؛ AAAA قدیمی به سرور دیگر را اصلاح یا حذف کنید. در صورت استفاده از IPv6، مقصد و دسترسی 80/443 آن هم باید درست باشد. اگر nameserverهای دامنه هنوز به DNS provider انتخاب‌شده وصل نیستند، ابتدا آن اتصال را در ثبت‌کنندهٔ دامنه کامل کنید.
+
+روی سرور، پس از انتشار DNS بررسی کنید:
+
+```bash
+getent ahostsv4 commex-box.com
+getent ahostsv4 metrics.commex-box.com
+```
+
+IPv4های خروجی باید همان `185.208.172.141` باشند. نبود خروجی یا IP قدیمی یعنی هنوز DNS درست/منتشر نشده است. دامنهٔ خود پنل Coolify مستقل است: اگر از قبل با `https://coolify.commex-box.com` وارد آن می‌شوید همان را نگه دارید؛ ساخت رکورد `coolify` برای نصب فارم اجباری نیست.
+
+### گام ۲ — سرور و ورودی وب را آماده کنید
+
+Ubuntu 22.04/24.04 و Coolify باید از قبل نصب و پنل قابل ورود باشد. در Coolify، **Servers → سرور مقصد** را باز کنید؛ اتصال سرور باید معتبر و proxy از نوع **Traefik** فعال باشد. در فایروال ارائه‌دهنده یا Security Group همان سرور، TCP `80` و `443` را برای وب عمومی باز کنید. پورت SSH فعلی خود را حفظ کنید. Coolify از 80 برای HTTP و صدور گواهی و از 443 برای HTTPS استفاده می‌کند ([راهنمای رسمی فایروال](https://coolify.io/docs/core/infrastructure/servers/firewall)).
+
+برای این حالت، پورت `18080` را عمومی نکنید؛ درگاه آن فقط روی loopback می‌ماند. Redis، Docker API و ADB نیز پورت عمومی لازم ندارند. راه‌انداز فایروال ارائه‌دهنده را تغییر نمی‌دهد و proxy دوم روی 80/443 نصب نمی‌کند؛ از همان Traefik و resolver گواهی Coolify استفاده می‌شود ([معماری Traefik در Coolify](https://coolify.io/docs/core/networking/proxy/traefik/overview)).
+
+### گام ۳ — API Coolify و توکن نصب
+
+با کاربر مدیر/مالک تیمی وارد Coolify شوید که قرار است پروژه در آن ساخته شود:
+
+1. از **Settings → Configuration → Advanced**، گزینهٔ **API Access** را روشن و Save کنید.
+2. اگر **Allowed IPs for API Access** تنظیم شده است، مبدأ واقعی درخواست‌های این سرور باید مجاز باشد. این گزینه حتی با توکن معتبر می‌تواند 403 بدهد؛ پشت NAT یا شبکهٔ Docker، مبدأیی را مجاز کنید که Coolify دریافت می‌کند ([مستندات API Allowlist](https://coolify.io/docs/api/ip-allowlist)).
+3. از **Keys & Tokens → API Tokens** توکنی با نام مثلاً `android-farm-installer` و زمان انقضای کوتاه بسازید.
+4. برای این نصب‌کننده که پروژه/برنامه را می‌سازد، ENV را می‌خواند/می‌نویسد و Deploy می‌کند، در UI فعلی Coolify مجوز **root** را انتخاب کنید. توکن فقط متعلق به همان تیم است. گزینهٔ `deploy` در UI فعلی توکن deploy-only می‌سازد و برای ساخت پروژه کافی نیست ([مجوزهای رسمی Coolify](https://coolify.io/docs/api/permissions)).
+5. Create را بزنید و **کل توکن** را در محل خصوصی نگه دارید؛ فقط یک‌بار نمایش داده می‌شود. پس از پایان نصب می‌توانید آن را Revoke کنید و برای ارتقای بعدی توکن تازه بسازید ([راهنمای ساخت و لغو توکن](https://coolify.io/docs/core/security/credentials/api-tokens)).
+
+توکن را داخل Git، Compose، فرمان shell یا گفتگو وارد نکنید؛ راه‌انداز آن را با ورودی مخفی می‌پرسد و در argv، state یا ENV ذخیره نمی‌کند.
+
+### گام ۴ — دو فرمان نصب را روی سرور اجرا کنید
+
+با SSH به سرور `185.208.172.141` وصل شوید و این دو فرمان را اجرا کنید. API را از loopback همان میزبان صدا می‌زنیم تا سیاست‌های Cloudflare جلوی نصب‌کننده را نگیرند؛ آدرس مرورگری پنل همان `https://coolify.commex-box.com` باقی می‌ماند:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mjpouladi/AndroidFarm/main/install.sh -o install-android-farm.sh
-sudo bash install-android-farm.sh
+sudo bash install-android-farm.sh --domain commex-box.com
 ```
 
-راه‌انداز دامنهٔ فارم، آدرس پنل و توکن را می‌پرسد. اگر Coolify روی همین سرور است، آدرس پیش‌فرض `http://127.0.0.1:8000` را با Enter بپذیرید. برای آدرس راه‌دور HTTPS لازم است. توکن در terminal پنهان است، در argv، state یا ENV نوشته نمی‌شود و فقط برای همان اجرای راه‌انداز در حافظه می‌ماند. در محیط چندسروری/NAT ممکن است UUID سرور همین میزبان نیز پرسیده شود؛ این مقدار در صفحهٔ Servers در Coolify قابل مشاهده است.
+در نصب تازه، کنسول به‌صورت پیش‌فرض روی همان دامنه قرار می‌گیرد و API از `http://127.0.0.1:8000` استفاده می‌کند. بدون گزینهٔ `--domain` نیز راه‌انداز دامنه را می‌پرسد. نصب قبلی تنظیم‌های ذخیره‌شدهٔ خودش را حفظ می‌کند؛ برای تبدیل آن به این طرح، فرمان صریح انتهای همین بخش با `--console-domain commex-box.com` را اجرا کنید. پیش از تغییر نصب موجود، دستگاه‌های روشن را با `device-provisioner down --id numXX` خاموش کنید.
 
-این مراحل خودکار انجام می‌شوند:
+در سؤال‌های راه‌انداز:
 
-1. دریافت source رسمی؛ حفظ تغییرات محلی و توقف در صورت تعارض؛
-2. تشخیص منابع، Binder، شبکه و آماده‌سازی release خصوصی؛
-3. ساخت یا بازیابی Project `android-farm` و Application `farm-core`؛
-4. تنظیم Compose و ENV و pin کردن Deploy به commit دقیق source؛
-5. انتظار برای Deploy و تطبیق release روی همین میزبان؛
-6. فعال‌سازی CLI، Redis محلی، Worker و timer سلامت با role موجود Ansible؛
-7. بررسی نهایی میزبان و پاسخ 401 وب بدون credential.
+| سؤال | مقدار مناسب |
+|---|---|
+| دامنه، اگر در فرمان نداده‌اید | `commex-box.com` |
+| آدرس Coolify، اگر در فرمان نداده‌اید | روی همین سرور، `http://127.0.0.1:8000`؛ HTTPS پنل فقط وقتی API آن از مبدأ شما قابل دسترس باشد |
+| API token | کل توکن گام قبل؛ ورودی آن پنهان است |
+| Server UUID، فقط اگر تشخیص خودکار مبهم باشد | UUID همین میزبان از صفحهٔ Servers در Coolify |
 
-خروجی پایان، لینک‌ها و نام کاربری `operator` را نشان می‌دهد. رمز وب در terminal تعاملی یک‌بار نشان داده می‌شود و فایل خصوصی آن `/etc/android-farm/web-login-password` است. رمز اولیهٔ داخلی Grafana در `/etc/android-farm/monitoring/grafana-admin-password` است؛ Grafana علاوه بر Basic Auth، login خودش را دارد. هیچ دستگاهی خودکار روشن نمی‌شود و کنسول وب همچنان دموی UX است؛ عملیات از CLI انجام می‌شود.
+توکن HTTP فقط برای آدرس loopback محلی پذیرفته می‌شود؛ URL راه‌دور Coolify باید HTTPS معتبر داشته باشد. لازم نیست فایل ENV بسازید یا از قبل App جدیدی در Coolify ایجاد کنید.
 
-اگر نصب یا اتصال SSH قطع شد، همان فرمان را تکرار کنید:
+راه‌انداز در terminal پنج مرحله نشان می‌دهد:
+
+1. `۱/۵`: بررسی منابع، Binder، شبکه، پورت‌ها و آماده‌سازی میزبان/release؛
+2. `۲/۵`: ساخت یا بازیابی Project `android-farm` و Application `farm-core`؛
+3. `۳/۵`: انتقال ENV و Deploy از commit دقیق source؛ ساخت نخستین imageها ممکن است چند دقیقه طول بکشد؛
+4. `۴/۵`: فعال‌سازی CLI، Redis محلی، Worker و timer سلامت؛
+5. `۵/۵`: doctor، وضعیت سرویس‌ها، TLS و پاسخ 401 وب بدون credential.
+
+source موجود با تغییر محلی بازنویسی نمی‌شود؛ راه‌انداز در تعارض متوقف می‌شود. اگر Redis متعلق به سرویس دیگری روی میزبان باشد نیز آن را تصاحب نمی‌کند؛ برای آن نصب سفارشی از بخش ۱۴ استفاده کنید.
+
+### گام ۵ — نتیجهٔ Deploy را در همان برنامهٔ Coolify ببینید
+
+در پنل، **Projects → android-farm → محیط ایجادشده → farm-core** را باز کنید؛ UUID برنامه در خروجی راه‌انداز چاپ می‌شود. **برنامهٔ دوم نسازید.** در Deployments باید Deploy همان commit به حالت `finished` رسیده باشد و Logs خطای تکرارشونده نداشته باشند.
+
+راه‌انداز این تنظیم‌ها را انجام داده است؛ فقط آن‌ها را بازبینی کنید:
+
+| تنظیم | مقدار |
+|---|---|
+| مخزن / branch | `mjpouladi/AndroidFarm` / `main` با Deploy متصل به commit مشخص |
+| Build Pack | `Docker Compose` |
+| Base Directory / Compose Location | `/` و `/docker-compose.yml` |
+| Raw Compose Deployment | فعال؛ routeها و شبکه در Compose این مخزن تعریف شده‌اند |
+| Environment Variables | مقدارهای تولیدشده از `/etc/android-farm/coolify.env` |
+| Service Domains خودکار | خالی؛ دامنهٔ اضافه یا دامنهٔ تصادفی برای serviceها نسازید |
+
+در حالت Raw، مسئولیت proxy labels و networking با Compose است؛ راه‌انداز این موارد را تنظیم می‌کند ([راهنمای رسمی Docker Compose و Raw Deployment](https://coolify.io/docs/applications/builds/docker-compose#raw-compose-deployment-for-an-application)). Domainهای این پروژه از `FARM_DOMAIN`، `CONSOLE_DOMAIN` و `GRAFANA_DOMAIN` می‌آیند. `docker-compose.farm.yml` برنامهٔ جداگانهٔ Coolify نیست.
+
+آماده‌سازهای secret، سرویس یک‌باره‌اند و باید با exit code صفر تمام شوند؛ «Exited (0)» برای آن‌ها طبیعی است. `farm-anchor`، `farm-console`، gateway، Prometheus، node-exporter، cAdvisor و Grafana باید در حال اجرا باشند. پس از نصب هسته هنوز Androidی روشن نشده است.
+
+### گام ۶ — ورود و آزمون اولیهٔ HTTPS
+
+خروجی راه‌انداز لینک‌ها و کاربر `operator` را نشان می‌دهد. رمز وب در terminal تعاملی یک‌بار نمایش داده و در `/etc/android-farm/web-login-password` با دسترسی خصوصی نگه داشته می‌شود. رمز اولیهٔ داخلی Grafana جداست و در `/etc/android-farm/monitoring/grafana-admin-password` قرار دارد. فقط روی terminal خصوصی خود، در صورت نیاز آن‌ها را بخوانید؛ محتوا را در تیکت یا log اشتراکی قرار ندهید:
+
+```bash
+sudo cat /etc/android-farm/web-login-password
+sudo cat /etc/android-farm/monitoring/grafana-admin-password
+```
+
+| مقصد | نشانی شما | ورود |
+|---|---|---|
+| کنسول نمایشی | `https://commex-box.com/` | Basic Auth با `operator` |
+| Grafana | `https://metrics.commex-box.com/` | ابتدا Basic Auth، سپس `admin` و رمز اولیهٔ Grafana |
+| صفحهٔ دستگاه، پس از ساخت و روشن‌کردن | `https://commex-box.com/d/num01/` | Basic Auth با `operator` |
+
+از رایانهٔ اپراتور یا ترمینال سرور، TLS و محافظت دو سرویس آماده را بررسی کنید:
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
+curl -sS -o /dev/null -w '%{http_code}\n' https://metrics.commex-box.com/
+curl -u operator -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
+```
+
+دو فرمان اول باید `401` بدهند؛ فرمان سوم رمز وب را تعاملی می‌پرسد و باید `200` بدهد. از `-k` برای نادیده‌گرفتن خطای گواهی استفاده نکنید؛ خطای TLS را با DNS، 80/443 و log proxy رفع کنید. در مرورگر گواهی معتبر، بازشدن کنسول و login داخلی Grafana را هم تأیید کنید.
+
+**کنسول فعلی دموی UX است:** دکمه‌های آن به سرور وصل نیستند. مدیریت واقعی با `sudo device-provisioner ...` انجام می‌شود. ریشهٔ `https://commex-box.com/` کنسول را نشان می‌دهد و گواهی همین دامنه همراه Deploy هسته ایجاد می‌شود. مسیر `/d/num01/` تا پیش از ایجاد و روشن‌شدن دستگاه می‌تواند 404 بدهد؛ صفحه و WebSocket دستگاه را پس از گام بعد آزمایش کنید.
+
+### گام ۷ — نخستین دستگاه QA را به‌ترتیب آماده کنید
+
+ابتدا ظرفیت و خالی‌بودن نصب تازه را ببینید:
+
+```bash
+sudo device-provisioner resources
+sudo device-provisioner status
+```
+
+سپس فقط یک pilot بسازید:
+
+1. مطابق **بخش ۷**، یک upstream HTTP CONNECT/SOCKS5 مجاز را با `proxy add` ثبت و با `proxy test` تأیید کنید. IP عمومی endpoint، port، username/password و IP خروجی sticky واقعی لازم‌اند؛ نصب‌کننده اشتراک پراکسی نمی‌خرد.
+2. مطابق **بخش ۸**، پیش از اولین provisioning پروفایل `/etc/android-farm/device-profiles/num01.json` را نصب کنید. از مدل شفاف QA، Android 11/12، resolution، DPI و locale همان سناریوی آزمایش استفاده کنید.
+3. مطابق **بخش ۹**، APK مورداعتماد خود و policy signer را آماده و request خصوصی را با `proxy_id` همین پراکسی تکمیل کنید. نمونهٔ JSON آن بخش schema واقعی CLI است؛ مقدارهای نمونه را به‌جای اطلاعات واقعی استفاده نکنید.
+4. `sudo device-provisioner up --request /root/farm-input/device-request.json` را اجرا کنید. این فرمان نخستین ID آزاد را می‌گیرد؛ روی نصب تازه `num01` است. برای دستگاه تخصیص‌نیافته مستقیماً `up --id num01` نزنید.
+
+پس از موفقیت، لینک چاپ‌شدهٔ screen را باز کنید؛ سپس روی میزبان:
+
+```bash
+sudo device-provisioner check --id num01
+sudo device-provisioner check-ip --id num01 --json
+sudo device-provisioner down --id num01
+```
+
+باید بوت/ADB سالم، IP خروجی مطابق پراکسی و حفظ `/data` پس از توقف تأیید شود. در Grafana metricهای میزبان را ببینید؛ metricهای دستگاه پس از نخستین اجرای آن معنا دارند. پذیرش کامل Ubuntu، WebSocket، kill-switch و بازیابی backup در بخش ۱۸ آمده است. عبور تست‌های واحد یا پایان نصب به‌تنهایی عملکرد Redroid روی kernel شما را ثابت نمی‌کند.
+
+### ادامهٔ نصب قطع‌شده، ارتقا و حالت اختیاری IP
+
+اگر نصب یا SSH قطع شد، همان راه‌انداز را تکرار کنید؛ دامنه و UUIDهای ذخیره‌شده حفظ می‌شوند:
 
 ```bash
 sudo bash /opt/android-farm/source/install.sh
 ```
 
-تنظیمات عمومی نصب و UUIDها در `/var/lib/android-farm/quickstart.json` با mode `0600` نگهداری می‌شوند. برنامهٔ ساخته‌شده با marker مخصوص همان نصب شناخته می‌شود؛ اجرای دوباره پروژه/برنامهٔ تکراری نمی‌سازد. Deploy ناقص با UUID خودش دنبال می‌شود. source جدید باعث Deploy commit جدید می‌شود؛ برای ارتقا ابتدا دستگاه‌های فعال را خاموش کنید. تا وقتی DNS/TLS، احراز هویت یا doctor ناموفق است، راه‌انداز وضعیت «آماده» گزارش نمی‌کند.
+state در `/var/lib/android-farm/quickstart.json` با mode `0600` است. برنامه با marker نصب شناخته می‌شود، برنامهٔ تکراری ساخته نمی‌شود و Deploy ناقص با UUID خودش پیگیری می‌شود. source جدید Deploy تازه می‌خواهد؛ پیش از ارتقا تمام دستگاه‌های فعال را متوقف کنید. اگر نصب قبلی با مسیر دستی ساخته شده است، UUID همان Application را با `--app-uuid YOUR_EXISTING_APPLICATION_UUID` بدهید؛ راه‌انداز مالکیت و تنظیم‌های آن را بررسی می‌کند.
 
-اگر برنامه را قبلاً از راهنمای دستی ساخته‌اید، UUID همان Application را صریح بدهید؛ فقط برنامهٔ همین مخزن با مسیر Compose، branch، project، environment و سرور مطابق قابل انتقال به مدیریت راه‌انداز است:
+برای تبدیل نصب IP موجود به دامنه، ابتدا DNS و مراحل ۱ تا ۳ را کامل کنید و سپس:
 
 ```bash
-sudo bash /opt/android-farm/source/install.sh --app-uuid YOUR_EXISTING_APPLICATION_UUID
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com --console-domain commex-box.com --coolify-url http://127.0.0.1:8000
 ```
 
-اگر روی میزبان Redis متعلق به سرویس دیگری وجود داشته باشد، مسیر ساده آن را تغییر نمی‌دهد و متوقف می‌شود؛ در این حالت Redis مجزا/خارجی را با مسیر Ansible بخش ۱۴ تنظیم کنید. اجرای واقعی API، Docker و systemd روی سرور مقصد باید تأیید شود؛ تست‌های محلی جای این پذیرش را نمی‌گیرند.
+حالت بدون دامنه همچنان اختیاری است؛ با IPv4 واقعی و پورت آزاد اجرا کنید:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --ip 185.208.172.141 --port 18080
+```
+
+در این حالت کنسول `http://185.208.172.141:18080/`، Grafana در `/metrics/` و screen در `/d/num01/` هستند. HTTP رمزگذاری نشده است؛ دسترسی را در شبکهٔ مطمئن/VPN نگه دارید. installer تداخل پورت و بازهٔ رزروشدهٔ ADB یعنی `5551..13742` را کنترل می‌کند و فایروال را خودکار باز نمی‌کند. حالت ذخیره‌شده در اجرای مجدد خودکار عوض نمی‌شود؛ برای تغییر آن گزینهٔ `--domain` یا `--ip` را صریح بدهید. دادهٔ دستگاه با تغییر حالت حذف نمی‌شود.
 
 ### مسیر دستی برای نصب‌های سفارشی
 
 جزئیات زیر فقط برای اپراتوری است که API Coolify در اختیار ندارد یا می‌خواهد مراحل را جداگانه کنترل کند. در مسیر ساده نیازی به اجرای دوبارهٔ آن‌ها نیست.
 
-### ۵.۱. دریافت source بازبینی‌شده
+### مسیر دستی ۱ — دریافت source بازبینی‌شده
 
 ```bash
 sudo install -d -m 0755 /opt/android-farm
@@ -171,7 +326,7 @@ sudo chmod -R go-w /opt/android-farm/source
 
 در production بهتر است به‌جای یک branch متحرک، commit بازبینی‌شده را checkout کنید و همان commit را در Coolify deploy کنید.
 
-### ۵.۲. ساخت secret ورودی Basic Auth
+### مسیر دستی ۲ — ساخت secret ورودی Basic Auth
 
 رمز Basic Auth را بدون قراردادن در history بسازید:
 
@@ -188,21 +343,23 @@ sudo install -d -m 0755 /var/lib/node_exporter/textfile_collector
 
 installer در نخستین `apply` رمز تصادفی Grafana را به‌صورت root-owned و `0600` در `/etc/android-farm/monitoring/grafana-admin-password` می‌سازد و در اجرای بعدی آن را حفظ می‌کند. این رمز را در Git، log، history یا Coolify ENV ذخیره نکنید.
 
-### ۵.۳. Plan و apply اول
+### مسیر دستی ۳ — Plan و apply اول
+
+مثال زیر حالت دارای دامنه است. برای حالت بدون دامنه در تمام فرمان‌های دستی `plan/apply/doctor`، دو گزینهٔ `--farm-domain` و `--console-domain` را با `--ip 185.208.172.141 --port 18080` جایگزین کنید.
 
 ```bash
 cd /opt/android-farm/source
 
 sudo python3 installer/install.py plan \
-  --farm-domain farm.example.com \
-  --console-domain console.farm.example.com \
+  --farm-domain commex-box.com \
+  --console-domain commex-box.com \
   --catalog-count auto \
   --auth-user operator \
   --auth-password-file /root/android-farm-basic-auth.pass
 
 sudo python3 installer/install.py apply \
-  --farm-domain farm.example.com \
-  --console-domain console.farm.example.com \
+  --farm-domain commex-box.com \
+  --console-domain commex-box.com \
   --catalog-count auto \
   --auth-user operator \
   --auth-password-file /root/android-farm-basic-auth.pass
@@ -212,44 +369,44 @@ sudo python3 installer/install.py apply \
 
 اگر نام network یا project خودکار تشخیص داده نشد، همان فرمان را با `--coolify-network NAME` یا `--compose-project NAME` تکرار کنید. مسیر dynamic پیش‌فرض `/data/coolify/proxy/dynamic` است و فقط در نصب سفارشی با `--traefik-dynamic-dir` تغییر می‌کند. مسیر سفارشی باید واقعاً داخل کانتینر Traefik روی `/traefik/dynamic` mount/watch شود، چون `usersFile` middleware همین مسیر داخلی را دارد؛ وجود فایل روی host به‌تنهایی کافی نیست.
 
-### ۵.۴. ساخت یک Application در Coolify
+### مسیر دستی ۴ — ساخت یک Application در Coolify
 
 در Coolify:
 
 1. Project با نام `android-farm` بسازید.
 2. یک Application از نوع Docker Compose از همین repository/commit بسازید.
-3. Base Directory را `/` و Compose file را `/docker-compose.yml` قرار دهید.
+3. Base Directory را `/` و Compose file را `/docker-compose.yml` قرار دهید؛ **Raw Compose Deployment** را فعال کنید تا routeها و شبکهٔ تعریف‌شدهٔ این مخزن اعمال شوند.
 4. همهٔ مقدارهای `/etc/android-farm/coolify.env` را در Environment Variables وارد کنید. این فایل متغیرهای monitoring زیر را نیز تولید می‌کند؛ مقادیر دامنه و retention را بازبینی کنید:
 
 ```dotenv
-GRAFANA_DOMAIN=metrics.farm.example.com
+GRAFANA_DOMAIN=metrics.commex-box.com
 GRAFANA_ADMIN_USER=admin
 GRAFANA_PASSWORD_FILE=/etc/android-farm/monitoring/grafana-admin-password
 PROMETHEUS_RETENTION=30d
 ```
 
 5. هیچ password پراکسی، محتوای password Grafana، APK، شمارهٔ کامل یا فایل inventory را در Coolify ENV/Git قرار ندهید. `GRAFANA_PASSWORD_FILE` فقط path فایل میزبان است.
-6. هیچ Domain خودکار دیگری روی serviceها نسازید؛ Traefik labels داخل Compose routeها را می‌سازند.
-7. Deploy کنید و صبر کنید آماده‌ساز secret با موفقیت تمام شود و `farm-anchor`، `farm-console`، Prometheus، node-exporter، cAdvisor و Grafana بالا بیایند.
+6. هیچ Domain خودکار دیگری روی serviceها نسازید؛ در حالت IP درگاه Nginx مسیرها را مدیریت می‌کند و در حالت دامنه Traefik labels داخل Compose routeها را می‌سازند.
+7. Deploy کنید و صبر کنید آماده‌سازهای secret با موفقیت تمام شوند و `farm-anchor`، `farm-console`، `android-farm-gateway`، Prometheus، node-exporter، cAdvisor و Grafana بالا بیایند.
 
 `farm-anchor` label مربوط به release را از `FARM_RELEASE_ID` می‌گیرد. installer تنها وقتی release میزبان و deploy Coolify یکسان باشند کنترل‌پلین را فعال می‌کند.
 
-### ۵.۵. Apply دوم و doctor
+### مسیر دستی ۵ — Apply دوم و doctor
 
 پس از deploy، **دقیقاً همان فرمان apply** را دوباره اجرا کنید:
 
 ```bash
 cd /opt/android-farm/source
 sudo python3 installer/install.py apply \
-  --farm-domain farm.example.com \
-  --console-domain console.farm.example.com \
+  --farm-domain commex-box.com \
+  --console-domain commex-box.com \
   --catalog-count auto \
   --auth-user operator \
   --auth-password-file /root/android-farm-basic-auth.pass
 
 sudo python3 installer/install.py doctor \
-  --farm-domain farm.example.com \
-  --console-domain console.farm.example.com \
+  --farm-domain commex-box.com \
+  --console-domain commex-box.com \
   --catalog-count auto \
   --auth-user operator \
   --auth-password-file /root/android-farm-basic-auth.pass
@@ -257,15 +414,19 @@ sudo python3 installer/install.py doctor \
 
 در مرحلهٔ دوم، installer وجود `farm-anchor` و برابری release را می‌سنجد، `/etc/android-farm/provisioner.json` و `/etc/android-farm/compose.env` را نهایی و wrapper `/usr/local/sbin/device-provisioner` را فعال می‌کند. وضعیت مطلوب doctor برابر `ready` است؛ `blocked` را پیش از pilot رفع کنید و `action_required` را آگاهانه بررسی کنید.
 
-## ۶. Traefik و مسیرهای وب
+## ۶. مسیرهای وب، HTTPS و احراز هویت
+
+در این حالت `FARM_HTTP_BIND=127.0.0.1` و `FARM_TRAEFIK_ENABLED=true` است؛ Grafana به ریشهٔ دامنهٔ خودش برمی‌گردد و `GRAFANA_SERVE_FROM_SUB_PATH=false` می‌شود.
+
+بررسی تداخل پورت در هر دو حالت انجام می‌شود. اگر پورت محلی درگاه اشغال باشد، `--port` را با پورت آزاد دیگری بدهید؛ در حالت دامنه این گزینه فقط پورت loopback را تغییر می‌دهد و دسترسی HTTPS همچنان روی 443 است.
 
 installer فایل `traefik/farm-auth.yml` و bcrypt user را در dynamic directory Coolify نصب می‌کند. routeهای اصلی:
 
 | مقصد | URL | لایه‌های ورود |
 |---|---|---|
-| کنترل دستگاه | `https://farm.example.com/d/numXX/` | Basic Auth؛ prefix سپس برای noVNC حذف می‌شود |
-| کنسول نمایشی | `https://console.farm.example.com/` | Basic Auth |
-| Grafana | `https://metrics.farm.example.com/` | Basic Auth بیرونی + login خود Grafana |
+| کنترل دستگاه | `https://commex-box.com/d/numXX/` | Basic Auth؛ prefix سپس برای noVNC حذف می‌شود |
+| کنسول نمایشی | `https://commex-box.com/` | Basic Auth |
+| Grafana | `https://metrics.commex-box.com/` | Basic Auth بیرونی + login خود Grafana |
 
 نمونهٔ label دستگاه:
 
@@ -280,6 +441,25 @@ traefik.http.services.farm-num01.loadbalancer.server.port: "6080"
 
 این release از یک credential مشترک Basic Auth استفاده می‌کند و RBAC جداگانهٔ per-device یا MFA ندارد. اگر سطح دسترسی چندتیمی لازم است، middleware را با ForwardAuth/Authelia/OIDC و policyهای مسیرمحور جایگزین کنید؛ تا آن زمان credential را محدود و دوره‌ای rotate کنید.
 
+### حالت اختیاری IP و پورت
+
+حالت IP از Nginx در همان Compose تحت مدیریت Coolify استفاده می‌کند؛ پورت/entrypointهای proxy سراسری Coolify تغییر نمی‌کنند. تنظیم‌های زیر را installer خودکار برای سرور شما در ENV قرار می‌دهد؛ خروجی `/etc/android-farm/coolify.env` مرجع است و نیازی به ورود دستی این موارد در مسیر ساده نیست:
+
+```dotenv
+FARM_HTTP_BIND=0.0.0.0
+FARM_HTTP_PORT=18080
+FARM_HTTP_AUTH_FILE=/data/coolify/proxy/dynamic/farm-users.htpasswd
+FARM_TRAEFIK_ENABLED=false
+GRAFANA_ROOT_URL=http://185.208.172.141:18080/metrics/
+GRAFANA_SERVE_FROM_SUB_PATH=true
+```
+
+در این حالت Traefik labels وب غیرفعال‌اند. Nginx پس از Basic Auth، `/` را به کنسول، `/metrics/` را با همان prefix به Grafana و `/d/numXX/` را پس از حذف prefix به screen می‌رساند. اتصال WebSocket پشتیبانی می‌شود؛ نام backend فقط از ID معتبر دستگاه ساخته می‌شود و DNS داخلی Docker برای دستگاه‌هایی که بعداً روشن می‌شوند دوباره resolve می‌شود. درخواست برای دستگاه خاموش معمولاً `502` می‌گیرد؛ از `device-provisioner status` وضعیت را بررسی کنید. هدر Basic Auth به برنامه‌های داخلی منتقل نمی‌شود.
+
+تنظیم `root_url` همراه `serve_from_sub_path=true` مطابق [راهنمای رسمی Grafana برای مسیر فرعی](https://grafana.com/tutorials/run-grafana-behind-a-proxy/#alternative-for-serving-grafana-under-a-sub-path) است. هدرهای Upgrade و Connection در درگاه مطابق [مستندات WebSocket در Nginx](https://nginx.org/en/docs/http/websocket.html) ارسال می‌شوند.
+
+فایل bcrypt میزبان همچنان root-owned و `0600` است؛ آماده‌ساز یک‌باره آن را در volume خصوصی با UID `101` و mode `0400` کپی می‌کند. Nginx بدون root، بدون capability و بدون Docker socket اجرا می‌شود. پس از تغییر فایل خصوصی رمز، راه‌انداز را دوباره اجرا کنید: اثرانگشت غیرمحرمانهٔ `FARM_HTTP_AUTH_REVISION` به‌روزرسانی و درگاه برای دریافت رمز جدید redeploy می‌شود. در مسیر دستی، پس از apply باید ENV جدید را به Coolify منتقل و redeploy کنید. برای تغییر دسترسی/ارتقا نیز از راه‌انداز استفاده کنید تا ENV هسته و runtime دستگاه‌ها هماهنگ بمانند.
+
 ## ۷. انتخاب و مدیریت پراکسی
 
 برای QA پایدار، upstream پیشنهادی یک **IPv4 residential یا ISP/static اختصاصی و sticky** با احراز هویت username/password است. هر device یک endpoint/session مجزا با IP خروجی موردانتظار ثابت داشته باشد. HTTP proxy باید CONNECT به HTTPS را پشتیبانی کند؛ SOCKS5 نیز پشتیبانی می‌شود. endpoint باید IPv4 عمومی pin‌شده باشد؛ hostname متغیر در registry پذیرفته نمی‌شود.
@@ -291,14 +471,14 @@ traefik.http.services.farm-num01.loadbalancer.server.port: "6080"
 ```bash
 sudo install -d -m 0700 /root/farm-input
 sudo bash -c 'umask 077; read -rsp "Proxy password: " p; printf "\n"; printf "%s\n" "$p" > /root/farm-input/proxy-01.pass'
-read -rp "Pinned public IPv4 of proxy endpoint: " PROXY_SERVER_IPV4
+read -rp "Pinned public IPv4 of proxy endpoint: " PROXY_185.208.172.141
 read -rp "Expected sticky public egress IPv4: " PROXY_EGRESS_IPV4
 
 sudo device-provisioner proxy add \
   --id isp-frankfurt-01 \
   --label "ISP Frankfurt 01" \
   --type socks5 \
-  --server "$PROXY_SERVER_IPV4" \
+  --server "$PROXY_185.208.172.141" \
   --port 1080 \
   --username qa-num01 \
   --password-file /root/farm-input/proxy-01.pass \
@@ -307,7 +487,7 @@ sudo device-provisioner proxy add \
 sudo device-provisioner proxy test --id isp-frankfurt-01
 sudo device-provisioner proxy show --id isp-frankfurt-01
 sudo device-provisioner proxy list --enabled-only
-unset PROXY_SERVER_IPV4 PROXY_EGRESS_IPV4
+unset PROXY_185.208.172.141 PROXY_EGRESS_IPV4
 ```
 
 هر دو مقدار تعاملی باید IPv4 عمومی واقعی باشند. `test` درخواست HTTPS را با credential از stdin داخلی curl می‌فرستد، IP مشاهده‌شده را با `expected-ip` مقایسه و secret را در log چاپ نمی‌کند. در مسیر معمول، `up --request` با `proxy_id` همین record را به ID تازه تخصیص می‌دهد؛ `proxy assign` را برای پیش‌تخصیص دستی device جدید استفاده نکنید.
@@ -350,7 +530,7 @@ rotation برای proxy تخصیص‌یافته ابتدا device را متوق�
 
 ```bash
 sudo install -d -m 0700 /etc/android-farm/device-profiles
-sudo install -m 0600 installer/device-profile.example.json \
+sudo install -m 0600 /opt/android-farm/source/installer/device-profile.example.json \
   /etc/android-farm/device-profiles/num01.json
 sudoedit /etc/android-farm/device-profiles/num01.json
 ```
@@ -371,7 +551,7 @@ sudo device-provisioner render \
 ابتدا نمونهٔ policy را به مسیر خصوصی نصب و سپس `/etc/android-farm/apk-trust.json` را با package و SHA-256 گواهی signer که از کانال مستقل بررسی کرده‌اید تنظیم کنید:
 
 ```bash
-sudo install -m 0600 installer/apk-trust.example.json /etc/android-farm/apk-trust.json
+sudo install -m 0600 /opt/android-farm/source/installer/apk-trust.example.json /etc/android-farm/apk-trust.json
 sudoedit /etc/android-farm/apk-trust.json
 ```
 
@@ -390,11 +570,32 @@ sudoedit /etc/android-farm/apk-trust.json
 برای تخصیص ترتیبی، یک request خصوصی از نمونه بسازید، `owner_authorized` را فقط پس از ثبت مجوز واقعی مالک `true` کنید و hash APK را با مقدار واقعی جایگزین کنید:
 
 ```bash
-sudo install -m 0600 installer/device-request.example.json /root/farm-input/device-request.json
+sudo install -m 0600 /opt/android-farm/source/installer/device-request.example.json /root/farm-input/device-request.json
 sudoedit /root/farm-input/device-request.json
 sha256sum /root/farm-input/approved-qa-app.apk
 sudo device-provisioner up --request /root/farm-input/device-request.json
 ```
+
+schema فایل request دقیقاً به این شکل است؛ شماره، package، activity، APK و hash زیر نمونه‌اند و باید با ورودی مجاز واقعی جایگزین شوند. `owner_authorized: false` عمداً درخواست آماده‌نشده را متوقف می‌کند؛ فقط پس از احراز مجوز واقعی آن را `true` کنید. اگر برنامه برای سناریوی QA به یک permission نیاز ندارد، آن مورد را از آرایه حذف کنید:
+
+```json
+{
+  "phone": "+989000000001",
+  "owner_authorized": false,
+  "proxy_id": "isp-frankfurt-01",
+  "apk_path": "/root/farm-input/approved-qa-app.apk",
+  "apk_sha256": "REPLACE_WITH_APPROVED_APK_SHA256",
+  "apk_package": "com.example.qaapp",
+  "apk_permissions": [
+    "android.permission.CAMERA",
+    "android.permission.READ_CONTACTS",
+    "android.permission.RECORD_AUDIO"
+  ],
+  "apk_activity": ".MainActivity"
+}
+```
+
+hash فایل APK در request با hash گواهی signer در policy فرق دارد: اولی محتوای همین APK را تأیید می‌کند و دومی امضاکنندهٔ مجاز برنامه را. SHA-256 هر دو باید ۶۴ کاراکتر هگز واقعی باشد.
 
 این مسیر نخستین ID آزاد را به‌ترتیب رزرو می‌کند، volume و secret را ایجاد، proxy registry را به device متصل، شبکه و هویت پایهٔ واقعی محیط را بررسی، APK مجاز را نصب و لینک screen را چاپ می‌کند. اگر مرحله‌ای fail شود، device متوقف می‌شود و checkpoint برای بررسی باقی می‌ماند.
 
@@ -428,7 +629,7 @@ sudo device-provisioner hold --id num01 --reason maintenance
 sudo device-provisioner release --id num01 --review-completed
 ```
 
-release زمان‌بندی‌شده یا خودکار نیست و نیازمند ثبت review انسانی است. برای صفحه پس از start از `https://farm.example.com/d/num01/` استفاده کنید. ADB فقط از خود host و مسیر loopback مجاز است.
+release زمان‌بندی‌شده یا خودکار نیست و نیازمند ثبت review انسانی است. برای صفحه پس از start از `https://commex-box.com/d/num01/` استفاده کنید. ADB فقط از خود host و مسیر loopback مجاز است.
 
 ## ۱۱. Worker مبتنی بر Redis
 
@@ -661,8 +862,8 @@ backup ابتدا device را stop می‌کند، volume و ownership label ر�
 
 ```bash
 sudo python3 installer/install.py plan \
-  --farm-domain farm.example.com \
-  --console-domain console.farm.example.com \
+  --farm-domain commex-box.com \
+  --console-domain commex-box.com \
   --catalog-count 120 \
   --auth-user operator \
   --auth-password-file /root/android-farm-basic-auth.pass
@@ -696,8 +897,8 @@ installer هیچ data، proxy secret، APK trust، inventory یا backup موج�
 
 ```bash
 sudo python3 installer/install.py doctor \
-  --farm-domain farm.example.com \
-  --console-domain console.farm.example.com \
+  --farm-domain commex-box.com \
+  --console-domain commex-box.com \
   --catalog-count auto \
   --auth-user operator \
   --auth-password-file /root/android-farm-basic-auth.pass
@@ -717,11 +918,23 @@ sudo docker compose --env-file /etc/android-farm/compose.env \
 - `test -c /dev/kmsg` موفق باشد تا cAdvisor بتواند با Compose فعلی شروع شود.
 - پس از deploy هسته، هیچ `android-*`، `proxy-*` یا `screen-*` بدون دستور اپراتور روشن نباشد.
 
-### HTTPS و دسترسی
+### IP/پورت و دسترسی
+
+در حالت اختیاری بدون دامنه، برای سرور شما و پورت پیش‌فرض:
 
 ```bash
-curl -sS -o /dev/null -w '%{http_code}\n' https://console.farm.example.com/
-curl -u operator -sS -o /dev/null -w '%{http_code}\n' https://console.farm.example.com/
+curl -sS -o /dev/null -w '%{http_code}\n' http://185.208.172.141:18080/
+curl -u operator -sS -o /dev/null -w '%{http_code}\n' http://185.208.172.141:18080/
+curl -sS -o /dev/null -w '%{http_code}\n' http://185.208.172.141:18080/metrics/
+```
+
+درخواست اول و سوم باید `401` با `WWW-Authenticate: Basic` بدهند؛ فرمان دوم رمز را تعاملی می‌پرسد و باید موفق باشد. در مرورگر، login داخلی Grafana و بارگذاری assetها زیر `/metrics/` را تأیید کنید. پس از روشن‌کردن دستگاه، `/d/num01/` و WebSocket آن باید کار کنند. همین آزمون را از شبکهٔ اپراتور انجام دهید؛ راه‌انداز در حالت IP احراز هویت را از `127.0.0.1:18080` بررسی می‌کند تا NAT بدون hairpin مانع نصب نشود. این آزمون محلی عبور از فایروال بیرونی یا کارکرد کامل Grafana/WebSocket را ثابت نمی‌کند.
+
+### HTTPS در حالت دارای دامنه
+
+```bash
+curl -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
+curl -u operator -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
 ```
 
 - درخواست بدون credential باید `401` بگیرد؛ فرمان دوم password را تعاملی می‌پرسد و باید پاسخ موفق بگیرد.

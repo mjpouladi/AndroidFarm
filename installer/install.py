@@ -21,6 +21,7 @@ import re
 import secrets
 import shlex
 import shutil
+import socket
 import stat
 import subprocess
 import sys
@@ -37,6 +38,10 @@ if str(PROJECT_ROOT) not in sys.path:
 SUPPORTED_UBUNTU = {"22.04", "24.04"}
 MINIMUM_COMPOSE = (2, 33, 1)
 RUNTIME_COMPOSE_PROJECT = "android-farm-runtime"
+DEFAULT_HTTP_PORT = 18080
+FIRST_ADB_PORT = 5551
+LAST_ADB_PORT = 13742
+GATEWAY_CONTAINER = "android-farm-gateway"
 BINDER_DEVICE_NAMES = ("binder", "hwbinder", "vndbinder")
 RELEASE_ENTRIES = (
     ".dockerignore",
@@ -69,6 +74,13 @@ ENV_KEYS = {
     "GRAFANA_PASSWORD_FILE",
     "PROMETHEUS_RETENTION",
     "PROMETHEUS_RETENTION_SIZE",
+    "FARM_HTTP_BIND",
+    "FARM_HTTP_PORT",
+    "FARM_HTTP_AUTH_FILE",
+    "FARM_HTTP_AUTH_REVISION",
+    "FARM_TRAEFIK_ENABLED",
+    "GRAFANA_ROOT_URL",
+    "GRAFANA_SERVE_FROM_SUB_PATH",
     *IMAGE_DEFAULTS,
 }
 PROJECT_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.-]{0,62}\Z")
@@ -98,6 +110,9 @@ class Settings:
     catalog_count: int | None = None
     auth_user: str | None = None
     auth_password_file: Path | None = None
+    access_mode: str = "domain"
+    public_ip: str | None = None
+    http_port: int = DEFAULT_HTTP_PORT
 
 
 @dataclass(frozen=True)
@@ -155,6 +170,41 @@ def normalize_domain(value: str) -> str:
     if any(not DOMAIN_LABEL_RE.fullmatch(label) for label in ascii_name.split(".")):
         raise ValueError("domain contains an invalid DNS label")
     return ascii_name
+
+
+def normalize_public_ip(value: str) -> str:
+    """Return a usable IPv4 listener address; private routed addresses are valid."""
+    try:
+        address = ipaddress.ip_address(value.strip())
+    except (AttributeError, ValueError) as exc:
+        raise ValueError("--ip must be a valid IPv4 address") from exc
+    if not isinstance(address, ipaddress.IPv4Address):
+        raise ValueError("--ip must be an IPv4 address")
+    if (address.is_unspecified or address.is_loopback or address.is_link_local or
+            address.is_multicast or address.is_reserved):
+        raise ValueError("--ip must be a routable host address (private IPv4 is allowed)")
+    return str(address)
+
+
+def normalize_http_port(value: int) -> int:
+    if isinstance(value, bool) or not isinstance(value, int) or not 1024 <= value <= 65535:
+        raise ValueError("--port must be an integer between 1024 and 65535")
+    if FIRST_ADB_PORT <= value <= LAST_ADB_PORT:
+        raise ValueError(
+            f"--port overlaps the reserved Android ADB range {FIRST_ADB_PORT}-{LAST_ADB_PORT}"
+        )
+    return value
+
+
+def access_origin(*, access_mode: str, farm_domain: str,
+                  public_ip: str | None, http_port: int) -> str:
+    """Build the browser origin without ever treating an IP as a DNS suffix."""
+    normalize_http_port(http_port)
+    if access_mode == "domain":
+        return f"https://{normalize_domain(farm_domain)}"
+    if access_mode == "ip" and public_ip is not None:
+        return f"http://{normalize_public_ip(public_ip)}:{http_port}"
+    raise ValueError("access_mode must be domain, or ip with an explicit IPv4 address")
 
 
 def parse_version(value: str) -> tuple[int, int, int]:
@@ -224,7 +274,31 @@ def parse_env(text: str) -> dict[str, str]:
 
 
 def build_env(existing: Mapping[str, str], *, farm_domain: str, console_domain: str,
-              network: str, secret_dir: Path, release_id: str) -> dict[str, str]:
+              network: str, secret_dir: Path, release_id: str,
+              access_mode: str = "domain", public_ip: str | None = None,
+              http_port: int = DEFAULT_HTTP_PORT,
+              auth_file: Path | None = None,
+              auth_revision: str | None = None) -> dict[str, str]:
+    origin = access_origin(access_mode=access_mode, farm_domain=farm_domain,
+                           public_ip=public_ip, http_port=http_port)
+    if access_mode == "ip":
+        # access_origin validated and canonicalized this value above.
+        host = origin.removeprefix("http://").rsplit(":", 1)[0]
+        farm_domain = host
+        console_domain = host
+    else:
+        farm_domain = normalize_domain(farm_domain)
+        console_domain = normalize_domain(console_domain)
+    previous_farm = existing.get("FARM_DOMAIN")
+    previous_grafana = existing.get("GRAFANA_DOMAIN")
+    previous_grafana_was_derived = bool(
+        previous_farm and previous_grafana in {previous_farm, f"metrics.{previous_farm}"}
+    )
+    if auth_revision is None:
+        auth_revision = existing.get("FARM_HTTP_AUTH_REVISION",
+                                     hashlib.sha256(b"").hexdigest())
+    if not re.fullmatch(r"[0-9a-f]{64}", auth_revision):
+        raise ValueError("HTTP auth revision must be a lowercase SHA-256 digest")
     result = {key: value for key, value in existing.items() if key in ENV_KEYS}
     for key, default in IMAGE_DEFAULTS.items():
         result.setdefault(key, default)
@@ -234,8 +308,20 @@ def build_env(existing: Mapping[str, str], *, farm_domain: str, console_domain: 
         "COOLIFY_NETWORK": network,
         "FARM_SECRETS_DIR": str(secret_dir),
         "FARM_RELEASE_ID": release_id,
+        "FARM_HTTP_BIND": "0.0.0.0" if access_mode == "ip" else "127.0.0.1",
+        "FARM_HTTP_PORT": str(http_port),
+        "FARM_HTTP_AUTH_FILE": str(auth_file or
+                                   (Paths.traefik_dynamic_dir / "farm-users.htpasswd")),
+        "FARM_HTTP_AUTH_REVISION": auth_revision,
+        "FARM_TRAEFIK_ENABLED": "false" if access_mode == "ip" else "true",
     })
-    result.setdefault("GRAFANA_DOMAIN", f"metrics.{farm_domain}")
+    if access_mode == "ip":
+        result["GRAFANA_DOMAIN"] = farm_domain
+    elif not previous_grafana or previous_grafana_was_derived:
+        result["GRAFANA_DOMAIN"] = f"metrics.{farm_domain}"
+    result["GRAFANA_ROOT_URL"] = (f"{origin}/metrics/" if access_mode == "ip" else
+                                  f"https://{result['GRAFANA_DOMAIN']}/")
+    result["GRAFANA_SERVE_FROM_SUB_PATH"] = "true" if access_mode == "ip" else "false"
     result.setdefault("GRAFANA_ADMIN_USER", "admin")
     result.setdefault("GRAFANA_PASSWORD_FILE", str(secret_dir.parent / "monitoring" /
                                                     "grafana-admin-password"))
@@ -255,14 +341,19 @@ def render_env(values: Mapping[str, str]) -> str:
 
 
 def build_provisioner_config(existing: Mapping[str, object], *, release_dir: Path,
-                             project: str, farm_domain: str, paths: Paths) -> dict[str, object]:
+                             project: str, farm_domain: str, paths: Paths,
+                             access_mode: str = "domain", public_ip: str | None = None,
+                             http_port: int = DEFAULT_HTTP_PORT) -> dict[str, object]:
     validate_project(project)
+    origin = access_origin(access_mode=access_mode, farm_domain=farm_domain,
+                           public_ip=public_ip, http_port=http_port)
     value = dict(existing)
     value.update({
         "compose_file": str(release_dir / "docker-compose.farm.yml"),
         "compose_project": project,
         "compose_env_file": str(paths.config_dir / "compose.env"),
-        "console_url": f"https://{farm_domain}",
+        "console_url": origin,
+        "access_mode": access_mode,
         "secret_dir": str(paths.config_dir / "secrets"),
         "backup_dir": str(paths.backup_dir),
         "state_dir": str(paths.state_dir),
@@ -565,17 +656,35 @@ def configure_traefik_auth(settings: Settings) -> dict[str, object]:
         if not settings.auth_user or not AUTH_USER_RE.fullmatch(settings.auth_user):
             raise RuntimeError("--auth-user must contain 1-64 safe characters")
         password = _private_password(settings.auth_password_file)
-        result = _command(["htpasswd", "-niB", settings.auth_user], input_text=password + "\n")
-        if result.returncode or not result.stdout.startswith(settings.auth_user + ":$2"):
-            raise RuntimeError("failed to generate the Traefik Basic Auth bcrypt record")
-        _atomic_write(users, result.stdout.rstrip("\n").encode("utf-8") + b"\n", 0o600)
+        existing_record = ""
+        if users.exists() or users.is_symlink():
+            valid, detail = private_path_status(users)
+            if not valid:
+                raise RuntimeError(f"existing Basic Auth user file is unsafe: {detail}")
+            existing_record = users.read_text(encoding="utf-8").strip()
+        same_user = (existing_record.startswith(settings.auth_user + ":$2") and
+                     "\n" not in existing_record)
+        verified = False
+        if same_user:
+            verify = _command(
+                ["htpasswd", "-vi", str(users), settings.auth_user],
+                input_text=password + "\n",
+            )
+            verified = verify.returncode == 0
+        if not verified:
+            result = _command(["htpasswd", "-niB", settings.auth_user],
+                              input_text=password + "\n")
+            if result.returncode or not result.stdout.startswith(settings.auth_user + ":$2"):
+                raise RuntimeError("failed to generate the browser Basic Auth bcrypt record")
+            _atomic_write(users, result.stdout.rstrip("\n").encode("utf-8") + b"\n", 0o600)
     if users.is_symlink() or not users.is_file() or not users.read_text(encoding="utf-8").strip():
         raise RuntimeError("Traefik Basic Auth user file is missing; pass --auth-user and --auth-password-file")
     if os.name == "posix":
         info = users.stat()
         if info.st_uid != 0 or info.st_mode & 0o077:
             raise RuntimeError("Traefik Basic Auth user file must be root-owned and chmod 0600")
-    return {"middleware": str(dynamic / "farm-auth.yml"), "users_file": str(users)}
+    return {"middleware": str(dynamic / "farm-auth.yml"), "users_file": str(users),
+            "revision": auth_file_revision(users)}
 
 
 def private_path_status(path: Path, *, directory: bool = False) -> tuple[bool, str]:
@@ -590,6 +699,17 @@ def private_path_status(path: Path, *, directory: bool = False) -> tuple[bool, s
     if os.name == "posix" and (info.st_uid != 0 or info.st_mode & 0o077):
         return False, "must be root-owned with no group/other permissions"
     return True, "private permissions verified"
+
+
+def auth_file_revision(path: Path) -> str:
+    """Return a non-secret deployment trigger for a protected htpasswd file."""
+    valid, detail = private_path_status(path)
+    if not valid:
+        raise RuntimeError(f"Basic Auth user file is unsafe: {detail}")
+    content = path.read_bytes()
+    if not content.strip():
+        raise RuntimeError("Basic Auth user file is empty")
+    return hashlib.sha256(content).hexdigest()
 
 
 def install_release(source: Path, release_root: Path,
@@ -648,6 +768,114 @@ def _json_command(args: Sequence[str]) -> object | None:
         return json.loads(result.stdout) if result.returncode == 0 and result.stdout.strip() else None
     except (OSError, subprocess.SubprocessError, json.JSONDecodeError):
         return None
+
+
+def _managed_gateway_http_bindings(port: int) -> set[str]:
+    """Return host IPs owned by the attested running farm gateway."""
+    payload = _json_command(["docker", "inspect", GATEWAY_CONTAINER])
+    if not isinstance(payload, list) or len(payload) != 1 or not isinstance(payload[0], dict):
+        return set()
+    item = payload[0]
+    state = item.get("State") if isinstance(item.get("State"), dict) else {}
+    config = item.get("Config") if isinstance(item.get("Config"), dict) else {}
+    labels = config.get("Labels") if isinstance(config.get("Labels"), dict) else {}
+    network = (item.get("NetworkSettings")
+               if isinstance(item.get("NetworkSettings"), dict) else {})
+    ports = network.get("Ports") if isinstance(network.get("Ports"), dict) else {}
+    bindings = ports.get("8080/tcp") if isinstance(ports.get("8080/tcp"), list) else []
+    if not (state.get("Running") and labels.get("farm.stack") == "core" and
+            labels.get("farm.role") == "gateway"):
+        return set()
+    return {
+        str(binding.get("HostIp") or "0.0.0.0")
+        for binding in bindings
+        if isinstance(binding, dict) and binding.get("HostPort") == str(port)
+    }
+
+
+def managed_gateway_owns_http_port(port: int) -> bool:
+    """Recognize only the running, labelled farm gateway as an idempotent owner."""
+    return bool(_managed_gateway_http_bindings(port))
+
+
+def _published_port_conflicts(port: int, bind_host: str) -> bool | None:
+    """Inspect Docker's allocator; None means the inventory could not be trusted."""
+    try:
+        listed = _command(["docker", "ps", "--filter", f"publish={port}", "-q"])
+    except (OSError, subprocess.SubprocessError):
+        return None
+    if listed.returncode:
+        return None
+    identifiers = listed.stdout.split()
+    if not identifiers:
+        return False
+    payload = _json_command(["docker", "inspect", *identifiers])
+    if not isinstance(payload, list) or not all(isinstance(item, dict) for item in payload):
+        return None
+    for item in payload:
+        config = item.get("Config") if isinstance(item.get("Config"), dict) else {}
+        labels = config.get("Labels") if isinstance(config.get("Labels"), dict) else {}
+        name = str(item.get("Name", "")).lstrip("/")
+        own_gateway = (name == GATEWAY_CONTAINER and labels.get("farm.stack") == "core" and
+                       labels.get("farm.role") == "gateway")
+        if own_gateway:
+            continue
+        network = item.get("NetworkSettings") if isinstance(item.get("NetworkSettings"), dict) else {}
+        ports = network.get("Ports") if isinstance(network.get("Ports"), dict) else {}
+        for bindings in ports.values():
+            if not isinstance(bindings, list):
+                continue
+            for binding in bindings:
+                if not isinstance(binding, dict) or binding.get("HostPort") != str(port):
+                    continue
+                host = str(binding.get("HostIp") or "0.0.0.0")
+                if bind_host == "0.0.0.0" or host in {"0.0.0.0", "127.0.0.1", "::"}:
+                    return True
+    return False
+
+
+def _loopback_is_only_host_listener(port: int) -> bool:
+    """Distinguish our loopback gateway from another-NIC listeners during widening."""
+    try:
+        result = _command(["ss", "-H", "-ltn", "sport", "=", f":{port}"])
+    except (OSError, subprocess.SubprocessError):
+        return False
+    if result.returncode:
+        return False
+    for line in result.stdout.splitlines():
+        fields = line.split()
+        if len(fields) < 4:
+            return False
+        endpoint = fields[3]
+        if endpoint not in {f"127.0.0.1:{port}", f"127.0.0.1%lo:{port}"}:
+            return False
+    return True
+
+
+def http_port_available(port: int, bind_host: str) -> bool:
+    """Check the requested binding and permit only our gateway idempotently."""
+    port = normalize_http_port(port)
+    if bind_host not in {"0.0.0.0", "127.0.0.1"}:
+        raise ValueError("HTTP bind host must be loopback or all IPv4 interfaces")
+    gateway_bindings = _managed_gateway_http_bindings(port)
+    docker_conflict = _published_port_conflicts(port, bind_host)
+    if docker_conflict is True:
+        return False
+    if gateway_bindings:
+        # Narrowing an all-interface gateway to loopback is safe. Widening a
+        # loopback gateway requires a complete Docker inventory and no host
+        # listener other than that existing loopback publication.
+        if bind_host == "127.0.0.1" or "0.0.0.0" in gateway_bindings:
+            return docker_conflict is not None
+        return docker_conflict is False and _loopback_is_only_host_listener(port)
+    probe = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    try:
+        probe.bind((bind_host, port))
+        return docker_conflict is False
+    except OSError:
+        return False
+    finally:
+        probe.close()
 
 
 def docker_available() -> bool:
@@ -831,6 +1059,10 @@ def _host_release() -> dict[str, str]:
 
 
 def discover(settings: Settings) -> dict[str, object]:
+    # Validate the access contract before any plan/apply action can proceed.
+    access_origin(access_mode=settings.access_mode, farm_domain=settings.farm_domain,
+                  public_ip=settings.public_ip, http_port=settings.http_port)
+    http_bind = "0.0.0.0" if settings.access_mode == "ip" else "127.0.0.1"
     networks = docker_network_names()
     network_inventory = docker_network_inventory()
     attached = proxy_attached_networks()
@@ -861,6 +1093,8 @@ def discover(settings: Settings) -> dict[str, object]:
         "project_mismatch": bool(settings.compose_project != "auto" and detected_project and
                                  detected_project != settings.compose_project),
         "anchor_release": anchor_release_from_labels(labels),
+        "http_bind": http_bind,
+        "http_port_available": http_port_available(settings.http_port, http_bind),
         "sizing": sizing_summary(report,
                                   catalog_device_count(settings.source / "docker-compose.farm.yml"),
                                   active_device_count()),
@@ -983,9 +1217,14 @@ def install_managed_files(settings: Settings, discovered: Mapping[str, object]) 
     if not isinstance(network, str):
         raise RuntimeError("Coolify network was not detected; pass --coolify-network explicitly")
     existing_env = _existing_env(paths.config_dir / "compose.env")
+    auth_file = paths.traefik_dynamic_dir / "farm-users.htpasswd"
+    auth_revision = auth_file_revision(auth_file)
     env = build_env(existing_env, farm_domain=settings.farm_domain,
                     console_domain=settings.console_domain, network=network,
-                    secret_dir=paths.config_dir / "secrets", release_id=release_id)
+                    secret_dir=paths.config_dir / "secrets", release_id=release_id,
+                    access_mode=settings.access_mode, public_ip=settings.public_ip,
+                    http_port=settings.http_port,
+                    auth_file=auth_file, auth_revision=auth_revision)
     rendered_env = render_env(env).encode()
     # This file is the handoff to Coolify. Keep it separate from the live CLI
     # environment so staging an upgrade cannot alter a still-active release.
@@ -1028,7 +1267,10 @@ def install_managed_files(settings: Settings, discovered: Mapping[str, object]) 
         # separate project so a Coolify redeploy cannot remove them as orphans.
         config = build_provisioner_config(existing_config, release_dir=release_dir,
                                           project=RUNTIME_COMPOSE_PROJECT,
-                                          farm_domain=settings.farm_domain, paths=paths)
+                                          farm_domain=settings.farm_domain, paths=paths,
+                                          access_mode=settings.access_mode,
+                                          public_ip=settings.public_ip,
+                                          http_port=settings.http_port)
         _atomic_write(config_path, (json.dumps(config, indent=2, sort_keys=True) + "\n").encode(), 0o600)
         wrapper = ("#!/bin/sh\nset -eu\nexec /usr/bin/python3 " +
                    shlex.quote(str(release_dir / "provisioner.py")) + ' "$@"\n')
@@ -1045,6 +1287,9 @@ def install_managed_files(settings: Settings, discovered: Mapping[str, object]) 
         "release_dir": str(release_dir),
         "farm_domain": settings.farm_domain,
         "console_domain": settings.console_domain,
+        "access_mode": settings.access_mode,
+        "public_ip": settings.public_ip,
+        "http_port": settings.http_port,
         "coolify_network": network,
         "compose_project": project,
         "status": "ready" if configured else "waiting_for_coolify",
@@ -1123,6 +1368,14 @@ def doctor_checks(settings: Settings, discovered: Mapping[str, object]) -> list[
     checks.append(Check("coolify-project", "pass" if project_ready else "warn",
                         str(project or "farm-anchor not deployed"),
                         None if project_ready else "Deploy the core Compose in Coolify, then rerun apply."))
+    port_ready = bool(discovered.get("http_port_available"))
+    http_bind = "0.0.0.0" if settings.access_mode == "ip" else "127.0.0.1"
+    checks.append(Check(
+        "http-gateway-port", "pass" if port_ready else "block",
+        f"{http_bind}:{settings.http_port}" if port_ready else
+        f"{http_bind}:{settings.http_port} is owned by an unrelated listener",
+        None if port_ready else "Choose another --port and rerun apply."
+    ))
     sizing = discovered.get("sizing") if isinstance(discovered.get("sizing"), dict) else {}
     limit = int(sizing.get("calculated_active_limit", 0))
     checks.append(Check("capacity", "pass" if limit > 0 else ("warn" if not docker else "block"),
@@ -1226,8 +1479,20 @@ def doctor_checks(settings: Settings, discovered: Mapping[str, object]) -> list[
 
 def _settings_from_args(args: argparse.Namespace) -> Settings:
     source = args.source.resolve()
-    farm_domain = normalize_domain(args.farm_domain)
-    console_domain = normalize_domain(args.console_domain)
+    http_port = normalize_http_port(
+        args.port if args.port is not None else DEFAULT_HTTP_PORT
+    )
+    if args.ip:
+        access_mode = "ip"
+        public_ip = normalize_public_ip(args.ip)
+        # Keep required domain-shaped fields deterministic without inventing DNS.
+        farm_domain = public_ip
+        console_domain = public_ip
+    else:
+        access_mode = "domain"
+        public_ip = None
+        farm_domain = normalize_domain(args.farm_domain)
+        console_domain = normalize_domain(args.console_domain)
     network = args.coolify_network
     if network != "auto" and not PROJECT_RE.fullmatch(network):
         raise ValueError("invalid Docker network name")
@@ -1250,7 +1515,8 @@ def _settings_from_args(args: argparse.Namespace) -> Settings:
     return Settings(source, farm_domain, console_domain, network, project,
                     Paths(args.release_root, args.config_dir, args.state_dir, args.backup_dir,
                           args.data_root, args.wrapper, args.traefik_dynamic_dir),
-                    args.skip_host_bootstrap, catalog, args.auth_user, args.auth_password_file)
+                    args.skip_host_bootstrap, catalog, args.auth_user, args.auth_password_file,
+                    access_mode, public_ip, http_port)
 
 
 def plan(settings: Settings) -> dict[str, object]:
@@ -1300,6 +1566,10 @@ def apply(settings: Settings) -> dict[str, object]:
         if isinstance(conflicts, list) and conflicts:
             raise RuntimeError("Docker networks overlap reserved Android Farm pools: " +
                                json.dumps(conflicts, sort_keys=True))
+        if not discovered.get("http_port_available"):
+            raise RuntimeError(
+                f"HTTP gateway port {settings.http_port} is already used by an unrelated listener"
+            )
         auth = configure_traefik_auth(settings)
         result = install_managed_files(settings, discovered)
     return {"mode": "apply", "detected": discovered, "traefik_auth": auth,
@@ -1321,6 +1591,9 @@ def _common_parser() -> argparse.ArgumentParser:
     common.add_argument("--source", type=Path, default=PROJECT_ROOT)
     common.add_argument("--farm-domain", default="farm.example.com")
     common.add_argument("--console-domain", default="console.farm.example.com")
+    common.add_argument("--ip", help="explicit IPv4 access mode; serves authenticated HTTP")
+    common.add_argument("--port", type=int,
+                        help=f"IP gateway port (default {DEFAULT_HTTP_PORT}; outside ADB ports)")
     common.add_argument("--coolify-network", default="auto")
     common.add_argument("--compose-project", default="auto")
     common.add_argument("--release-root", type=Path, default=Paths.release_root)

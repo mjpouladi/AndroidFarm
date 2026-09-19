@@ -35,9 +35,10 @@ services:
     labels:
       farm.stack: core
       farm.role: console
-      traefik.enable: "true"
+      traefik.enable: ${FARM_TRAEFIK_ENABLED:-true}
       traefik.docker.network: ${COOLIFY_NETWORK:-coolify}
       traefik.http.routers.farm-console.rule: Host(`${CONSOLE_DOMAIN:-console.farm.example.com}`)
+      traefik.http.routers.farm-console.priority: "10"
       traefik.http.routers.farm-console.entrypoints: https
       traefik.http.routers.farm-console.tls: "true"
       traefik.http.routers.farm-console.tls.certresolver: letsencrypt
@@ -48,6 +49,75 @@ services:
       interval: 30s
       timeout: 5s
       retries: 3
+
+  gateway-secret-init:
+    image: alpine:3.21
+    container_name: android-farm-gateway-secret-init
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        umask 077;
+        cp /run/secrets/farm-http-auth /private/farm-users.htpasswd.next;
+        chown 101:101 /private/farm-users.htpasswd.next;
+        chmod 0400 /private/farm-users.htpasswd.next;
+        mv -f /private/farm-users.htpasswd.next /private/farm-users.htpasswd
+    volumes:
+      - gateway-secrets:/private
+    secrets: [farm-http-auth]
+    mem_limit: 32m
+    cpus: 0.1
+    pids_limit: 32
+    labels:
+      farm.stack: core
+      farm.role: secret-init
+      farm.auth.revision: ${FARM_HTTP_AUTH_REVISION:-manual}
+      traefik.enable: "false"
+
+  gateway:
+    build:
+      context: .
+      dockerfile: images/gateway/Dockerfile
+    container_name: android-farm-gateway
+    restart: unless-stopped
+    user: "101:101"
+    read_only: true
+    tmpfs: [/tmp]
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.5
+    pids_limit: 128
+    # Domain mode stays loopback-only. Only explicit IP mode publishes HTTP.
+    ports:
+      - "${FARM_HTTP_BIND:-127.0.0.1}:${FARM_HTTP_PORT:-18080}:8080"
+    volumes:
+      - gateway-secrets:/run/gateway-private:ro
+    networks: [coolify]
+    depends_on:
+      gateway-secret-init:
+        condition: service_completed_successfully
+      console:
+        condition: service_started
+      grafana:
+        condition: service_started
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8081/healthz]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+    labels:
+      farm.stack: core
+      farm.role: gateway
+      farm.auth.revision: ${FARM_HTTP_AUTH_REVISION:-manual}
+      traefik.enable: "false"
 
   prometheus:
     image: prom/prometheus:v3.13.3
@@ -169,7 +239,8 @@ services:
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/grafana-private/admin-password
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
-      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN:-metrics.farm.example.com}/
+      GF_SERVER_ROOT_URL: ${GRAFANA_ROOT_URL:-https://${GRAFANA_DOMAIN:-metrics.farm.example.com}/}
+      GF_SERVER_SERVE_FROM_SUB_PATH: ${GRAFANA_SERVE_FROM_SUB_PATH:-false}
     volumes:
       - grafana-data:/var/lib/grafana
       - grafana-secrets:/run/grafana-private:ro
@@ -188,7 +259,7 @@ services:
     labels:
       farm.stack: core
       farm.role: grafana
-      traefik.enable: "true"
+      traefik.enable: ${FARM_TRAEFIK_ENABLED:-true}
       traefik.docker.network: ${COOLIFY_NETWORK:-coolify}
       traefik.http.routers.android-farm-grafana.rule: Host(`${GRAFANA_DOMAIN:-metrics.farm.example.com}`)
       traefik.http.routers.android-farm-grafana.entrypoints: https
@@ -208,7 +279,10 @@ volumes:
   prometheus-data:
   grafana-data:
   grafana-secrets:
+  gateway-secrets:
 
 secrets:
+  farm-http-auth:
+    file: ${FARM_HTTP_AUTH_FILE:-/data/coolify/proxy/dynamic/farm-users.htpasswd}
   grafana-admin-password:
     file: ${GRAFANA_PASSWORD_FILE:-/etc/android-farm/monitoring/grafana-admin-password}

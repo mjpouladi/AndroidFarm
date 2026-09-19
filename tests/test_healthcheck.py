@@ -18,12 +18,14 @@ class HealthcheckTests(unittest.TestCase):
                 "secret_dir": Path("/etc/android-farm/secrets"),
                 "profile_dir": Path("/etc/android-farm/device-profiles"),
                 "proxy_registry": Path("/var/lib/android-farm/proxies.json"),
-                "proxy_store_dir": Path("/etc/android-farm/proxies")}
+                "proxy_store_dir": Path("/etc/android-farm/proxies"),
+                "access_mode": "ip"}
 
     def test_recovery_uses_guarded_farmctl_action(self):
         argv = compose_argv(self.config(), "restart", "android", "num01")
         self.assertEqual(argv[:5], [argv[0], "-m", "ops.farmctl", "recover", "num01"])
         self.assertNotIn("restart", argv)
+        self.assertEqual(argv[argv.index("--access-mode") + 1], "ip")
         screen = compose_argv(self.config(), "restart", "screen", "num01")
         self.assertEqual(screen[3:5], ["recover-screen", "num01"])
         with self.assertRaises(ValueError):

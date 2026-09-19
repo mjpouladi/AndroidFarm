@@ -125,12 +125,13 @@ def _add_device(doc, index):
     })
     router = f'farm-{d}'
     screen_service['labels'].update({
-        'traefik.enable': 'true',
+        'traefik.enable': '${FARM_TRAEFIK_ENABLED:-true}',
         'traefik.docker.network': '${COOLIFY_NETWORK:-coolify}',
         f'traefik.http.routers.{router}.rule': (
             f'Host(`${{FARM_DOMAIN:-farm.example.com}}`) && PathPrefix(`/d/{d}/`)'
         ),
         f'traefik.http.routers.{router}.entrypoints': 'https',
+        f'traefik.http.routers.{router}.priority': '100',
         f'traefik.http.routers.{router}.tls': 'true',
         f'traefik.http.routers.{router}.tls.certresolver': 'letsencrypt',
         f'traefik.http.routers.{router}.middlewares': f'farm-auth@file,{router}-strip',

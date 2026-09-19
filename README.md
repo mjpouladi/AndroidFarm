@@ -1,48 +1,27 @@
 # Android Farm برای QA داخلی
 
-پلتفرم on-demand برای اجرای Android/Redroid روی Ubuntu 22.04/24.04 با Coolify است. هر دستگاه data پایدار، proxy اختصاصی، ADB فقط روی loopback و کنترل صفحه پشت Traefik دارد. ظرفیت کاتالوگ و تعداد روشن همزمان از CPU، RAM، disk و inode همان میزبان محاسبه می‌شود و روی عدد ۷۰ قفل نیست.
+پلتفرم on-demand برای اجرای Android/Redroid روی Ubuntu 22.04/24.04 و Coolify؛ با دادهٔ پایدار، پراکسی اختصاصی، ADB محلی، صف Redis و مانیتورینگ. ظرفیت بر اساس منابع واقعی سرور محاسبه می‌شود و روی ۷۰ دستگاه قفل نیست.
 
-راه‌انداز هدایت‌شده، استقرار در Coolify و فعال‌سازی CLI، Redis Worker و بررسی سلامت را هماهنگ می‌کند. کنسول React فعلی **دموی UX** است و دکمه‌های آن به Docker یا Worker production وصل نیستند.
+**مرجع واحد نصب و مدیریت: [راهنمای گام‌به‌گام فارسی](docs/GUIDE.fa.md).** از بخش «شروع سریع» همان راهنما شروع کنید؛ DNS، تنظیمات Coolify، نصب، اولین دستگاه، پشتیبان‌گیری و عیب‌یابی همگی در همان فایل هستند.
 
-این پروژه برای آزمون داخلیِ مجاز است. دورزدن Meta/Play Integrity، تغییر IMEI، جعل گوشی تجاری، پنهان‌سازی root/container، خودکارسازی OTP/ثبت‌نام انبوه و تضمین جلوگیری از ban را پیاده نمی‌کند. نصب برنامه فقط برای APK تأییدشده با hash و signer مجاز انجام می‌شود.
+آدرس‌های انتخاب‌شده:
 
-## نصب ساده
+| بخش | آدرس |
+|---|---|
+| سامانه | `https://commex-box.com/` |
+| کنترل دستگاه | `https://commex-box.com/d/num01/` |
+| مانیتورینگ | `https://metrics.commex-box.com/` |
+| Coolify موجود | `https://coolify.commex-box.com/` |
 
-روی سرور Ubuntu 22.04/24.04 که Coolify در آن فعال است، این دو دستور را اجرا کنید:
+این‌ها تنظیمات مقصدند؛ انتشار کد، DNS یا سرور را خودکار تغییر نمی‌دهد. پس از آماده‌کردن DNS و توکن Coolify طبق راهنما، روی سرور `185.208.172.141` اجرا کنید:
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mjpouladi/AndroidFarm/main/install.sh -o install-android-farm.sh
-sudo bash install-android-farm.sh
+sudo bash install-android-farm.sh --domain commex-box.com
 ```
 
-راه‌انداز فقط دامنهٔ فارم، آدرس Coolify و توکن API را می‌گیرد. برای Coolify روی همین سرور، آدرس پیش‌فرض را با Enter بپذیرید. توکن را در **Keys & Tokens → API tokens** بسازید و دسترسی API را فعال کنید؛ توکن به دسترسی خواندن، نوشتن و اجرای Deploy در تیم مربوط نیاز دارد. توکن مخفی دریافت می‌شود و ذخیره نمی‌شود.
+نصب‌کننده ساخت پروژه، Compose، ENV، استقرار و فعال‌سازی CLI/Worker را هماهنگ می‌کند. دامنهٔ پنل در نصب تازه همان دامنهٔ اصلی است؛ نصب‌های قبلی تنظیمات ذخیره‌شده را حفظ می‌کنند. برای تغییر پنل نصب قبلی، گزینهٔ `--console-domain commex-box.com` را نیز بدهید. حالت IP همچنان اختیاری است.
 
-قبل از اجرا، DNS دامنهٔ خودتان مثل `farm.example.com` و دو نام `console.farm.example.com` و `metrics.farm.example.com` را به سرور وصل کنید. می‌توانید برای زیرنام‌ها از رکورد `*.farm.example.com` استفاده کنید.
+کنسول React فعلی **دموی UX** است؛ مدیریت واقعی از CLI انجام می‌شود. تست‌های محلی جای پذیرش TLS، Redroid، پراکسی و WebSocket روی Ubuntu مقصد را نمی‌گیرند.
 
-نصب‌کننده منابع و شبکه را تشخیص می‌دهد، پروژهٔ `android-farm` و برنامهٔ `farm-core` را در Coolify می‌سازد، ENV را می‌فرستد، همان commit را deploy می‌کند، CLI/Redis/Worker/health timer را فعال می‌کند و وضعیت HTTPS را بررسی می‌کند. کپی دستی Compose، ENV، فایل رمز یا اجرای دوبارهٔ `apply` لازم نیست. رمز وب و لینک‌ها در پایان نشان داده می‌شوند؛ رمز Grafana در فایل خصوصی میزبان می‌ماند.
-
-اگر نصب قطع شد، ادامه با همین فرمان است:
-
-```bash
-sudo bash /opt/android-farm/source/install.sh
-```
-
-راه‌انداز source دارای تغییر محلی، برنامهٔ نامرتبط Coolify یا Redis مدیریت‌نشدهٔ قبلی را بازنویسی نمی‌کند. برای نصب‌های سفارشی و مسیر دستی `plan/apply/doctor`، [راهنمای واحد](docs/GUIDE.fa.md) را ببینید.
-
-تمام مراحل نصب، معماری، proxy، profile، lifecycle، Worker/Redis، monitoring، Ansible، backup/restore، upgrade و آزمون پذیرش در [راهنمای واحد فارسی](docs/GUIDE.fa.md) آمده است.
-
-## فرمان‌های اصلی
-
-```bash
-sudo device-provisioner resources --json
-sudo device-provisioner proxy list
-sudo device-provisioner up --request /root/farm-input/device-request.json
-sudo device-provisioner up --id num01
-sudo device-provisioner check --id num01
-sudo device-provisioner check-ip --id num01 --json
-sudo device-provisioner backup --id num01
-sudo device-provisioner down --id num01
-sudo device-provisioner status
-```
-
-Compose و تست‌های محلی باید پیش از انتشار اجرا شوند، اما بوت واقعی Redroid، egress proxy، TLS، noVNC/WebSocket و restore فقط روی میزبان Ubuntu مقصد قابل پذیرش‌اند.
+این پروژه برای QA مجاز است و جعل IMEI/گوشی، پنهان‌سازی شبیه‌ساز، دورزدن Meta/Play Integrity یا ثبت‌نام انبوه را پیاده نمی‌کند. APK باید hash و signer تأییدشده داشته باشد.

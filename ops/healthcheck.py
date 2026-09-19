@@ -70,7 +70,11 @@ def load_control_config(path: Path) -> dict:
         raise ValueError("invalid compose_project")
     env = (require_private_file(Path(value["compose_env_file"]), "health Compose environment")
            if value.get("compose_env_file") else None)
+    access_mode = value.get("access_mode", "domain")
+    if access_mode not in {"domain", "ip"}:
+        raise ValueError("invalid access_mode")
     return {"compose_file": compose, "compose_project": project, "compose_env_file": env,
+            "access_mode": access_mode,
             "secret_dir": Path(value.get("secret_dir", "/etc/android-farm/secrets")),
             "profile_dir": Path(value.get("profile_dir", "/etc/android-farm/device-profiles")),
             "proxy_registry": Path(value.get("proxy_registry", "/var/lib/android-farm/proxies.json")),
@@ -90,6 +94,7 @@ def compose_argv(config: dict, action: str, component: str, device: str) -> list
     if config.get("compose_env_file"):
         argv.extend(["--env-file", str(config["compose_env_file"])])
     argv.extend(["--project", config["compose_project"], "--compose", str(config["compose_file"]),
+                 "--access-mode", config.get("access_mode", "domain"),
                  "--secret-dir", str(config["secret_dir"]),
                  "--profile-dir", str(config["profile_dir"]),
                  "--proxy-registry", str(config["proxy_registry"]),

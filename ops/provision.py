@@ -58,6 +58,7 @@ def main():
     parser.add_argument('--compose', required=True, type=Path)
     parser.add_argument('--env-file', type=Path)
     parser.add_argument('--project', required=True, help='host-owned runtime Compose project name')
+    parser.add_argument('--access-mode', choices=['domain', 'ip'], default='domain')
     parser.add_argument('--secret-dir', type=Path, default=Path('/etc/android-farm/secrets'))
     parser.add_argument('--proxy-registry', type=Path, default=Path('/var/lib/android-farm/proxies.json'))
     parser.add_argument('--proxy-store-dir', type=Path, default=Path('/etc/android-farm/proxies'))
@@ -222,6 +223,7 @@ def main():
         try:
             farmctl.run(sys.executable, str(ROOT / 'ops/farmctl.py'), 'start', device,
                         '--compose', str(args.compose.resolve()), '--project', args.project,
+                        '--access-mode', args.access_mode,
                         '--secret-dir', str(args.secret_dir),
                         '--proxy-registry', str(args.proxy_registry),
                         '--proxy-store-dir', str(args.proxy_store_dir),
@@ -247,7 +249,8 @@ def main():
             print(f'{device}: approved QA application installed and opened. Any vendor sign-in stays manual.')
         except BaseException:
             with contextlib.suppress(Exception):
-                farmctl.run(sys.executable, str(ROOT / 'ops/farmctl.py'), 'stop', device)
+                farmctl.run(sys.executable, str(ROOT / 'ops/farmctl.py'), 'stop', device,
+                            '--access-mode', args.access_mode)
             record.update(phase='failed', last_error='Preparation failed; inspect local operator output and retry identical request')
             inventory.save(registry, inventory_state)
             raise

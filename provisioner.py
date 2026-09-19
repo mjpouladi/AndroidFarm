@@ -37,6 +37,42 @@ class Config:
     apk_trust_file: Path | None = None
     proxy_registry: Path = Path('/var/lib/android-farm/proxies.json')
     proxy_store_dir: Path = Path('/etc/android-farm/proxies')
+    access_mode: str = 'domain'
+
+
+def validate_console_origin(value, access_mode='domain'):
+    """Accept HTTP only for explicit IP mode and otherwise retain HTTPS configs."""
+    if (not isinstance(value, str) or not value or
+            any(char.isspace() or ord(char) == 127 for char in value) or
+            any(marker in value for marker in ('\\', '?', '#'))):
+        raise RuntimeError('console_url must be a clean browser origin')
+    if access_mode not in {'domain', 'ip'}:
+        raise RuntimeError('access_mode must be domain or ip')
+    parsed = urlparse(value)
+    if (not parsed.hostname or parsed.username or parsed.password or parsed.query or
+            parsed.fragment or parsed.path not in {'', '/'} or parsed.params):
+        raise RuntimeError('console_url must be a clean browser origin')
+    try:
+        port = parsed.port
+    except ValueError as exc:
+        raise RuntimeError('console_url has an invalid port') from exc
+    if access_mode == 'domain':
+        if parsed.scheme != 'https':
+            raise RuntimeError('domain console_url must use HTTPS')
+        return value.rstrip('/')
+    if parsed.scheme != 'http' or port is None:
+        raise RuntimeError('IP-mode console_url must be an explicit HTTP IPv4 origin')
+    try:
+        address = ipaddress.ip_address(parsed.hostname)
+    except ValueError as exc:
+        raise RuntimeError('IP-mode console_url must contain a literal IPv4 address') from exc
+    if (not isinstance(address, ipaddress.IPv4Address) or address.is_unspecified or
+            address.is_loopback or address.is_link_local or address.is_multicast or
+            address.is_reserved):
+        raise RuntimeError('IP-mode console_url has an unusable IPv4 address')
+    if not 1024 <= port <= 65535 or 5551 <= port <= 13742:
+        raise RuntimeError('IP-mode console_url port is unavailable or reserved for ADB')
+    return f'http://{address}:{port}'
 
 
 def load_config(path):
@@ -56,9 +92,8 @@ def load_config(path):
     project = value['compose_project']
     if not isinstance(project, str) or not re.fullmatch(r'[a-zA-Z0-9][a-zA-Z0-9_.-]{0,62}', project):
         raise RuntimeError('invalid Compose project name')
-    parsed = urlparse(value['console_url'])
-    if parsed.scheme != 'https' or not parsed.hostname or parsed.username or parsed.password or parsed.query or parsed.fragment:
-        raise RuntimeError('console_url must be a clean HTTPS origin')
+    access_mode = value.get('access_mode', 'domain')
+    console_url = validate_console_origin(value['console_url'], access_mode)
     state_dir = Path(value.get('state_dir', '/var/lib/android-farm')).resolve()
     if state_dir != Path('/var/lib/android-farm'):
         raise RuntimeError('state_dir is fixed at /var/lib/android-farm for all host guards')
@@ -67,10 +102,11 @@ def load_config(path):
     return Config(compose_file=compose, compose_env_file=env_file, compose_project=project,
                   secret_dir=Path(value.get('secret_dir', '/etc/android-farm/secrets')).resolve(),
                   backup_dir=Path(value.get('backup_dir', '/var/backups/android-farm')).resolve(),
-                  console_url=value['console_url'].rstrip('/'), state_dir=state_dir,
+                  console_url=console_url, state_dir=state_dir,
                   apk_trust_file=trust,
                   proxy_registry=Path(value.get('proxy_registry', '/var/lib/android-farm/proxies.json')).resolve(),
-                  proxy_store_dir=Path(value.get('proxy_store_dir', '/etc/android-farm/proxies')).resolve())
+                  proxy_store_dir=Path(value.get('proxy_store_dir', '/etc/android-farm/proxies')).resolve(),
+                  access_mode=access_mode)
 
 
 def require_host_root():
@@ -97,7 +133,8 @@ def invoke(script, *arguments, capture=False):
 def farmctl(config, action, device, *extra, capture=False):
     env_args = ('--env-file', config.compose_env_file) if config.compose_env_file else ()
     return invoke('farmctl.py', action, device, '--compose', config.compose_file, *env_args,
-                  '--project', config.compose_project, '--secret-dir', config.secret_dir,
+                  '--project', config.compose_project, '--access-mode', config.access_mode,
+                  '--secret-dir', config.secret_dir,
                   '--proxy-registry', config.proxy_registry,
                   '--proxy-store-dir', config.proxy_store_dir,
                   '--backup-dir', config.backup_dir, *extra, capture=capture)
@@ -445,7 +482,8 @@ def main(argv=None):
             raise RuntimeError('request provisioning requires configured apk_trust_file')
         result = invoke('provision.py', '--request', args.request, '--compose', config.compose_file,
                         *(( '--env-file', config.compose_env_file) if config.compose_env_file else ()),
-                        '--project', config.compose_project, '--secret-dir', config.secret_dir,
+                        '--project', config.compose_project, '--access-mode', config.access_mode,
+                        '--secret-dir', config.secret_dir,
                         '--proxy-registry', config.proxy_registry,
                         '--proxy-store-dir', config.proxy_store_dir,
                         '--apk-trust-file', config.apk_trust_file, capture=True)

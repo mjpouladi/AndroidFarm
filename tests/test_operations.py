@@ -18,10 +18,38 @@ from ops.compose_factory import canonical_device, single_instance
 from ops.farmctl import (_global_ipv4, recover_existing_screen,
                          recovery_android_is_active, validate_compose)
 from ops import app_installer
-from provisioner import bulk_managed_inspections
+from provisioner import (Config, bulk_managed_inspections, farmctl as provisioner_farmctl,
+                         validate_console_origin)
 
 
 class OperationsTests(unittest.TestCase):
+    def test_console_origin_requires_explicit_safe_ip_mode_for_http(self):
+        self.assertEqual(validate_console_origin("https://farm.example.com/"),
+                         "https://farm.example.com")
+        self.assertEqual(validate_console_origin("http://10.20.30.40:18080", "ip"),
+                         "http://10.20.30.40:18080")
+        self.assertEqual(validate_console_origin("http://192.168.10.4:18080/", "ip"),
+                         "http://192.168.10.4:18080")
+        self.assertEqual(Config(Path("compose"), None, "project", Path("secrets"),
+                                Path("backups"), "https://farm.example.com").access_mode,
+                         "domain")
+        invalid = (
+            ("http://farm.example.com:18080", "domain"),
+            ("http://farm.example.com:18080", "ip"),
+            ("http://127.0.0.1:18080", "ip"),
+            ("http://10.20.30.40:8000", "ip"),
+            ("http://user:pass@10.20.30.40:18080", "ip"),
+            ("http://10.20.30.40:18080/path", "ip"),
+            ("http://10.20.30.40:18080?query=1", "ip"),
+            ("http://10.20.30.40:18080?", "ip"),
+            ("https://farm.example.com#", "domain"),
+            ("https://farm.example.com evil", "domain"),
+            ("https://10.20.30.40:18080", "ip"),
+        )
+        for origin, mode in invalid:
+            with self.subTest(origin=origin, mode=mode), self.assertRaises(RuntimeError):
+                validate_console_origin(origin, mode)
+
     def test_status_bulk_inspection_scales_with_materialized_containers(self):
         calls = []
 
@@ -203,6 +231,17 @@ class OperationsTests(unittest.TestCase):
             'volumes': {'redroid-data-num01': {'external': True, 'name': 'redroid-data-num01'}},
             'secrets': {'proxy-num01': {'file': '/etc/android-farm/secrets/num01.json'}}}
         validate_compose(config, 'num01', Path('/etc/android-farm/secrets'))
+        labels = config['services']['screen-num01']['labels']
+        labels['traefik.enable'] = 'false'
+        validate_compose(config, 'num01', Path('/etc/android-farm/secrets'), access_mode='ip')
+        with self.assertRaisesRegex(RuntimeError, 'access mode'):
+            validate_compose(config, 'num01', Path('/etc/android-farm/secrets'))
+        middleware = labels['traefik.http.routers.farm-num01.middlewares']
+        labels['traefik.http.routers.farm-num01.middlewares'] = 'farm-num01-strip'
+        with self.assertRaisesRegex(RuntimeError, 'auth middleware'):
+            validate_compose(config, 'num01', Path('/etc/android-farm/secrets'), access_mode='ip')
+        labels['traefik.http.routers.farm-num01.middlewares'] = middleware
+        labels['traefik.enable'] = 'true'
         profile = validate_device_profile({
             'schema_version': 1, 'android_version': 12,
             'resolution': {'width': 1080, 'height': 1920}, 'dpi': 420, 'fps': 30,
@@ -222,6 +261,15 @@ class OperationsTests(unittest.TestCase):
         config['services']['proxy-num01']['networks']['side-channel'] = {}
         with self.assertRaises(RuntimeError):
             validate_compose(config, 'num01', Path('/etc/android-farm/secrets'))
+
+    def test_provisioner_propagates_ip_access_mode_to_guarded_lifecycle(self):
+        config = Config(Path('compose'), Path('env'), 'project', Path('secrets'),
+                        Path('backups'), 'http://192.168.10.4:18080', access_mode='ip')
+        with patch('provisioner.invoke') as invoke:
+            provisioner_farmctl(config, 'start', 'num01')
+        argv = invoke.call_args.args
+        self.assertEqual(argv[:4], ('farmctl.py', 'start', 'num01', '--compose'))
+        self.assertEqual(argv[argv.index('--access-mode') + 1], 'ip')
 
     def test_health_recovery_rechecks_on_demand_state_before_start(self):
         stopped = {'State': {'Running': False}}

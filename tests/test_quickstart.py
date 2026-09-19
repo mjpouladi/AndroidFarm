@@ -4,22 +4,116 @@ import subprocess
 import tempfile
 import unittest
 from unittest.mock import Mock, patch
+import urllib.error
 
 from installer import install, quickstart
 
 
 class QuickstartTests(unittest.TestCase):
+    def test_new_install_defaults_to_https_and_resume_never_reprompts(self):
+        args = quickstart.build_parser().parse_args([])
+        reader = Mock(return_value="farm.example.com")
+        selected = quickstart.select_access(args, {}, {}, reader=reader)
+        self.assertEqual(selected, {"access_mode": "domain", "public_ip": None,
+                                   "http_port": 18080, "farm_domain": "farm.example.com",
+                                   "console_domain": "farm.example.com"})
+        reader.assert_called_once()
+        reader.reset_mock()
+        self.assertEqual(quickstart.select_access(args, selected, {}, reader=reader), selected)
+        reader.assert_not_called()
+        ip_args = quickstart.build_parser().parse_args(["--ip", "192.168.50.20"])
+        ip = quickstart.select_access(ip_args, {}, {}, reader=reader)
+        self.assertEqual(ip["access_mode"], "ip")
+        self.assertEqual(quickstart.select_access(args, ip, {}, reader=reader), ip)
+        reader.assert_not_called()
+
+    def test_domain_install_is_preserved_and_explicit_flags_switch_modes(self):
+        old = {"farm_domain": "farm.example.com", "console_domain": "panel.example.com"}
+        args = quickstart.build_parser().parse_args([])
+        selected = quickstart.select_access(args, {}, old)
+        self.assertEqual(selected["access_mode"], "domain")
+        self.assertEqual(selected["console_domain"], "panel.example.com")
+        args = quickstart.build_parser().parse_args(["--ip", "192.168.50.20", "--port", "18090"])
+        ip = quickstart.select_access(args, old, {})
+        self.assertEqual(ip["http_port"], 18090)
+        args = quickstart.build_parser().parse_args(["--domain", "new.example.com"])
+        domain = quickstart.select_access(args, ip, {})
+        self.assertIsNone(domain["public_ip"])
+        self.assertEqual(domain["console_domain"], "new.example.com")
+
+    def test_adb_port_is_rejected_and_domain_gateway_port_can_be_changed(self):
+        args = quickstart.build_parser().parse_args(["--ip", "192.168.50.20", "--port", "5551"])
+        with self.assertRaises(ValueError):
+            quickstart.select_access(args, {}, {})
+        args = quickstart.build_parser().parse_args(["--domain", "farm.example.com", "--port", "18090"])
+        selected = quickstart.select_access(args, {}, {})
+        self.assertEqual(selected["access_mode"], "domain")
+        self.assertEqual(selected["http_port"], 18090)
+
+    def test_console_can_share_apex_with_device_routes(self):
+        args = quickstart.build_parser().parse_args([
+            "--domain", "commex-box.com", "--console-domain", "commex-box.com"])
+        selected = quickstart.select_access(args, {}, {})
+        self.assertEqual(selected["farm_domain"], "commex-box.com")
+        self.assertEqual(selected["console_domain"], "commex-box.com")
+        saved = quickstart.select_access(quickstart.build_parser().parse_args([]), selected, {})
+        self.assertEqual(saved, selected)
+        bad = quickstart.build_parser().parse_args([
+            "--ip", "192.168.50.20", "--console-domain", "commex-box.com"])
+        with self.assertRaises(ValueError):
+            quickstart.select_access(bad, {}, {})
+
+    def test_ip_urls_share_origin_and_domain_urls_preserve_https(self):
+        settings = install.Settings(Path("repo"), "192.168.50.20", "192.168.50.20",
+                                    "auto", "auto", install.Paths(), access_mode="ip",
+                                    public_ip="192.168.50.20", http_port=18090)
+        self.assertEqual(quickstart.access_urls(settings), {
+            "console": "http://192.168.50.20:18090/",
+            "monitoring": "http://192.168.50.20:18090/metrics/"})
+        settings = install.Settings(Path("repo"), "farm.example.com", "panel.example.com",
+                                    "auto", "auto", install.Paths())
+        self.assertEqual(quickstart.access_urls(settings), {
+            "console": "https://panel.example.com/", "monitoring": "https://metrics.farm.example.com/"})
+        self.assertEqual(quickstart.access_urls(settings, {"GRAFANA_DOMAIN": "monitor.example.com"})[
+            "monitoring"], "https://monitor.example.com/")
+
+    def test_auth_smoke_requires_basic_challenge_and_does_not_follow_redirects(self):
+        url = "http://192.168.50.20:18080/metrics/"
+        opener = Mock()
+        with patch.object(quickstart.urllib.request, "build_opener", return_value=opener):
+            opener.open.side_effect = urllib.error.HTTPError(url, 401, "auth",
+                                                            {"WWW-Authenticate": 'Basic realm="farm"'}, None)
+            self.assertTrue(quickstart.web_auth_ready(url))
+            opener.open.assert_called_once_with(url, timeout=10)
+            opener.open.side_effect = urllib.error.HTTPError(url, 401, "auth", {}, None)
+            self.assertFalse(quickstart.web_auth_ready(url))
+            opener.open.side_effect = urllib.error.HTTPError(url, 308, "redirect", {}, None)
+            self.assertFalse(quickstart.web_auth_ready(url))
+            opener.open.reset_mock()
+            self.assertFalse(quickstart.web_auth_ready("http://public.example.com:18080/"))
+            self.assertFalse(quickstart.web_auth_ready("http://192.168.50.20:5551/"))
+            self.assertFalse(quickstart.web_auth_ready("http://127.0.0.1:18080/"))
+            opener.open.assert_not_called()
+            opener.open.side_effect = urllib.error.HTTPError(url, 401, "auth",
+                                                            {"WWW-Authenticate": 'Basic realm="farm"'}, None)
+            self.assertTrue(quickstart.web_auth_ready("http://127.0.0.1:18080/", allow_loopback=True))
+        self.assertIsNone(quickstart.NoRedirect().redirect_request(None, None, 301, "", {}, url))
+
     def test_state_does_not_persist_tokens_or_passwords(self):
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "state.json"
             state = quickstart.load_state(path)
             state.update(coolify_url="https://coolify.example.com", token="secret-token",
-                         password="private-password", phase="host_prepared")
+                         password="private-password", phase="host_prepared", access_mode="ip",
+                         public_ip="192.168.50.20", http_port=18080)
             quickstart.save_state(state, path)
             text = path.read_text()
             self.assertNotIn("secret-token", text)
             self.assertNotIn("private-password", text)
             self.assertEqual(quickstart.load_state(path)["installation_id"], state["installation_id"])
+            self.assertEqual(quickstart.load_state(path)["access_mode"], "ip")
+            self.assertEqual(quickstart.load_state(path)["public_ip"], "192.168.50.20")
+            self.assertEqual(quickstart.load_state(path)["http_port"], 18080)
 
     def test_dirty_checkout_and_foreign_repository_are_rejected(self):
         runner = Mock(side_effect=[Mock(stdout=quickstart.REPOSITORY), Mock(stdout=" M ops/farmctl.py")])
@@ -132,7 +226,7 @@ class QuickstartTests(unittest.TestCase):
                  patch.object(install, "doctor", return_value={"status": "ready", "checks": []}), \
                  patch.object(quickstart, "wait_anchor"), \
                  patch.object(quickstart, "core_runtime_status", return_value={"core": True}) as core_status, \
-                 patch.object(quickstart, "https_auth_ready", return_value=True), \
+                 patch.object(quickstart, "web_auth_ready", return_value=True), \
                  patch.object(quickstart, "say"):
                 first = quickstart.run_setup(settings, client, state, state_path=state_path,
                                              commit="a" * 40, server_uuid="server", control_installer=control)

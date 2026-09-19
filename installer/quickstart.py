@@ -39,7 +39,8 @@ STATE_FILE = Path("/var/lib/android-farm/quickstart.json")
 REPOSITORY = "https://github.com/mjpouladi/AndroidFarm.git"
 FAILED_DEPLOYMENTS = {"failed", "cancelled", "canceled", "cancelled-by-user"}
 CORE_CONTAINERS = ("farm-anchor", "farm-console", "android-farm-prometheus",
-                   "android-farm-node-exporter", "android-farm-cadvisor", "android-farm-grafana")
+                   "android-farm-node-exporter", "android-farm-cadvisor", "android-farm-grafana",
+                   "android-farm-gateway")
 
 
 def say(message: str) -> None:
@@ -109,6 +110,7 @@ def save_state(state: dict, path: Path = STATE_FILE) -> None:
                "coolify_url", "server_uuid", "app_uuid", "source_commit", "release_id",
                "deployment_uuid", "deployment_commit", "deployment_env_hash", "deployment_finished",
                "deployment_requested", "deployment_before", "updated_at", "auth_user", "control_plane_release"}
+    allowed.update({"access_mode", "public_ip", "http_port"})
     require_private_directory(path.parent, "quickstart state directory", create=True)
     atomic_json(path, {**{key: value for key, value in state.items() if key in allowed},
                        "updated_at": int(time.time())})
@@ -204,13 +206,25 @@ class NoRedirect(urllib.request.HTTPRedirectHandler):
         return None
 
 
-def https_auth_ready(domain: str) -> bool:
+def web_auth_ready(url: str, *, allow_loopback: bool = False) -> bool:
     """Read-only smoke check; no credentials, redirect following, or TLS bypass."""
+    parsed = urlsplit(url)
+    if parsed.username or parsed.password or parsed.query or parsed.fragment:
+        return False
+    if parsed.scheme == "http":
+        try:
+            if not (allow_loopback and parsed.hostname == "127.0.0.1"):
+                install.normalize_public_ip(parsed.hostname or "")
+            install.normalize_http_port(parsed.port)
+        except (ValueError, TypeError):
+            return False
+    elif parsed.scheme != "https" or not parsed.hostname:
+        return False
     try:
-        with urllib.request.build_opener(NoRedirect).open(f"https://{domain}/", timeout=10):
+        with urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect).open(url, timeout=10):
             return False  # A successful unauthenticated response is not protected.
     except urllib.error.HTTPError as exc:
-        return exc.code == 401
+        return exc.code == 401 and exc.headers.get("WWW-Authenticate", "").lower().startswith("basic ")
     except (OSError, urllib.error.URLError):
         return False
 
@@ -332,11 +346,18 @@ def run_setup(settings: install.Settings, client, state: dict, *, state_path: Pa
     control_installer(Path(finalized["release_dir"]))
     state.update(phase="control_plane_ready", control_plane_release=finalized["release_id"])
     save_state(state, state_path)
-    say("۵/۵ — بررسی نهایی میزبان و HTTPS…")
+    say("۵/۵ — بررسی نهایی میزبان و احراز هویت وب…")
     health = install.doctor(settings)
     core = core_runtime_status()
-    urls = {"console": settings.console_domain, "monitoring": env["GRAFANA_DOMAIN"]}
-    web = {name: https_auth_ready(domain) for name, domain in urls.items()}
+    urls = access_urls(settings, env)
+    # Public NAT addresses may not hairpin back to this server. Probe the local
+    # published port; outside firewall reachability remains an operator check.
+    if settings.access_mode == "ip":
+        web = {name: web_auth_ready(urlsplit(url)._replace(
+            netloc=f"127.0.0.1:{settings.http_port}").geturl(), allow_loopback=True)
+            for name, url in urls.items()}
+    else:
+        web = {name: web_auth_ready(url) for name, url in urls.items()}
     ready = health["status"] == "ready" and all(web.values()) and all(core.values())
     state["phase"] = "ready" if ready else "needs_attention"
     save_state(state, state_path)
@@ -346,7 +367,11 @@ def run_setup(settings: install.Settings, client, state: dict, *, state_path: Pa
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="نصب هدایت‌شدهٔ Android Farm در Coolify")
-    parser.add_argument("--domain", help="دامنهٔ فارم؛ مثال: farm.example.com")
+    access = parser.add_mutually_exclusive_group()
+    access.add_argument("--domain", help="حالت پیش‌فرض HTTPS با دامنه؛ مثال: farm.example.com")
+    access.add_argument("--ip", help="حالت اختیاری بدون دامنه با IPv4 سرور")
+    parser.add_argument("--console-domain", help="دامنهٔ جداگانهٔ اختیاری پنل؛ پیش‌فرض همان دامنهٔ اصلی")
+    parser.add_argument("--port", type=int, help="پورت درگاه HTTP؛ پیش‌فرض 18080، در حالت دامنه فقط loopback")
     parser.add_argument("--coolify-url", help="آدرس پنل Coolify؛ HTTPS یا HTTP فقط روی loopback")
     parser.add_argument("--token-file", type=Path, help="فایل خصوصی root:0600؛ در حالت عادی توکن مخفی پرسیده می‌شود")
     parser.add_argument("--server-uuid", help="برای میزبان‌های چندسروری یا NAT")
@@ -354,6 +379,38 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--retry-deploy", action="store_true",
                         help="پس از بررسی دستی نبود Deploy در Coolify، درخواست نامعلوم قبلی را دوباره ارسال کن")
     return parser
+
+
+def select_access(args, state: dict, initial: dict, *, reader: Callable = input) -> dict:
+    """Default new installs to HTTPS; preserve the access mode of resumed installs."""
+    saved = state if state.get("farm_domain") else initial
+    saved_mode = saved.get("access_mode", "domain")
+    mode = "domain" if args.domain else "ip" if args.ip else saved_mode
+    port = install.normalize_http_port(args.port if args.port is not None else saved.get("http_port", 18080))
+    if mode == "ip":
+        if args.console_domain:
+            raise ValueError("--console-domain فقط در حالت دامنه قابل استفاده است.")
+        address = install.normalize_public_ip(args.ip or saved.get("public_ip") or
+                    prompt("IPv4 سرور برای دسترسی مرورگر", reader=reader))
+        return {"access_mode": mode, "public_ip": address, "http_port": port,
+                "farm_domain": address, "console_domain": address}
+    if mode != "domain":
+        raise ValueError("حالت دسترسی ذخیره‌شده معتبر نیست.")
+    domain = install.normalize_domain(args.domain or saved.get("farm_domain") or
+                                      prompt("دامنهٔ فارم (بدون https)", reader=reader))
+    console = args.console_domain or (saved.get("console_domain") if saved_mode == "domain" and
+               saved.get("farm_domain") == domain else None) or domain
+    return {"access_mode": mode, "public_ip": None, "http_port": port,
+            "farm_domain": domain, "console_domain": install.normalize_domain(console)}
+
+
+def access_urls(settings: install.Settings, env: dict | None = None) -> dict[str, str]:
+    if settings.access_mode == "ip":
+        origin = install.access_origin(access_mode="ip", farm_domain=settings.farm_domain,
+                                       public_ip=settings.public_ip, http_port=settings.http_port)
+        return {"console": origin + "/", "monitoring": origin + "/metrics/"}
+    grafana = install.normalize_domain((env or {}).get("GRAFANA_DOMAIN", f"metrics.{settings.farm_domain}"))
+    return {"console": f"https://{settings.console_domain}/", "monitoring": f"https://{grafana}/"}
 
 
 def main(argv=None) -> int:
@@ -367,12 +424,11 @@ def main(argv=None) -> int:
         with setup_lock():
             state = load_state()
             initial = install._read_json_if_regular(install.Paths.state_dir / "install-state.json")
-            domain = install.normalize_domain(args.domain or state.get("farm_domain") or
-                        initial.get("farm_domain") or prompt("دامنهٔ فارم (بدون https)"))
-            console = state.get("console_domain") or initial.get("console_domain") or f"console.{domain}"
+            access = select_access(args, state, initial)
             url = args.coolify_url or state.get("coolify_url") or prompt(
                 "آدرس Coolify", "http://127.0.0.1:8000")
-            say("توکن را در Coolify → Keys & Tokens → API tokens بسازید و API را فعال کنید.")
+            say("در Coolify، API Access را فعال کنید؛ سپس در Keys & Tokens → API Tokens یک توکن موقت root برای تیم این سرور بسازید.")
+            say("راه‌انداز هم تنظیمات می‌سازد و هم Deploy می‌کند؛ توکن deploy-only کافی نیست. پس از پایان نصب می‌توانید توکن موقت را لغو کنید.")
             token = (install._private_password(args.token_file) if args.token_file else
                      getpass.getpass("توکن API (نمایش و ذخیره نمی‌شود): ").strip())
             if not token:
@@ -380,14 +436,22 @@ def main(argv=None) -> int:
             client = CoolifyClient(url, token)
             commit = source_commit(ROOT)
             server = select_server(client, args.server_uuid or state.get("server_uuid"))
-            state.update(farm_domain=domain, console_domain=console, coolify_url=url, server_uuid=server)
+            state.update(**access, coolify_url=url, server_uuid=server)
             save_state(state)
             paths = install.Paths()
             user, password = prepare_auth(paths, state)
             save_state(state)
-            settings = install.Settings(ROOT, domain, console, "auto", "auto", paths,
-                                        auth_user=user, auth_password_file=password)
-            say(f"DNS این نام‌ها باید به همین سرور اشاره کند: {domain}، {console}، metrics.{domain}")
+            settings = install.Settings(ROOT, access["farm_domain"], access["console_domain"],
+                                        "auto", "auto", paths, auth_user=user, auth_password_file=password,
+                                        access_mode=access["access_mode"], public_ip=access["public_ip"],
+                                        http_port=access["http_port"])
+            if settings.access_mode == "ip":
+                say(f"بدون نیاز به DNS: {access_urls(settings)['console']}؛ پورت TCP {settings.http_port} باید از شبکهٔ شما قابل دسترس باشد.")
+                say("این حالت HTTP رمزگذاری نشده است؛ دسترسی را به شبکهٔ مطمئن یا VPN محدود کنید.")
+            else:
+                domains = list(dict.fromkeys([settings.farm_domain, settings.console_domain,
+                                             f"metrics.{settings.farm_domain}"]))
+                say("DNS این نام‌ها باید به همین سرور اشاره کند: " + "، ".join(domains))
             outcome = run_setup(settings, client, state, commit=commit, server_uuid=server,
                                 requested_app=args.app_uuid, retry_deploy=args.retry_deploy)
             say("نصب تکمیل شد." if outcome["ready"] else "اجزای نصب آماده‌اند؛ موارد زیر هنوز نیاز به بررسی دارند:")
@@ -396,12 +460,15 @@ def main(argv=None) -> int:
                     say(f"  {check['name']}: {check['detail']} — {check.get('remediation') or ''}")
             for name, passed in outcome["web"].items():
                 if not passed:
-                    say(f"  DNS/TLS/Basic Auth را برای https://{outcome['urls'][name]}/ در Coolify بررسی کنید.")
+                    checks = "پورت/firewall/Basic Auth" if settings.access_mode == "ip" else "DNS/TLS/Basic Auth"
+                    say(f"  {checks} را برای {outcome['urls'][name]} در Coolify بررسی کنید.")
             for name, passed in outcome["core"].items():
                 if not passed:
                     say(f"  سرویس {name} هنوز سالم/فعال نیست؛ لاگ آن را در Coolify ببینید.")
-            say(f"کنسول نمایشی: https://{console}/")
-            say(f"مانیتورینگ: https://{outcome['urls']['monitoring']}/")
+            say(f"کنسول نمایشی: {outcome['urls']['console']}")
+            say(f"مانیتورینگ: {outcome['urls']['monitoring']}")
+            if settings.access_mode == "ip":
+                say("بررسی وب از داخل میزبان انجام شد؛ دسترسی از شبکهٔ خودتان را با بازکردن لینک‌ها بررسی کنید.")
             say(f"برنامهٔ Coolify: {outcome['app_uuid']}")
             if password:
                 say(f"نام کاربری وب: {user}؛ فایل خصوصی رمز: {password}")

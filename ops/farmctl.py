@@ -248,13 +248,15 @@ def wait_proxy(device, timeout=120):
     raise RuntimeError('proxy did not become healthy before timeout')
 
 
-def validate_compose(config, device, secret_dir, expected_profile=None):
+def validate_compose(config, device, secret_dir, expected_profile=None, access_mode='domain'):
     """Attest the isolation-critical parts of the resolved Compose document.
 
     This is deliberately an allowlist. Redroid is privileged, so merely
     checking for one good network or mount would let an extra network, bind
     mount, or published port defeat the egress boundary.
     """
+    if access_mode not in {'domain', 'ip'}:
+        raise RuntimeError('Compose validation requires domain or ip access mode')
     services = config.get('services', {})
     proxy_name, android_name, screen_name = (f'{kind}-{device}' for kind in ('proxy', 'android', 'screen'))
     try:
@@ -367,9 +369,11 @@ def validate_compose(config, device, secret_dir, expected_profile=None):
     middleware = labels.get(f'traefik.http.routers.farm-{device}.middlewares', '')
     route = labels.get(f'traefik.http.routers.farm-{device}.rule', '')
     service_port = labels.get(f'traefik.http.services.farm-{device}.loadbalancer.server.port')
-    if (str(labels.get('traefik.enable')).lower() != 'true' or 'farm-auth@file' not in middleware.split(',') or
+    expected_traefik = 'true' if access_mode == 'domain' else 'false'
+    if (str(labels.get('traefik.enable')).lower() != expected_traefik or
+            'farm-auth@file' not in middleware.split(',') or
             f'PathPrefix(`/d/{device}/`)' not in route or str(service_port) != '6080'):
-        raise RuntimeError('Compose drift: screen route is missing the required auth middleware')
+        raise RuntimeError('Compose drift: screen access mode, route, or auth middleware differs')
 
 
 def backup(device, destination):
@@ -430,6 +434,7 @@ def main():
     p.add_argument('--compose', default='docker-compose.farm.yml')
     p.add_argument('--env-file', type=Path)
     p.add_argument('--project', default='android-farm-runtime')
+    p.add_argument('--access-mode', choices=['domain', 'ip'], default='domain')
     p.add_argument('--secret-dir', type=Path, default=Path('/etc/android-farm/secrets'))
     p.add_argument('--proxy-registry', type=Path, default=Path('/var/lib/android-farm/proxies.json'))
     p.add_argument('--proxy-store-dir', type=Path, default=Path('/etc/android-farm/proxies'))
@@ -525,7 +530,7 @@ def main():
                 compose.extend(['-f', str(override_path)])
             compose.extend(['--profile', 'manual'])
             resolved = json.loads(run(*compose, 'config', '--format', 'json', capture=True))
-            validate_compose(resolved, d, args.secret_dir, expected_profile)
+            validate_compose(resolved, d, args.secret_dir, expected_profile, args.access_mode)
             # Proxy and screen use local reviewed Dockerfiles with stable image
             # names. Explicitly build from the active immutable release so an
             # upgrade can never reuse an older local tag silently.

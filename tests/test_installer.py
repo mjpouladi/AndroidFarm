@@ -54,6 +54,32 @@ class InstallerPureTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 install.normalize_domain(invalid)
 
+    def test_ip_access_validation_and_parser_skip_dns_normalization(self):
+        self.assertEqual(install.normalize_public_ip("10.20.30.40"), "10.20.30.40")
+        self.assertEqual(install.normalize_public_ip("8.8.8.8"), "8.8.8.8")
+        for invalid in ("0.0.0.0", "127.0.0.1", "169.254.1.2", "224.0.0.1", "::1"):
+            with self.assertRaises(ValueError):
+                install.normalize_public_ip(invalid)
+        self.assertEqual(install.normalize_http_port(18080), 18080)
+        for invalid in (80, 5551, 8000, 13742, 70000, True):
+            with self.assertRaises(ValueError):
+                install.normalize_http_port(invalid)
+
+        args = install.build_parser().parse_args([
+            "plan", "--ip", "10.20.30.40", "--port", "18080",
+            "--farm-domain", "not a domain", "--console-domain", "also invalid",
+        ])
+        settings = install._settings_from_args(args)
+        self.assertEqual(settings.access_mode, "ip")
+        self.assertEqual(settings.public_ip, "10.20.30.40")
+        self.assertEqual(settings.farm_domain, "10.20.30.40")
+        self.assertEqual(settings.console_domain, "10.20.30.40")
+        self.assertEqual(settings.http_port, 18080)
+        domain_with_port = install.build_parser().parse_args([
+            "plan", "--farm-domain", "farm.example.com", "--port", "18090",
+        ])
+        self.assertEqual(install._settings_from_args(domain_with_port).http_port, 18090)
+
     def test_network_detection_is_deterministic_and_fails_ambiguous(self):
         self.assertEqual(install.select_coolify_network(["bridge", "coolify"]), "coolify")
         self.assertEqual(install.select_coolify_network(
@@ -120,7 +146,112 @@ class InstallerPureTests(unittest.TestCase):
             network="coolify-prod", secret_dir=Path("/secure/secrets"), release_id="abc123")
         self.assertEqual(values["REDROID_IMAGE"], "redroid@sha256:abc")
         self.assertNotIn("UNSAFE", values)
+        self.assertEqual(values["FARM_HTTP_BIND"], "127.0.0.1")
+        self.assertEqual(values["FARM_HTTP_PORT"], "18080")
+        self.assertEqual(values["FARM_TRAEFIK_ENABLED"], "true")
+        self.assertEqual(values["GRAFANA_ROOT_URL"], "https://metrics.farm.example.com/")
+        self.assertEqual(values["GRAFANA_SERVE_FROM_SUB_PATH"], "false")
         self.assertEqual(install.parse_env(install.render_env(values)), values)
+
+    def test_ip_environment_and_provisioner_origin_do_not_invent_dns(self):
+        paths = install.Paths()
+        values = install.build_env(
+            {"GRAFANA_DOMAIN": "metrics.old.example.com"},
+            farm_domain="10.20.30.40", console_domain="10.20.30.40",
+            network="coolify", secret_dir=Path("/secure/secrets"), release_id="abc123",
+            access_mode="ip", public_ip="10.20.30.40", http_port=18080,
+            auth_file=Path("/private/farm-users.htpasswd"),
+        )
+        self.assertEqual(values["FARM_DOMAIN"], "10.20.30.40")
+        self.assertEqual(values["CONSOLE_DOMAIN"], "10.20.30.40")
+        self.assertEqual(values["GRAFANA_DOMAIN"], "10.20.30.40")
+        self.assertNotIn("metrics.10.20.30.40", values.values())
+        self.assertEqual(values["FARM_HTTP_BIND"], "0.0.0.0")
+        self.assertEqual(values["FARM_HTTP_PORT"], "18080")
+        self.assertEqual(values["FARM_HTTP_AUTH_FILE"],
+                         str(Path("/private/farm-users.htpasswd")))
+        self.assertEqual(values["FARM_TRAEFIK_ENABLED"], "false")
+        self.assertEqual(values["GRAFANA_ROOT_URL"], "http://10.20.30.40:18080/metrics/")
+        self.assertEqual(values["GRAFANA_SERVE_FROM_SUB_PATH"], "true")
+        switched = install.build_env(
+            values, farm_domain="new.example.com", console_domain="console.new.example.com",
+            network="coolify", secret_dir=Path("/secure/secrets"), release_id="next",
+        )
+        self.assertEqual(switched["GRAFANA_DOMAIN"], "metrics.new.example.com")
+        self.assertEqual(switched["GRAFANA_ROOT_URL"], "https://metrics.new.example.com/")
+        custom = install.build_env(
+            {**values, "GRAFANA_DOMAIN": "observe.custom.example"},
+            farm_domain="new.example.com", console_domain="console.new.example.com",
+            network="coolify", secret_dir=Path("/secure/secrets"), release_id="next",
+        )
+        self.assertEqual(custom["GRAFANA_DOMAIN"], "observe.custom.example")
+        self.assertEqual(custom["GRAFANA_ROOT_URL"], "https://observe.custom.example/")
+        config = install.build_provisioner_config(
+            {}, release_dir=Path("/opt/android-farm/releases/" + "a" * 16),
+            project="android-farm-runtime", farm_domain="10.20.30.40", paths=paths,
+            access_mode="ip", public_ip="10.20.30.40", http_port=18080,
+        )
+        self.assertEqual(config["access_mode"], "ip")
+        self.assertEqual(config["console_url"], "http://10.20.30.40:18080")
+
+    def test_busy_http_port_allows_only_attested_running_gateway(self):
+        gateway = [{
+            "Name": "/android-farm-gateway",
+            "State": {"Running": True},
+            "Config": {"Labels": {"farm.stack": "core", "farm.role": "gateway"}},
+            "NetworkSettings": {"Ports": {"8080/tcp": [
+                {"HostIp": "0.0.0.0", "HostPort": "18080"}
+            ]}},
+        }]
+        docker_ps = Mock(returncode=0, stdout="gateway-id\n")
+        with patch("installer.install._json_command", return_value=gateway), \
+                patch("installer.install._command", return_value=docker_ps):
+            self.assertTrue(install.http_port_available(18080, "127.0.0.1"))
+            self.assertTrue(install.http_port_available(18080, "0.0.0.0"))
+        listener = Mock()
+        listener.bind.side_effect = OSError("in use")
+        with patch("installer.install._json_command", return_value=None), \
+                patch("installer.install._command", return_value=Mock(returncode=0, stdout="")), \
+                patch("installer.install.socket.socket", return_value=listener):
+            self.assertFalse(install.http_port_available(18080, "127.0.0.1"))
+            listener.close.assert_called_once()
+
+    def test_domain_port_ignores_other_nic_but_ip_widening_rejects_it(self):
+        gateway = [{
+            "Name": "/android-farm-gateway", "State": {"Running": True},
+            "Config": {"Labels": {"farm.stack": "core", "farm.role": "gateway"}},
+            "NetworkSettings": {"Ports": {"8080/tcp": [
+                {"HostIp": "127.0.0.1", "HostPort": "18080"}
+            ]}},
+        }]
+        other = [{
+            "Name": "/other", "State": {"Running": True}, "Config": {"Labels": {}},
+            "NetworkSettings": {"Ports": {"8080/tcp": [
+                {"HostIp": "10.20.30.40", "HostPort": "18080"}
+            ]}},
+        }]
+
+        def json_command(argv):
+            return gateway if argv == ["docker", "inspect", "android-farm-gateway"] else other
+
+        docker_ps = Mock(returncode=0, stdout="other-id\n")
+        with patch("installer.install._json_command", side_effect=json_command), \
+                patch("installer.install._command", return_value=docker_ps):
+            self.assertTrue(install.http_port_available(18080, "127.0.0.1"))
+            self.assertFalse(install.http_port_available(18080, "0.0.0.0"))
+
+        def host_listener_command(argv, **_kwargs):
+            if argv[:2] == ["docker", "ps"]:
+                return Mock(returncode=0, stdout="gateway-id\n")
+            return Mock(returncode=0, stdout=(
+                "LISTEN 0 4096 127.0.0.1:18080 0.0.0.0:*\n"
+                "LISTEN 0 4096 10.20.30.40:18080 0.0.0.0:*\n"
+            ))
+
+        with patch("installer.install._json_command", return_value=gateway), \
+                patch("installer.install._command", side_effect=host_listener_command):
+            self.assertTrue(install.http_port_available(18080, "127.0.0.1"))
+            self.assertFalse(install.http_port_available(18080, "0.0.0.0"))
 
 
 class InstallerFilesystemTests(unittest.TestCase):
@@ -146,10 +277,17 @@ class InstallerFilesystemTests(unittest.TestCase):
         return source
 
     def settings(self, root: Path, source: Path) -> install.Settings:
+        dynamic = root / "dynamic"
+        dynamic.mkdir(exist_ok=True)
+        users = dynamic / "farm-users.htpasswd"
+        if not users.exists():
+            users.write_text("operator:$2y$05$fixture\n", encoding="utf-8")
+            users.chmod(0o600)
         paths = install.Paths(
             release_root=root / "releases", config_dir=root / "etc",
             state_dir=root / "state", backup_dir=root / "backups",
-            data_root=root / "data", wrapper=root / "bin" / "device-provisioner")
+            data_root=root / "data", wrapper=root / "bin" / "device-provisioner",
+            traefik_dynamic_dir=dynamic)
         return install.Settings(source, "farm.example.com", "console.example.com",
                                 "coolify", "project", paths, True)
 
@@ -174,12 +312,13 @@ class InstallerFilesystemTests(unittest.TestCase):
             source = self.make_source(root)
             traefik = source / 'traefik'
             (traefik / 'farm-auth.yml').write_text('http: {}\n', encoding='utf-8')
+            base = self.settings(root, source)
             dynamic = root / 'dynamic'
-            dynamic.mkdir()
+            dynamic.mkdir(exist_ok=True)
+            (dynamic / 'farm-users.htpasswd').unlink(missing_ok=True)
             password = root / 'password'
             password.write_text('strong secret\n', encoding='utf-8')
             password.chmod(0o600)
-            base = self.settings(root, source)
             settings = replace(base, paths=replace(base.paths, traefik_dynamic_dir=dynamic),
                                auth_user='operator', auth_password_file=password)
             completed = Mock(returncode=0, stdout='operator:$2y$05$example\n')
@@ -191,6 +330,44 @@ class InstallerFilesystemTests(unittest.TestCase):
             self.assertEqual((dynamic / 'farm-users.htpasswd').read_text(), completed.stdout)
             self.assertEqual(Path(result['users_file']).resolve(),
                              (dynamic / 'farm-users.htpasswd').resolve())
+            original = (dynamic / 'farm-users.htpasswd').read_bytes()
+            original_revision = result['revision']
+
+            verified = Mock(returncode=0, stdout='', stderr='')
+            with patch('installer.install._command', return_value=verified) as command:
+                same = install.configure_traefik_auth(settings)
+            self.assertEqual(command.call_count, 1)
+            self.assertEqual(command.call_args.args[0],
+                             ['htpasswd', '-vi',
+                              str((dynamic / 'farm-users.htpasswd').resolve()), 'operator'])
+            self.assertNotIn('strong secret', repr(command.call_args.args))
+            self.assertEqual((dynamic / 'farm-users.htpasswd').read_bytes(), original)
+            self.assertEqual(same['revision'], original_revision)
+
+            password.write_text('rotated secret\n', encoding='utf-8')
+            password.chmod(0o600)
+            mismatch = Mock(returncode=3, stdout='', stderr='')
+            replacement = Mock(returncode=0, stdout='operator:$2y$05$replacement\n')
+            with patch('installer.install._command', side_effect=[mismatch, replacement]) as command:
+                rotated = install.configure_traefik_auth(settings)
+            self.assertEqual(command.call_count, 2)
+            self.assertTrue(all('rotated secret' not in repr(item.args)
+                                for item in command.call_args_list))
+            self.assertNotEqual((dynamic / 'farm-users.htpasswd').read_bytes(), original)
+            self.assertNotEqual(rotated['revision'], original_revision)
+
+            previous_env = install.build_env(
+                {}, farm_domain='farm.example.com', console_domain='console.example.com',
+                network='coolify', secret_dir=root / 'secrets', release_id='old',
+                auth_revision=original_revision,
+            )
+            rotated_env = install.build_env(
+                previous_env, farm_domain='farm.example.com', console_domain='console.example.com',
+                network='coolify', secret_dir=root / 'secrets', release_id='old',
+                auth_revision=rotated['revision'],
+            )
+            self.assertNotEqual(previous_env['FARM_HTTP_AUTH_REVISION'],
+                                rotated_env['FARM_HTTP_AUTH_REVISION'])
 
     def test_release_renders_catalog_from_selected_source(self):
         with tempfile.TemporaryDirectory() as folder:
@@ -255,6 +432,39 @@ class InstallerFilesystemTests(unittest.TestCase):
             wrapper = settings.paths.wrapper.read_text()
             self.assertIn(first["release_dir"], wrapper)
             self.assertNotIn("/current/", wrapper)
+
+    def test_ip_install_persists_mode_port_and_browser_origin(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            source = self.make_source(root)
+            settings = replace(
+                self.settings(root, source), farm_domain="10.20.30.40",
+                console_domain="10.20.30.40", access_mode="ip",
+                public_ip="10.20.30.40", http_port=18080,
+            )
+            result = install.install_managed_files(settings, {
+                "coolify_network": "coolify", "compose_project": "coolify-project",
+                "anchor_present": True, "anchor_release": None,
+            })
+            self.assertTrue(result["configured"])
+            state = json.loads((settings.paths.state_dir / "install-state.json").read_text())
+            self.assertEqual(state["access_mode"], "ip")
+            self.assertEqual(state["public_ip"], "10.20.30.40")
+            self.assertEqual(state["http_port"], 18080)
+            config = json.loads((settings.paths.config_dir / "provisioner.json").read_text())
+            self.assertEqual(config["access_mode"], "ip")
+            self.assertEqual(config["console_url"], "http://10.20.30.40:18080")
+            environment = install.parse_env(
+                (settings.paths.config_dir / "compose.env").read_text()
+            )
+            self.assertEqual(environment["FARM_HTTP_BIND"], "0.0.0.0")
+            self.assertEqual(environment["GRAFANA_DOMAIN"], "10.20.30.40")
+            self.assertEqual(
+                environment["FARM_HTTP_AUTH_REVISION"],
+                install.auth_file_revision(
+                    settings.paths.traefik_dynamic_dir / "farm-users.htpasswd"
+                ),
+            )
 
     def test_install_waits_for_anchor_without_creating_live_config(self):
         with tempfile.TemporaryDirectory() as folder:
