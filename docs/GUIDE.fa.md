@@ -8,7 +8,8 @@
 
 | بخش | وضعیت | توضیح دقیق |
 |---|---|---|
-| installer میزبان | پیاده‌سازی و آزمون واحد | `plan/apply/doctor`، release تغییرناپذیر مبتنی بر محتوا، نصب Docker و ابزارهای لازم، Binder، تنظیم Basic Auth و handoff دو مرحله‌ای Coolify |
+| نصب هدایت‌شده | پیاده‌سازی و آزمون واحد با API شبیه‌سازی‌شده | `install.sh`، دریافت دامنه/توکن، ساخت و deploy برنامه در Coolify، ادامه پس از قطع، فعال‌سازی خودکار Worker و health؛ پذیرش API روی Coolify واقعی لازم است |
+| installer میزبان | پیاده‌سازی و آزمون واحد | `plan/apply/doctor`، release تغییرناپذیر مبتنی بر محتوا، نصب Docker و ابزارهای لازم، Binder و تنظیم Basic Auth؛ دو مرحله را راه‌انداز ساده هماهنگ می‌کند |
 | کاتالوگ و ظرفیت | پیاده‌سازی و آزمون واحد | ظرفیت فعال بر اساس منابع زنده و ظرفیت کاتالوگ بر اساس دیسک؛ کاتالوگ نصب‌شده خودکار کوچک نمی‌شود |
 | lifecycle دستگاه | پیاده‌سازی و آزمون واحد | start/stop/check/check-ip/status/hold/release/backup با حفظ `/data` و کنترل topology Compose |
 | شبکه و پراکسی | پیاده‌سازی و آزمون واحد | یک upstream اختصاصی HTTP CONNECT یا SOCKS5 برای هر دستگاه، gateway مبتنی بر sing-box، namespace مشترک Android و proxy و guard مستقل میزبان |
@@ -110,7 +111,52 @@ sudo device-provisioner status --json
 
 installer در صورت نیاز Docker CE، Compose plugin و ابزارهای `iptables`، `htpasswd`، `apksigner`، `aapt`، `rsync` و `restic` را نصب می‌کند، `binder_linux` را load و persistent می‌کند و Compose نسخهٔ 2.33.1 یا بالاتر را الزام می‌کند. نصب/پارتیشن‌بندی خود Ubuntu و نصب خود Coolify خارج از installer است.
 
-## ۵. نصب دو مرحله‌ای با یک Compose در Coolify
+## ۵. نصب ساده و هدایت‌شده
+
+مسیر پیشنهادی اجرای راه‌انداز روی **همان میزبان Docker/Coolify** است. خود Ubuntu و Coolify باید از قبل نصب باشند؛ هیچ رمز SSH یا API را در گفتگو ارسال نکنید.
+
+ابتدا سه نام DNS را به IP سرور وصل کنید: دامنهٔ فارم، `console.` و `metrics.` زیر آن. برای مثال `farm.example.com`، `console.farm.example.com` و `metrics.farm.example.com`. رکورد wildcard زیر دامنهٔ فارم نیز برای دو نام آخر کافی است.
+
+در Coolify دسترسی API را فعال کنید و از **Keys & Tokens → API tokens** یک توکن تیم مربوط با مجوز خواندن، نوشتن و Deploy بسازید. سپس روی ترمینال سرور:
+
+```bash
+curl -fsSL https://raw.githubusercontent.com/mjpouladi/AndroidFarm/main/install.sh -o install-android-farm.sh
+sudo bash install-android-farm.sh
+```
+
+راه‌انداز دامنهٔ فارم، آدرس پنل و توکن را می‌پرسد. اگر Coolify روی همین سرور است، آدرس پیش‌فرض `http://127.0.0.1:8000` را با Enter بپذیرید. برای آدرس راه‌دور HTTPS لازم است. توکن در terminal پنهان است، در argv، state یا ENV نوشته نمی‌شود و فقط برای همان اجرای راه‌انداز در حافظه می‌ماند. در محیط چندسروری/NAT ممکن است UUID سرور همین میزبان نیز پرسیده شود؛ این مقدار در صفحهٔ Servers در Coolify قابل مشاهده است.
+
+این مراحل خودکار انجام می‌شوند:
+
+1. دریافت source رسمی؛ حفظ تغییرات محلی و توقف در صورت تعارض؛
+2. تشخیص منابع، Binder، شبکه و آماده‌سازی release خصوصی؛
+3. ساخت یا بازیابی Project `android-farm` و Application `farm-core`؛
+4. تنظیم Compose و ENV و pin کردن Deploy به commit دقیق source؛
+5. انتظار برای Deploy و تطبیق release روی همین میزبان؛
+6. فعال‌سازی CLI، Redis محلی، Worker و timer سلامت با role موجود Ansible؛
+7. بررسی نهایی میزبان و پاسخ 401 وب بدون credential.
+
+خروجی پایان، لینک‌ها و نام کاربری `operator` را نشان می‌دهد. رمز وب در terminal تعاملی یک‌بار نشان داده می‌شود و فایل خصوصی آن `/etc/android-farm/web-login-password` است. رمز اولیهٔ داخلی Grafana در `/etc/android-farm/monitoring/grafana-admin-password` است؛ Grafana علاوه بر Basic Auth، login خودش را دارد. هیچ دستگاهی خودکار روشن نمی‌شود و کنسول وب همچنان دموی UX است؛ عملیات از CLI انجام می‌شود.
+
+اگر نصب یا اتصال SSH قطع شد، همان فرمان را تکرار کنید:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh
+```
+
+تنظیمات عمومی نصب و UUIDها در `/var/lib/android-farm/quickstart.json` با mode `0600` نگهداری می‌شوند. برنامهٔ ساخته‌شده با marker مخصوص همان نصب شناخته می‌شود؛ اجرای دوباره پروژه/برنامهٔ تکراری نمی‌سازد. Deploy ناقص با UUID خودش دنبال می‌شود. source جدید باعث Deploy commit جدید می‌شود؛ برای ارتقا ابتدا دستگاه‌های فعال را خاموش کنید. تا وقتی DNS/TLS، احراز هویت یا doctor ناموفق است، راه‌انداز وضعیت «آماده» گزارش نمی‌کند.
+
+اگر برنامه را قبلاً از راهنمای دستی ساخته‌اید، UUID همان Application را صریح بدهید؛ فقط برنامهٔ همین مخزن با مسیر Compose، branch، project، environment و سرور مطابق قابل انتقال به مدیریت راه‌انداز است:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --app-uuid YOUR_EXISTING_APPLICATION_UUID
+```
+
+اگر روی میزبان Redis متعلق به سرویس دیگری وجود داشته باشد، مسیر ساده آن را تغییر نمی‌دهد و متوقف می‌شود؛ در این حالت Redis مجزا/خارجی را با مسیر Ansible بخش ۱۴ تنظیم کنید. اجرای واقعی API، Docker و systemd روی سرور مقصد باید تأیید شود؛ تست‌های محلی جای این پذیرش را نمی‌گیرند.
+
+### مسیر دستی برای نصب‌های سفارشی
+
+جزئیات زیر فقط برای اپراتوری است که API Coolify در اختیار ندارد یا می‌خواهد مراحل را جداگانه کنترل کند. در مسیر ساده نیازی به اجرای دوبارهٔ آن‌ها نیست.
 
 ### ۵.۱. دریافت source بازبینی‌شده
 
@@ -724,6 +770,7 @@ ss -ltnp | grep ':5551'
 | نشانه | بررسی |
 |---|---|
 | `doctor: blocked` | remediation همان check را اجرا کنید؛ معمولاً Binder، release mismatch، auth file یا local Docker context است |
+| راه‌انداز: نتیجهٔ Deploy نامعلوم | راه‌انداز ابتدا تاریخچهٔ API را بررسی می‌کند. فقط اگر در Coolify مطمئن شدید هیچ Deploy ساخته نشده، همان فرمان را با `--retry-deploy` تکرار کنید؛ درخواست نامعلوم خودکار تکرار نمی‌شود |
 | apply در `waiting_for_coolify` | `coolify.env` را در همان یک App وارد، همان release را deploy و apply یکسان را دوباره اجرا کنید |
 | start با capacity رد می‌شود | `resources --json`، RAM آزاد، load، disk و inode؛ limitها را دور نزنید |
 | proxy test mismatch | expected IP، endpoint pin‌شده، sticky session و credential فروشنده؛ device را روشن نکنید |
@@ -740,6 +787,9 @@ ss -ltnp | grep ':5551'
 | `docker-compose.yml` | تنها Compose واردشده در Coolify؛ هسته و monitoring |
 | `docker-compose.farm.yml` | کاتالوگ runtime تولیدشده برای agent میزبان |
 | `installer/install.py` | plan/apply/doctor و release دو مرحله‌ای |
+| `install.sh` و `installer/quickstart.py` | شروع نصب هدایت‌شده و ادامه پس از قطع |
+| `installer/coolify_api.py` | API محدود Coolify با تشخیص مالکیت و commit ثابت |
+| `installer/control_plane.py` | اعمال خودکار role میزبان با secret خصوصی |
 | `provisioner.py` | CLI واحد operator |
 | `generate_farm.py` | تولید کاتالوگ پویا |
 | `ops/farmctl.py` | lifecycle، guard، health و backup |
