@@ -734,18 +734,63 @@ class OperationsTests(unittest.TestCase):
             def __exit__(self, *_):
                 return False
 
-        with patch('urllib.request.urlopen', return_value=Response(b'8.8.8.8\n')) as opened, \
+        with patch('urllib.request.OpenerDirector.open', return_value=Response(b'8.8.8.8\n')) as opened, \
                 patch('ops.farmctl.run') as sidecar:
             self.assertEqual(farmctl.namespace_egress_ip('num01', True), '8.8.8.8')
             sidecar.assert_not_called()
         self.assertEqual(opened.call_args.args[0], 'https://api.ipify.org')
-        with patch('ops.farmctl.run', return_value='8.8.4.4\n') as sidecar, patch('urllib.request.urlopen') as opened:
+        with patch('ops.farmctl.run', return_value='8.8.4.4\n') as sidecar, patch('urllib.request.OpenerDirector.open') as opened:
             self.assertEqual(farmctl.namespace_egress_ip('num01', False), '8.8.4.4')
             opened.assert_not_called()
         self.assertEqual(sidecar.call_args.args[:3], ('docker', 'exec', 'proxy-num01'))
-        with patch('urllib.request.urlopen', side_effect=OSError('unreachable')), \
+        with patch('urllib.request.OpenerDirector.open', side_effect=OSError('unreachable')), \
                 self.assertRaisesRegex(RuntimeError, 'host egress probe failed'):
             farmctl.host_egress_ip()
+
+    def test_host_egress_probe_bypasses_inherited_proxy_settings(self):
+        import io
+        import os
+        import urllib.request
+        from ops import farmctl
+
+        environment = {'HTTPS_PROXY': 'http://fixture-proxy.invalid:8080',
+                       'http_proxy': 'http://fixture-proxy.invalid:8080',
+                       'ALL_PROXY': 'socks5://fixture-proxy.invalid:1080'}
+        with patch.dict(os.environ, environment, clear=True), \
+                patch('urllib.request.getproxies', side_effect=AssertionError('must not read proxy settings')), \
+                patch('urllib.request.build_opener', wraps=urllib.request.build_opener) as build, \
+                patch('urllib.request.OpenerDirector.open', return_value=io.BytesIO(b'8.8.8.8\n')) as opened:
+            self.assertEqual(farmctl.host_egress_ip(timeout=7), '8.8.8.8')
+        proxy_handler = next(handler for handler in build.call_args.args
+                             if isinstance(handler, urllib.request.ProxyHandler))
+        self.assertEqual(proxy_handler.proxies, {})
+        opened.assert_called_once_with('https://api.ipify.org', timeout=7)
+
+    def test_host_egress_probe_refuses_redirects_without_following_them(self):
+        import urllib.request
+        from ops import farmctl
+
+        def redirect(opener, url, **_kwargs):
+            self.assertEqual(url, 'https://api.ipify.org')
+            handler = next(handler for handler in opener.handlers
+                           if isinstance(handler, urllib.request.HTTPRedirectHandler))
+            return handler.redirect_request(None, None, 302, 'fixture redirect', {},
+                                            'https://unrelated.example.test')
+
+        with patch('urllib.request.OpenerDirector.open', autospec=True, side_effect=redirect) as opened:
+            with self.assertRaisesRegex(RuntimeError, 'host egress probe redirected'):
+                farmctl.host_egress_ip()
+        opened.assert_called_once()
+
+    def test_host_egress_probe_still_requires_public_ipv4(self):
+        import io
+        from ops import farmctl
+
+        for payload in (b'192.168.1.2', b'2001:4860:4860::8888', b'', b'not an IP address'):
+            with self.subTest(payload=payload), \
+                    patch('urllib.request.OpenerDirector.open', return_value=io.BytesIO(payload)), \
+                    self.assertRaisesRegex(RuntimeError, 'public IPv4'):
+                farmctl.host_egress_ip()
 
     def test_sidecar_healthcheck_accepts_a_booted_direct_namespace(self):
         script = (Path(__file__).resolve().parents[1] / 'images' / 'proxy' / 'healthcheck.sh').read_text()

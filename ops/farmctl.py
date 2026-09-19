@@ -265,8 +265,16 @@ def _global_ipv4(text):
 def host_egress_ip(timeout=15):
     """The host's own public IPv4: the reference for direct host egress."""
     import urllib.request
+
+    class NoRedirect(urllib.request.HTTPRedirectHandler):
+        def redirect_request(self, req, fp, code, msg, headers, newurl):
+            raise RuntimeError('host egress probe redirected; expected a direct IPv4 response')
+
+    # Match the namespace probe's --noproxy '*': inherited proxy variables
+    # must not turn the reference address into an unrelated proxy's address.
+    opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect())
     try:
-        with urllib.request.urlopen('https://api.ipify.org', timeout=timeout) as response:
+        with opener.open('https://api.ipify.org', timeout=timeout) as response:
             return _global_ipv4(response.read(64).decode('ascii', 'replace'))
     except OSError as exc:
         raise RuntimeError(f'host egress probe failed: {exc}') from None
