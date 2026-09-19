@@ -144,7 +144,8 @@ def command_for(task: Task, config: WorkerConfig) -> list[str]:
     if task.action == "status":
         return [*base, "status", "--json"]
     if task.action == "health":
-        return [sys.executable, str(HEALTHCHECK), "--config", str(config.provisioner_config),
+        # Module mode keeps the package-relative imports of ops/ working.
+        return [sys.executable, "-m", "ops.healthcheck", "--config", str(config.provisioner_config),
                 "--device", task.device]
     return [*base, task.action, "--id", task.device]
 

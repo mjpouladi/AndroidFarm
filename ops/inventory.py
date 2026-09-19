@@ -1,11 +1,11 @@
 """Versioned, monotonic device inventory."""
 from pathlib import Path
 
-from .device_ids import DEVICE_LIMIT, device_id, device_index
-
 try:
+    from .device_ids import DEVICE_LIMIT, device_id, device_index
     from .secureio import atomic_json, read_private_json
-except ImportError:
+except ImportError:  # direct host execution
+    from device_ids import DEVICE_LIMIT, device_id, device_index
     from secureio import atomic_json, read_private_json
 
 SCHEMA_VERSION = 2

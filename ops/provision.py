@@ -31,6 +31,22 @@ FAILURE_STAGES = ('guarded start', 'egress verification', 'application installat
 MAX_REASON = 200
 
 
+def farmctl_argv(action, device, *extra):
+    """Run farmctl as a module of the ``ops`` package, never as a loose script.
+
+    Script mode (``python ops/farmctl.py``) breaks the package-relative
+    imports of the modules farmctl pulls in, so the guarded start failed with
+    an ImportError before it touched Docker; provisioning then recorded every
+    device as failed.
+    """
+    return [sys.executable, '-m', 'ops.farmctl', action, device, *map(str, extra)]
+
+
+def run_farmctl(action, device, *extra, timeout=3300):
+    return subprocess.run(farmctl_argv(action, device, *extra), check=True, text=True,
+                          cwd=str(ROOT), timeout=timeout)
+
+
 def failure_reason(stage, exc):
     """Short, secret-free description of why preparation stopped at ``stage``.
 
@@ -267,7 +283,7 @@ def main():
         inventory.save(registry, inventory_state)
         stage = FAILURE_STAGES[0]
         try:
-            farmctl.run(sys.executable, str(ROOT / 'ops/farmctl.py'), 'start', device,
+            run_farmctl('start', device,
                         '--compose', str(args.compose.resolve()), '--project', args.project,
                         '--access-mode', args.access_mode,
                         '--secret-dir', str(args.secret_dir),
@@ -301,8 +317,7 @@ def main():
         except BaseException as exc:
             reason = failure_reason(stage, exc)
             with contextlib.suppress(Exception):
-                farmctl.run(sys.executable, str(ROOT / 'ops/farmctl.py'), 'stop', device,
-                            '--access-mode', args.access_mode)
+                run_farmctl('stop', device, '--access-mode', args.access_mode, timeout=600)
             # The stage and reason stay on the record so the console can show why the
             # device is incomplete; the identical request resumes from this checkpoint.
             record.update(phase='failed', last_error=reason, failed_at=int(time.time()))

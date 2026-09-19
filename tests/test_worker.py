@@ -38,6 +38,10 @@ class WorkerContractTests(unittest.TestCase):
         self.assertEqual(status[-2:], ["status", "--json"])
         restart = command_for(Task.create("restart", "num09", "restart:num09:1"), self.config())
         self.assertEqual(restart[-3:], ["restart", "--id", "num09"])
+        # ops modules import each other package-relative: they run as modules, never as scripts.
+        health = command_for(Task.create("health", "num09", "health:num09:2"), self.config())
+        self.assertEqual(health[1:3], ["-m", "ops.healthcheck"])
+        self.assertEqual(health[-2:], ["--device", "num09"])
 
     def test_logs_redact_credentials_and_secret_values(self):
         value = redact("redis://farm:very-secret@127.0.0.1 password=hunter2 token:abc")

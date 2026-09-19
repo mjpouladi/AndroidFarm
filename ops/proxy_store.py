@@ -15,8 +15,12 @@ import re
 import subprocess
 import time
 
-from .secureio import atomic_json, read_private_json, require_private_directory
-from .device_ids import canonical_device
+try:
+    from .secureio import atomic_json, read_private_json, require_private_directory
+    from .device_ids import canonical_device
+except ImportError:  # direct host execution
+    from secureio import atomic_json, read_private_json, require_private_directory
+    from device_ids import canonical_device
 
 
 SCHEMA_VERSION = 1

@@ -630,6 +630,25 @@ class OperationsTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             failure_reason('unknown', RuntimeError('x'))
 
+    def test_ops_entrypoints_import_as_modules_and_as_scripts(self):
+        # Provisioning once launched ops/farmctl.py as a script; its package-relative
+        # imports failed and every guarded start died before touching Docker.
+        root = Path(__file__).resolve().parents[1]
+        for name in ('farmctl', 'provision', 'healthcheck', 'account_policy'):
+            for argv in ([sys.executable, '-m', f'ops.{name}', '--help'],
+                         [sys.executable, str(root / 'ops' / f'{name}.py'), '--help']):
+                with self.subTest(argv=argv[1:3]):
+                    result = subprocess.run(argv, cwd=root, text=True, capture_output=True, timeout=60)
+                    self.assertEqual(result.returncode, 0, result.stderr[-600:])
+                    self.assertNotIn('ImportError', result.stderr)
+
+    def test_provisioning_runs_farmctl_as_a_package_module(self):
+        from ops.provision import farmctl_argv
+        argv = farmctl_argv('start', 'num03', '--compose', Path('/x/compose.yml'))
+        self.assertEqual(argv, [sys.executable, '-m', 'ops.farmctl', 'start', 'num03', '--compose', '/x/compose.yml'])
+        source = (Path(__file__).resolve().parents[1] / 'ops' / 'provision.py').read_text()
+        self.assertNotIn("'ops/farmctl.py'", source)
+
 
 if __name__ == '__main__':
     unittest.main()

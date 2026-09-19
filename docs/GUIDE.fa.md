@@ -1379,6 +1379,7 @@ ss -ltnp | grep ':5551'
 | start با capacity رد می‌شود | `resources --json`، RAM آزاد، load، disk و inode؛ limitها را دور نزنید |
 | `the device preparation is incomplete; resume it through provisioning … or remove the device` | مرحلهٔ دستگاه در `status` ناتمام است (مثلاً `failed`)؛ در کنسول «ادامهٔ آماده‌سازی» را با همان شماره/پراکسی/برنامه بزنید یا با «حذف دستگاه از فارم» / `remove --id numXX` حذف کنید؛ بخش ۱۰ |
 | `resume or quarantine the incomplete device before adding another` | تا تکمیل یا حذف دستگاه ناتمام، دستگاه جدید ساخته نمی‌شود؛ همان دو راه بالا |
+| job log: `ImportError: attempted relative import with no known parent package` در `ops/farmctl.py` | نقص نسخه‌های قبلی: آماده‌سازی، farmctl را به‌صورت اسکریپت اجرا می‌کرد و هر start محافظت‌شده پیش از رسیدن به Docker می‌مرد؛ با ارتقا رفع شده است. پس از ارتقا همان درخواست را با «ادامهٔ آماده‌سازی» تکرار کنید |
 | `host operation failed; the host log … has the details` | خروجی کامل در `/var/lib/android-farm/job-logs/` است؛ `diagnose --id numXX` را اجرا کنید؛ بخش ۱۰ |
 | `a host step timed out (image pull, build or boot)` | دانلود image، build یا boot اول طولانی بوده؛ `sudo docker pull redroid/redroid:12.0.0-latest` و سپس «ادامهٔ آماده‌سازی»؛ load میزبان را هم ببینید |
 | `device preparation stopped; the device details name the stage and reason` | `last_error` در جزئیات دستگاه کنسول یا `status`/`diagnose` مرحله و علت را می‌گوید؛ پس از رفع علت همان درخواست را ادامه دهید |
