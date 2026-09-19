@@ -934,6 +934,10 @@ sudo tail -n 30 /var/lib/android-farm/events.jsonl
 
 ترتیب خواندن: ۱) `phase` و `last_error` رکورد (مرحله‌ای که آماده‌سازی در آن متوقف شده: guarded start، egress verification یا application installation و علت کوتاه آن)؛ ۲) وضعیت کانتینرها (`exit_code`، `oom_killed`، `health`) و ۴۰ خط آخر لاگ هرکدام؛ ۳) پیش‌نیازهای میزبان (`binderfs`، حضور image ردرويد، RAM آزاد و load)؛ ۴) فایل لاگ آخرین عملیات که خروجی کامل `device-provisioner` را دارد. پیام کنسول همیشه خلاصهٔ امن همین لاگ است؛ علت دقیق در همین فایل‌ها روی میزبان است.
 
+اگر لاگ `guarded start` در `ops/farmctl.py` و سپس `ops/inventory.py` خطای `ImportError: attempted relative import with no known parent package` نشان می‌دهد، فرایند فرزند `farmctl` پیش از اجرای عملیات Docker متوقف شده است؛ فرایند والد ممکن است قبلاً volume را ساخته باشد. علت در نسخهٔ قبلی، اجرای مستقیم فایل `farmctl.py` از provisioning بود. نسخهٔ اصلاح‌شده هم شروع و هم توقف هنگام خطا را با `-m ops.farmctl` و پوشهٔ کاری همان release اجرا می‌کند تا importهای نسبی بسته درست resolve شوند. این خطا به تغییر Binder، image یا دادهٔ دستگاه نیاز ندارد.
+
+برای نصب اصلاح، مسیر ارتقای بخش ۵ را اجرا کنید. ویرایش دستی فایل‌های زیر `/opt/android-farm/releases/` لازم نیست؛ صرف `git pull` در source نیز نسخهٔ فعال کنترل‌پلین را عوض نمی‌کند. مرحلهٔ `failed` دستگاه را دستی تغییر ندهید: پیام بعدیِ `device is not in a startable managed phase` پیامد آماده‌سازی ناتمام است و خرابی دیگری در import نیست. وجود `binderfs=True` در این گزارش به‌تنهایی بوت کامل Android را اثبات نمی‌کند و نبود کانتینرها در این نقطه با توقف زودهنگام سازگار است.
+
 **نکات اجرایی که در بررسی این خطاها به دست آمد:**
 
 - اولین start هر میزبان image ردرويد (حدود یک گیگابایت) را دانلود می‌کند و اولین boot اندروید ۱۲ بدون GPU سخت‌افزاری معمولاً ۳ تا ۸ دقیقه طول می‌کشد (dex2oat تصویر سیستم). start محافظت‌شده اکنون image غایب را پیش از boot با بودجهٔ ۳۰ دقیقه دانلود می‌کند و برای boot اول ۱۰ دقیقه صبر می‌کند؛ پیش از نخستین دستگاه می‌توانید image را دستی هم دانلود کنید: `sudo docker pull redroid/redroid:12.0.0-latest`.
