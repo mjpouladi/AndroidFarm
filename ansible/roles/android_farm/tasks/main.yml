@@ -135,7 +135,12 @@
       - item.id[3:] | int <= 8192
       - item.id == 'num' ~ ('%02d' | format(item.id[3:] | int))
       - item.android_version is integer
-      - item.android_version in [11, 12]
+      - item.android_version in [11, 12, 13]
+      - item.timezone is not defined or item.timezone is match('^[A-Z][A-Za-z]{1,31}(/[A-Za-z0-9_+-]{1,32}){0,2}$')
+      - item.resources is not defined or (item.resources is mapping and
+          item.resources | dict2items | map(attribute='key') | list | sort == ['cpus', 'memory_gib'] and
+          item.resources.cpus is number and item.resources.cpus | float >= 1 and item.resources.cpus | float <= 4 and
+          item.resources.memory_gib is number and item.resources.memory_gib | float >= 2 and item.resources.memory_gib | float <= 4)
       - item.resolution is mapping
       - item.resolution | dict2items | map(attribute='key') | list | sort == ['height', 'width']
       - item.resolution.width is integer

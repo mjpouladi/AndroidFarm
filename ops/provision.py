@@ -75,8 +75,12 @@ def main():
         raise RuntimeError('valid E.164 phone and owner_authorized=true required')
     proxy_id = request.get('proxy_id')
     proxy_file = request.get('proxy_file')
-    if bool(proxy_id) == bool(proxy_file):
-        raise RuntimeError('request must contain exactly one of proxy_id or legacy proxy_file')
+    egress = request.get('egress', 'proxy')
+    if egress not in ('proxy', 'direct'):
+        raise RuntimeError('egress must be "proxy" or "direct"')
+    direct = egress == 'direct'
+    if bool(proxy_id) + bool(proxy_file) + direct != 1:
+        raise RuntimeError('request must select exactly one of proxy_id, legacy proxy_file or egress "direct"')
     proxy_store = None
     if proxy_id:
         proxy_store = ProxyStore(args.proxy_registry, args.proxy_store_dir)
@@ -85,17 +89,26 @@ def main():
         expected_value = proxy_record['expected_egress_ip']
         if request.get('expected_egress_ip') not in (None, expected_value):
             raise RuntimeError('request egress IP differs from the managed proxy record')
-    else:
+    elif proxy_file:
         secret = read_private_json(proxy_file, 'legacy proxy secret')
         expected_value = request['expected_egress_ip']
-    expected_ip = str(ipaddress.IPv4Address(expected_value))
-    if not ipaddress.ip_address(expected_ip).is_global:
-        raise RuntimeError('expected egress IP must be public')
+    else:
+        # Direct host egress: the sidecar keeps the private namespace, the
+        # loopback ADB port and the host guard, but runs no tunnel. An explicit
+        # expected_egress_ip pins the host address; otherwise every start only
+        # requires the namespace and Android-shell egress to agree.
+        secret = {'type': 'direct'}
+        expected_value = request.get('expected_egress_ip')
+    expected_ip = None
+    if expected_value is not None or not direct:
+        expected_ip = str(ipaddress.IPv4Address(expected_value))
+        if not ipaddress.ip_address(expected_ip).is_global:
+            raise RuntimeError('expected egress IP must be public')
     spec = importlib.util.spec_from_file_location('proxy_config', ROOT / 'images/proxy/configure.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
     module.make_config(secret)
-    if not secret.get('username') or not secret.get('password'):
+    if not direct and (not secret.get('username') or not secret.get('password')):
         raise RuntimeError('a dedicated authenticated sticky proxy session is required')
     apk_path = Path(request['apk_path']).resolve(strict=True)
     if apk_path.stat().st_uid != 0 or apk_path.stat().st_mode & 0o022:
@@ -132,13 +145,18 @@ def main():
         key = key_path.read_bytes()
         digest = lambda value: hmac.new(key, value.encode(), hashlib.sha256).hexdigest()
         inventory_state = inventory.load(registry)
-        proxy_identity = json.dumps([secret['type'], secret['server'], secret['server_port'], secret['username']])
+        # A direct device has no shared upstream session; its egress identity is
+        # the host itself, scoped to this phone so the uniqueness rule still holds.
+        proxy_identity = (json.dumps(['direct', phone]) if direct else
+                          json.dumps([secret['type'], secret['server'], secret['server_port'], secret['username']]))
         # Credential rotation must not orphan a persistent device. Bind the
         # allocation to the approved endpoint/session identity and immutable
         # QA artifact metadata, never to the password or local file paths.
         immutable_request = {'phone': phone, 'expected_egress_ip': expected_ip,
                              'apk_sha256': artifact['sha256'], 'apk_package': artifact['package'],
                              'apk_permissions': permissions, 'apk_activity': activity}
+        if direct:  # Added only here so existing proxy allocations keep their hash.
+            immutable_request['egress'] = 'direct'
         request_hash = digest(json.dumps(immutable_request, sort_keys=True) + proxy_identity)
         record, created = inventory.choose(inventory_state, digest(phone), digest(proxy_identity), request_hash)
         device = record['id']
@@ -148,6 +166,8 @@ def main():
             # the same identity instead of reusing this ID for another request.
             record.update(phone_masked=phone[:3] + '***' + phone[-4:], created_at=int(time.time()),
                           expected_egress_ip=expected_ip)
+            if direct:
+                record['egress'] = 'direct'
             inventory.save(registry, inventory_state)
         elif record.get('expected_egress_ip') != expected_ip:
             raise RuntimeError('approved sticky egress IP differs from the existing allocation')
@@ -237,8 +257,10 @@ def main():
                 raise RuntimeError('identity baseline was not committed by the guarded start')
             observed = farmctl.run('docker', 'exec', f'proxy-{device}', 'curl', '--noproxy', '*',
                                   '-4', '-fsS', '--max-time', '15', 'https://api.ipify.org', capture=True).strip()
-            if observed != expected_ip:
+            if expected_ip is not None and observed != expected_ip:
                 raise RuntimeError('sticky proxy egress differs from approved IP')
+            if direct:
+                observed = farmctl._global_ipv4(observed)
             record['phase'] = 'installing_apk'
             inventory.save(registry, inventory_state)
             app_installer.install(device, artifact, permissions, activity)

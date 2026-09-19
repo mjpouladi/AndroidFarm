@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": {{ 2 if (item.timezone is defined or item.resources is defined) else 1 }},
   "android_version": {{ item.android_version | int }},
   "resolution": {
     "width": {{ item.resolution.width | int }},
@@ -8,5 +8,10 @@
   "dpi": {{ item.dpi | int }},
   "fps": {{ item.fps | int }},
   "device_model": {{ item.device_model | to_json }},
-  "locale": {{ item.locale | to_json }}
+  "locale": {{ item.locale | to_json }}{% if item.timezone is defined %},
+  "timezone": {{ item.timezone | to_json }}{% endif %}{% if item.resources is defined %},
+  "resources": {
+    "cpus": {{ item.resources.cpus | float }},
+    "memory_gib": {{ item.resources.memory_gib | float }}
+  }{% endif %}
 }

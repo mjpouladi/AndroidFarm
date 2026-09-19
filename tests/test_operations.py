@@ -249,6 +249,22 @@ class OperationsTests(unittest.TestCase):
         })
         profiled = apply_profile(config, 'num01', profile)
         validate_compose(profiled, 'num01', Path('/etc/android-farm/secrets'), profile)
+        ceiling = validate_device_profile({
+            'schema_version': 2, 'android_version': 13,
+            'resolution': {'width': 720, 'height': 1280}, 'dpi': 240, 'fps': 20,
+            'device_model': 'Android Farm QA Phone HD', 'locale': 'en-US',
+            'timezone': 'Asia/Tehran', 'resources': {'cpus': 2, 'memory_gib': 3},
+        })
+        limited = apply_profile(config, 'num01', ceiling)
+        validate_compose(limited, 'num01', Path('/etc/android-farm/secrets'), ceiling)
+        # `docker compose config` renders the limit in bytes and cpus as a number.
+        limited['services']['android-num01'].update(mem_limit=str(3 * 1024 ** 3), cpus=2)
+        validate_compose(limited, 'num01', Path('/etc/android-farm/secrets'), ceiling)
+        for drift in ({'cpus': 4}, {'mem_limit': '4g'}, {'cpus': None}):
+            drifted = apply_profile(config, 'num01', ceiling)
+            drifted['services']['android-num01'].update(drift)
+            with self.subTest(drift=drift), self.assertRaisesRegex(RuntimeError, 'resource ceiling'):
+                validate_compose(drifted, 'num01', Path('/etc/android-farm/secrets'), ceiling)
         config['services']['proxy-num01']['ports'][0]['host_ip'] = '0.0.0.0'
         with self.assertRaises(RuntimeError):
             validate_compose(config, 'num01', Path('/etc/android-farm/secrets'))
@@ -261,6 +277,47 @@ class OperationsTests(unittest.TestCase):
         config['services']['proxy-num01']['networks']['side-channel'] = {}
         with self.assertRaises(RuntimeError):
             validate_compose(config, 'num01', Path('/etc/android-farm/secrets'))
+
+    def test_direct_egress_guard_passes_through_when_open_and_drops_when_closed(self):
+        from ops import farmctl
+        payloads = []
+
+        def fake_subprocess(argv, **kwargs):
+            if argv[:2] == ['iptables-restore', '-w']:
+                payloads.append(kwargs['input'])
+            # The chain and the DOCKER-USER jump already exist in this fixture.
+            return subprocess.CompletedProcess(argv, 0, '', '')
+
+        secrets = [{'type': 'direct'}, {'type': 'direct'},
+                   {'type': 'socks', 'server': '8.8.8.8', 'server_port': 1080, 'username': 'u', 'password': 'p'}]
+        with patch('ops.farmctl.read_private_json', side_effect=secrets), patch('ops.farmctl.run'), \
+                patch('ops.farmctl.subprocess.run', side_effect=fake_subprocess):
+            farmctl.guard('num01', Path('/etc/android-farm/secrets'), allow_upstream=True)
+            farmctl.guard('num01', Path('/etc/android-farm/secrets'), allow_upstream=False)
+            farmctl.guard('num01', Path('/etc/android-farm/secrets'), allow_upstream=True)
+        self.assertEqual(payloads[0].splitlines(), ['*filter', '-F AF00001', '-A AF00001 -j RETURN',
+                                                    '-A AF00001 -j DROP', 'COMMIT'])
+        self.assertEqual(payloads[1].splitlines(), ['*filter', '-F AF00001', '-A AF00001 -j DROP', 'COMMIT'])
+        self.assertEqual(payloads[2].splitlines(), ['*filter', '-F AF00001',
+                                                    '-A AF00001 -p tcp -d 8.8.8.8 --dport 1080 -j RETURN',
+                                                    '-A AF00001 -j DROP', 'COMMIT'])
+        with patch('ops.farmctl.read_private_json', return_value={'type': 'direct', 'server': '8.8.8.8'}), \
+                patch('ops.farmctl.run'), patch('ops.farmctl.subprocess.run', side_effect=fake_subprocess), \
+                self.assertRaisesRegex(RuntimeError, 'unexpected upstream'):
+            farmctl.guard('num01', Path('/etc/android-farm/secrets'))
+        self.assertEqual(len(payloads), 3)
+
+    def test_direct_device_validation_requires_the_exact_direct_secret(self):
+        from ops import farmctl
+        record = {'id': 'num01', 'egress': 'direct'}
+        with patch('ops.farmctl.read_private_json', return_value={'type': 'direct'}):
+            farmctl.validate_managed_proxy('num01', record, Path('/etc/android-farm/secrets'))
+        for installed, current in (({'type': 'direct'}, dict(record, proxy_id='qa-proxy')),
+                                   ({'type': 'socks', 'server': '8.8.8.8'}, record)):
+            with self.subTest(installed=installed, record=current), \
+                    patch('ops.farmctl.read_private_json', return_value=installed), \
+                    self.assertRaisesRegex(RuntimeError, 'direct egress'):
+                farmctl.validate_managed_proxy('num01', current, Path('/etc/android-farm/secrets'))
 
     def test_provisioner_propagates_ip_access_mode_to_guarded_lifecycle(self):
         config = Config(Path('compose'), Path('env'), 'project', Path('secrets'),

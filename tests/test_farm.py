@@ -87,6 +87,25 @@ class FarmTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 module.make_config(dict(secret, server=invalid))
 
+    def test_direct_egress_is_an_explicit_secret_not_a_fallback(self):
+        # Only the exact {"type": "direct"} secret selects the tunnel-free mode.
+        self.assertIsNone(module.make_config({'type': 'direct'}))
+        for smuggled in ({'type': 'direct', 'server': '8.8.8.8'},
+                         {'type': 'direct', 'username': 'u', 'password': 'p'}):
+            with self.subTest(secret=smuggled), self.assertRaises(ValueError):
+                module.make_config(smuggled)
+        entrypoint = Path('images/proxy/entrypoint.sh').read_text(encoding='utf-8')
+        # The closed policy is installed first, a stale marker is removed before
+        # the secret is parsed, and direct mode is entered only through it.
+        self.assertLess(entrypoint.index('iptables -P OUTPUT DROP'), entrypoint.index('python3 /configure.py'))
+        self.assertLess(entrypoint.index('rm -f /run/direct'), entrypoint.index('python3 /configure.py'))
+        self.assertIn('if [ -f /run/direct ]; then', entrypoint)
+        direct_block = entrypoint.split('if [ -f /run/direct ]; then', 1)[1].split('fi', 1)[0]
+        self.assertIn('--dport 5555 -j ACCEPT', direct_block)
+        self.assertNotIn('sing-box', direct_block)
+        self.assertNotIn('REDIRECT', direct_block)
+        self.assertIn('exec ', direct_block)
+
 
 if __name__ == '__main__':
     unittest.main()

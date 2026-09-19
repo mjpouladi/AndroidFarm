@@ -30,7 +30,7 @@ except ImportError:  # Unit tests can exercise the pure contract without redis-p
 
 
 SCHEMA_VERSION = 1
-ALLOWED_ACTIONS = frozenset({"up", "down", "check", "status", "health"})
+ALLOWED_ACTIONS = frozenset({"up", "down", "restart", "check", "status", "health"})
 DEVICE_RE = re.compile(r"num[0-9]{2,6}\Z")
 SAFE_KEY_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9_.:-]{0,127}\Z")
 PREFIX = "android-farm:tasks"

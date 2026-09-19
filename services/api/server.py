@@ -20,15 +20,32 @@ import stat
 import subprocess
 import threading
 import time
-from urllib.parse import urlsplit
+from urllib.parse import unquote, urlsplit
 
 from ops.secureio import read_private_json
 from .jobs import JobQueue, QueueConflict
 from .authstate import auth_revision
 
 MAX_BODY = 32768
+# Raw APK uploads; the console and gateway Nginx enforce the same ceiling.
+MAX_UPLOAD = 256 * 1024 ** 2
+UPLOAD_ROUTE = '/api/v1/artifacts/upload'
+UPLOAD_TYPES = frozenset({'application/vnd.android.package-archive', 'application/octet-stream'})
 USER_RE = re.compile(r'[A-Za-z0-9._][A-Za-z0-9._-]{0,63}\Z')
 JOB_ROUTE = re.compile(r'/api/v1/jobs/([0-9a-f-]{36})/cancel\Z')
+
+
+def _header_text(value, maximum):
+    """Decode a percent-encoded ASCII header into bounded text, or None."""
+    if not isinstance(value, str) or not value:
+        return None
+    try:
+        decoded = unquote(value, errors='strict')
+    except (UnicodeDecodeError, ValueError):
+        return None
+    if not decoded.strip() or len(decoded) > maximum or any(ord(c) < 32 or ord(c) == 127 for c in decoded):
+        return None
+    return decoded.strip()
 
 
 class BasicAuth:
@@ -105,6 +122,45 @@ class Application:
             ('Cache-Control', 'no-store'), ('X-Content-Type-Options', 'nosniff'), *headers])
         return [body]
 
+    def upload(self, env, user, content_type, send, error):
+        """Stage a raw APK body privately and queue its verified import.
+
+        The body is streamed to a root-private staging file; ``aapt`` and
+        ``apksigner`` run later inside the durable queue, never on the request
+        thread, and the browser only ever references its own staging token.
+        """
+        if content_type not in UPLOAD_TYPES:
+            return error(415, 'apk_required', 'فایل باید یک بستهٔ APK باشد.')
+        length = env.get('CONTENT_LENGTH', '')
+        if not re.fullmatch(r'[0-9]{1,10}', length):
+            return error(400, 'invalid_length', 'اندازهٔ فایل معتبر نیست.')
+        if int(length) > MAX_UPLOAD:
+            return error(413, 'body_too_large', 'حجم APK بیش از سقف مجاز ۲۵۶ مگابایت است.')
+        params = {}
+        label = _header_text(env.get('HTTP_X_FARM_ARTIFACT_LABEL'), 80)
+        filename = _header_text(env.get('HTTP_X_FARM_ARTIFACT_FILENAME'), 160)
+        identifier = env.get('HTTP_X_FARM_ARTIFACT_ID', '')
+        permissions = [item for item in env.get('HTTP_X_FARM_ARTIFACT_PERMISSIONS', '').split(',') if item]
+        if label:
+            params['label'] = label
+        if filename:
+            params['filename'] = filename
+        if identifier:
+            params['id'] = identifier
+        if permissions:
+            params['permissions'] = permissions
+        if env.get('HTTP_X_FARM_ARTIFACT_ALLOW_SIGNER_CHANGE') == 'true':
+            params['allow_signer_change'] = True
+        staged = self.operations.stage_upload(env['wsgi.input'], int(length))
+        try:
+            normalized = self.operations.validate_job({'action': 'artifact-import',
+                                                       'params': dict(params, upload=staged['upload'])})
+            job, created = self.jobs.submit(env.get('HTTP_IDEMPOTENCY_KEY'), normalized, user)
+        except BaseException:
+            self.operations.discard_upload(staged['upload'])
+            raise
+        return send(202 if created else 200, {'job': job})
+
     def __call__(self, env, start_response):
         def send(status, value, headers=()):
             return self.response(start_response, status, value, headers)
@@ -139,7 +195,7 @@ class Application:
                     snapshot['errors'] = [*snapshot.get('errors', []),
                                           {'component': 'queue', 'message': 'صف عملیات موقتاً در دسترس نیست.'}]
                 return send(200, snapshot)
-            if method != 'POST' or (path != '/api/v1/jobs' and not JOB_ROUTE.fullmatch(path)):
+            if method != 'POST' or (path != '/api/v1/jobs' and path != UPLOAD_ROUTE and not JOB_ROUTE.fullmatch(path)):
                 return error(404, 'not_found', 'مسیر API پیدا نشد.')
             if not self.jobs.healthy():
                 return error(503, 'queue_unavailable', 'صف عملیات موقتاً در دسترس نیست؛ درخواست جدید ثبت نشد.')
@@ -147,7 +203,10 @@ class Application:
                     env.get('HTTP_SEC_FETCH_SITE') == 'cross-site' or
                     not hmac.compare_digest(env.get('HTTP_X_FARM_CSRF', '').encode('utf-8'), self.csrf.encode('ascii'))):
                 return error(403, 'csrf_rejected', 'مبدأ یا توکن درخواست معتبر نیست؛ صفحه را تازه‌سازی کنید.')
-            if env.get('CONTENT_TYPE', '').split(';')[0].strip().lower() != 'application/json':
+            content_type = env.get('CONTENT_TYPE', '').split(';')[0].strip().lower()
+            if path == UPLOAD_ROUTE:
+                return self.upload(env, user, content_type, send, error)
+            if content_type != 'application/json':
                 return error(415, 'json_required', 'درخواست باید JSON باشد.')
             length = env.get('CONTENT_LENGTH', '')
             if not re.fullmatch(r'[0-9]{1,8}', length):

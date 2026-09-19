@@ -4,16 +4,26 @@ import os
 from pathlib import Path
 
 
+DIRECT_MARKER = Path('/run/direct')
+
+
 def make_config(secret):
+    kind = secret['type']
+    if kind == 'direct':
+        # Direct host egress: no tunnel is configured. The entrypoint keeps the
+        # ADB-only ingress policy and opens egress without a transparent redirect.
+        # The secret may not smuggle an upstream into this mode.
+        if set(secret) != {'type'}:
+            raise ValueError('a direct egress secret carries only its type')
+        return None
     ip = ipaddress.IPv4Address(secret['server'])
     if not ip.is_global:
         raise ValueError('server must be a pinned public IPv4 address')
     port = secret['server_port']
     if isinstance(port, bool) or not isinstance(port, int) or not 1 <= port <= 65535:
         raise ValueError('invalid server_port')
-    kind = secret['type']
     if kind not in ('socks', 'http'):
-        raise ValueError('type must be socks or http')
+        raise ValueError('type must be socks, http or direct')
     upstream = {key: secret[key] for key in ('type', 'server', 'server_port', 'username', 'password')}
     upstream['tag'] = 'residential'
     if kind == 'socks':
@@ -35,6 +45,11 @@ def make_config(secret):
 if __name__ == '__main__':
     secret = json.loads(Path('/run/secrets/proxy.json').read_text())
     config = make_config(secret)
+    if config is None:
+        # The marker is the only way the entrypoint enters direct mode, and it
+        # exists solely because the mounted secret asked for it.
+        DIRECT_MARKER.write_text('direct\n')
+        raise SystemExit(0)
     Path('/run/upstream-ip').write_text(secret['server'])
     Path('/run/upstream-port').write_text(str(secret['server_port']))
     os.umask(0o077)

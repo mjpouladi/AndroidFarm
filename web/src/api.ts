@@ -58,6 +58,29 @@ async function postJob(path: string, csrf: string, body: object, key: string): P
   } finally { clearTimeout(timer); }
 }
 export const submitJob = (body: JobRequest, csrf: string, key = requestId()) => postJob(`${API}/jobs`, csrf, body, key);
+
+export type UploadOptions = { label?: string; permissions?: string[]; allowSignerChange?: boolean };
+// The APK body streams to the host's private staging area; verification and
+// registration run inside the durable queue, so the answer is a job like any other.
+export async function uploadArtifact(file: Blob & { name?: string }, csrf: string, options: UploadOptions = {}, key = requestId()): Promise<Job> {
+  if (!csrf) throw new ApiError('ابتدا منتظر اتصال تازه به میزبان بمانید.', 0);
+  if (!file.size) throw new ApiError('فایل APK خالی است.', 0);
+  if (file.size > 256 * 1024 * 1024) throw new ApiError('حجم APK بیش از سقف مجاز ۲۵۶ مگابایت است.', 0);
+  const headers: Record<string, string> = { Accept: 'application/json', 'Content-Type': 'application/vnd.android.package-archive',
+    'X-Farm-CSRF': csrf, 'Idempotency-Key': key };
+  if (file.name) headers['X-Farm-Artifact-Filename'] = encodeURIComponent(file.name);
+  if (options.label?.trim()) headers['X-Farm-Artifact-Label'] = encodeURIComponent(options.label.trim());
+  if (options.permissions?.length) headers['X-Farm-Artifact-Permissions'] = options.permissions.join(',');
+  if (options.allowSignerChange) headers['X-Farm-Artifact-Allow-Signer-Change'] = 'true';
+  try {
+    const response = await fetch(`${API}/artifacts/upload`, { method: 'POST', credentials: 'same-origin', cache: 'no-store', redirect: 'error', headers, body: file });
+    const result = await jsonResponse(response) as { job?: unknown };
+    return parseJob(result.job);
+  } catch (error) {
+    if (error instanceof ApiError) throw error;
+    throw new ApiError('بارگذاری کامل نشد؛ اتصال را بررسی و فایل را دوباره بفرستید.', 0);
+  }
+}
 export const cancelJob = (id: string, csrf: string) => postJob(`${API}/jobs/${encodeURIComponent(id)}/cancel`, csrf, {}, requestId());
 
 // Completion-based scheduling prevents overlapping snapshots on a busy host.

@@ -24,10 +24,12 @@ farm_fail_on_device_drift: true
 # is applied during the next explicitly approved device maintenance window.
 farm_devices: []
 # - id: num01
-#   android_version: 12
+#   android_version: 12          # 11, 12 or 13
 #   resolution: {width: 720, height: 1280}
 #   dpi: 240
 #   fps: 20
 #   device_model: Android Farm QA Phone HD
 #   locale: en-US
+#   timezone: Asia/Tehran        # optional IANA zone, applied through ADB after boot
+#   resources: {cpus: 4, memory_gib: 4}   # optional ceilings, at most the audited budget
 #   network_isolation: proxy_namespace

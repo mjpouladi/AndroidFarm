@@ -18,7 +18,7 @@ import time
 import uuid
 
 import provisioner
-from ops import app_installer, inventory, proxy_store, resources
+from ops import apk_repository, app_installer, inventory, proxy_store, resources
 from ops.device_ids import canonical_device
 from ops.secureio import (atomic_json, read_private_json, require_private_directory,
                           require_private_file, require_trusted_release_file)
@@ -29,7 +29,7 @@ from .authstate import auth_revision
 ROOT = Path(__file__).resolve().parents[2]
 CATALOG = Path('/etc/android-farm/apps.json')
 IDENTIFIER = re.compile(r'[a-z][a-z0-9-]{2,62}\Z')
-LIFECYCLE = frozenset({'up', 'down', 'check', 'check-ip', 'backup', 'release'})
+LIFECYCLE = frozenset({'up', 'down', 'restart', 'check', 'check-ip', 'backup', 'release'})
 PROXY_ACTIONS = frozenset({'proxy-test', 'proxy-enable', 'proxy-disable'})
 ROLES = ('proxy', 'android', 'screen')
 HOST_FAILURES = (
@@ -171,39 +171,27 @@ class Operations:
             return {}
         require_trusted_release_file(self.catalog_path, 'application catalog')
         value = read_private_json(self.catalog_path, 'application catalog')
-        _fields(value, {'schema_version', 'apps'})
-        if type(value['schema_version']) is not int or value['schema_version'] != 1 or not isinstance(value['apps'], list):
-            raise ValueError('invalid application catalog schema')
-        if len(value['apps']) > 256:
-            raise ValueError('application catalog exceeds 256 entries')
-        entries = {}
-        for app in value['apps']:
-            _fields(app, {'id', 'label', 'apk_path', 'apk_sha256', 'apk_package'},
-                    {'apk_activity', 'apk_permissions'})
-            identifier = _identifier(app['id'])
-            if identifier in entries:
-                raise ValueError('duplicate application identifier')
-            _text(app['label'], 'application label')
-            path = Path(_text(app['apk_path'], 'APK path', 4096))
-            if not path.is_absolute() or '..' in path.parts:
-                raise ValueError('APK path must be absolute without traversal')
-            package = app['apk_package']
-            if not isinstance(package, str) or not app_installer.PACKAGE_RE.fullmatch(package):
-                raise ValueError('invalid Android package name')
-            digest = app['apk_sha256']
-            if not isinstance(digest, str) or not re.fullmatch(r'[0-9a-fA-F]{64}', digest):
-                raise ValueError('invalid APK SHA-256')
-            activity = app.get('apk_activity')
-            if activity is not None and (not isinstance(activity, str) or
-                                         not app_installer.ACTIVITY_RE.fullmatch(activity)):
-                raise ValueError('invalid Android activity')
-            permissions = app.get('apk_permissions', [])
-            if (not isinstance(permissions, list) or len(permissions) > 3 or
-                    any(not isinstance(p, str) or p not in app_installer.ALLOWED_GRANTS
-                        for p in permissions) or len(set(permissions)) != len(permissions)):
-                raise ValueError('unsupported Android runtime permissions')
-            entries[identifier] = dict(app, apk_sha256=digest.lower(), apk_permissions=permissions)
-        return entries
+        # One validator serves the console, the CLI importer and provisioning.
+        return apk_repository.validate_catalog(value)
+
+    def stage_upload(self, stream, length):
+        """Persist an authenticated APK upload privately; import happens in the queue."""
+        config = self._config()
+        token = apk_repository.stage_upload(stream, length, config.state_dir / 'web-uploads')
+        return {'upload': token}
+
+    def _staged_upload(self, config, token):
+        if not isinstance(token, str) or not re.fullmatch(r'[0-9a-f]{32}', token):
+            raise ValueError('invalid upload reference')
+        directory = require_private_directory(config.state_dir / 'web-uploads', 'upload staging directory')
+        return require_private_file(directory / f'{token}.apk', 'staged upload')
+
+    def discard_upload(self, token):
+        """Remove a staged upload whose import request could not be queued."""
+        try:
+            self._staged_upload(self._config(), token).unlink(missing_ok=True)
+        except (OSError, RuntimeError, ValueError):
+            pass
 
     @staticmethod
     def _artifact_available(app):
@@ -218,7 +206,8 @@ class Operations:
         _fields(payload, {'action'}, {'device', 'params', 'auth_revision'} if trusted else {'device', 'params'})
         action = payload['action']
         if not isinstance(action, str) or action not in LIFECYCLE | PROXY_ACTIONS | {
-                'provision', 'proxy-add', 'credential-rotate', 'proxy-credentials', 'core-activate'}:
+                'provision', 'proxy-add', 'credential-rotate', 'proxy-credentials', 'core-activate',
+                'artifact-import', 'artifact-remove'}:
             raise ValueError('unsupported action')
         params = payload.get('params', {})
         if not isinstance(params, dict):
@@ -239,6 +228,29 @@ class Operations:
             raise ValueError('this action does not accept a device field')
         if action == 'core-activate':
             _fields(params, set())
+        elif action == 'artifact-import':
+            # The browser never names a path: it references its own staged upload.
+            _fields(params, {'upload'}, {'label', 'id', 'permissions', 'activity', 'filename', 'allow_signer_change'})
+            self._staged_upload(config, params['upload'])
+            if 'label' in params:
+                _text(params['label'], 'application label')
+            if 'id' in params:
+                _identifier(params['id'])
+            if 'filename' in params:
+                _text(params['filename'], 'source filename', 160)
+            if 'activity' in params and (not isinstance(params['activity'], str) or
+                                         not app_installer.ACTIVITY_RE.fullmatch(params['activity'])):
+                raise ValueError('invalid Android activity')
+            permissions = params.get('permissions', [])
+            if (not isinstance(permissions, list) or len(permissions) > 3 or len(set(permissions)) != len(permissions)
+                    or any(not isinstance(p, str) or p not in app_installer.ALLOWED_GRANTS for p in permissions)):
+                raise ValueError('unsupported Android runtime permissions')
+            if params.get('allow_signer_change', False) is not False and params.get('allow_signer_change') is not True:
+                raise ValueError('allow_signer_change must be a boolean')
+        elif action == 'artifact-remove':
+            _fields(params, {'id'})
+            if _identifier(params['id']) not in self._catalog():
+                raise KeyError('application does not exist')
         elif action == 'credential-rotate':
             fields = {'target', 'username', 'password'}
             _fields(params, fields if trusted else fields | {'current_password'},
@@ -265,20 +277,31 @@ class Operations:
             if 'current_password' in params:
                 _text(params['current_password'], 'current password', 4096)
         elif action == 'provision':
-            _fields(params, {'phone', 'owner_authorized', 'proxy_id', 'artifact_id'})
+            _fields(params, {'phone', 'owner_authorized', 'artifact_id'}, {'proxy_id', 'egress'})
             if (not isinstance(params['phone'], str) or
                     not re.fullmatch(r'\+[1-9][0-9]{9,14}', params['phone']) or
                     params['owner_authorized'] is not True):
                 raise ValueError('valid E.164 phone and explicit owner authorization are required')
-            _identifier(params['proxy_id'])
+            egress = params.get('egress', 'proxy')
+            if egress not in ('proxy', 'direct'):
+                raise ValueError('egress must be proxy or direct')
             app = self._catalog().get(_identifier(params['artifact_id']))
             if app is None or not self._artifact_available(app):
                 raise ValueError('approved APK is unavailable; configure the private application catalog')
             if not config.apk_trust_file:
                 raise ValueError('APK signer trust policy is not configured')
-            metadata = self._store(config).show(params['proxy_id'])
-            if metadata['state'] != 'enabled':
-                raise ValueError('proxy must be enabled before provisioning')
+            if egress == 'direct':
+                # Direct host egress never carries a proxy reference.
+                if params.get('proxy_id') is not None:
+                    raise ValueError('direct egress does not accept a proxy_id')
+                params = {key: value for key, value in params.items() if key != 'proxy_id'}
+            else:
+                if 'proxy_id' not in params:
+                    raise ValueError('proxy_id is required unless egress is direct')
+                metadata = self._store(config).show(_identifier(params['proxy_id']))
+                if metadata['state'] != 'enabled':
+                    raise ValueError('proxy must be enabled before provisioning')
+            params = dict(params, egress=egress)
         elif action == 'proxy-add':
             _fields(params, {'id', 'label', 'type', 'server', 'server_port', 'username',
                              'password', 'expected_egress_ip'})
@@ -341,6 +364,28 @@ class Operations:
                             action=action)
             except CredentialsError as exc:
                 raise OperationError(str(exc)) from None
+        if action == 'artifact-import':
+            staged = self._staged_upload(config, params['upload'])
+            try:
+                with provisioner.host_lifecycle_lock():
+                    summary = apk_repository.import_apk(
+                        staged, catalog_path=self.catalog_path, trust_path=config.apk_trust_file,
+                        label=params.get('label'), app_id=params.get('id'),
+                        permissions=params.get('permissions', ()), activity=params.get('activity'),
+                        source_filename=params.get('filename'),
+                        allow_signer_change=params.get('allow_signer_change', False))
+            except apk_repository.RepositoryError as exc:
+                raise OperationError(str(exc)) from None
+            except subprocess.CalledProcessError:
+                raise OperationError('the APK could not be inspected; verify that the file is a valid signed Android package') from None
+            finally:
+                staged.unlink(missing_ok=True)
+            summary.pop('path', None)
+            return {'action': action, 'completed': True, 'artifact': summary}
+        if action == 'artifact-remove':
+            with provisioner.host_lifecycle_lock():
+                result = apk_repository.remove_app(params['id'], catalog_path=self.catalog_path)
+            return {'action': action, 'completed': True, 'artifact': result}
         if action == 'proxy-credentials':
             # Use the existing guarded rotation with stop, pinned-IP validation,
             # two-copy synchronization and rollback. Never change session identity.
@@ -361,7 +406,7 @@ class Operations:
             flags = ('--json',) if action == 'check-ip' else ('--review-completed',) if action == 'release' else ()
             output = self._command(action, '--id', device, *flags)
             result = {'action': action, 'device': device, 'completed': True}
-            if action == 'up':
+            if action in ('up', 'restart'):
                 result['screen_path'] = f'/d/{device}/'
             if action == 'check-ip':
                 try:
@@ -375,7 +420,9 @@ class Operations:
         if action == 'provision':
             app = self._catalog()[params['artifact_id']]
             request = {key: value for key, value in app.items() if key.startswith('apk_')}
-            request.update(phone=params['phone'], owner_authorized=True, proxy_id=params['proxy_id'])
+            request.update(phone=params['phone'], owner_authorized=True, egress=params['egress'])
+            if params['egress'] != 'direct':
+                request['proxy_id'] = params['proxy_id']
             directory = require_private_directory(config.state_dir / 'web-requests',
                                                    'web request directory', create=True)
             path = directory / (uuid.uuid4().hex + '.json')
@@ -477,7 +524,10 @@ class Operations:
         try:
             catalog = self._catalog()
             result['artifacts'] = [{'id': app['id'], 'label': app['label'],
-                                    'package': app['apk_package'], 'available': self._artifact_available(app)}
+                                    'package': app['apk_package'], 'available': self._artifact_available(app),
+                                    'version': app.get('apk_version_name'),
+                                    'signers': list(app.get('apk_signers', [])),
+                                    'imported_at': app.get('imported_at')}
                                    for app in catalog.values()]
             # A new installation deliberately has no approved applications. This
             # requires setup before provisioning, but is not an API/service fault.
@@ -534,6 +584,7 @@ class Operations:
                    'containers': states, 'adb': f'127.0.0.1:{port}' if port else None,
                    'screen': provisioner.web_url(config, device), 'screen_path': f'/d/{device}/',
                    'proxy_id': record.get('proxy_id'),
+                   'egress': 'direct' if record.get('egress') == 'direct' else 'proxy',
                    'proxy': f"{metadata['type']}://{metadata['server']}:{metadata['server_port']}" if metadata else None,
                    'expected_egress_ip': record.get('expected_egress_ip'),
                    'phone': record.get('phone_masked'), 'cpu': None, 'memory': None,

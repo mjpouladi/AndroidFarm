@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { activeDevices, deviceStatus, isSnapshotFresh, parseSnapshot, provisionableProxies, screenPath, type Device, type Job, type ProxyRecord } from './domain';
+import { activeDevices, deviceStatus, egressText, isSnapshotFresh, parseSnapshot, provisionableProxies, screenPath, type Device, type Job, type ProxyRecord } from './domain';
 
 const device: Device = { id: 'num01', phase: 'ready_for_operator', hold: null,
   containers: { android: 'running', proxy: 'healthy', screen: 'running' }, adb: '127.0.0.1:5551',
@@ -13,6 +13,22 @@ describe('وضعیت واقعی و مرز اعتماد API', () => {
     const result = parseSnapshot(snapshotData());
     expect(result.devices).toEqual([]);
     expect(result.resources).toBeNull();
+  });
+  it('خروجی مستقیم را فقط با مقدار معتبر می‌پذیرد و بدون پراکسی نمایش می‌دهد', () => {
+    const direct = parseSnapshot({ ...snapshotData(), devices: [{ ...device, egress: 'direct' }] }).devices[0];
+    expect(direct.egress).toBe('direct');
+    expect(egressText(direct)).toBe('خروجی مستقیم میزبان');
+    expect(egressText({ ...device, proxy: 'socks://8.8.8.8:1080' })).toBe('socks://8.8.8.8:1080');
+    expect(egressText(device)).toBe('—');
+    expect(() => parseSnapshot({ ...snapshotData(), devices: [{ ...device, egress: 'tor' }] })).toThrow();
+  });
+  it('مخزن APK را با فراداده‌های اختیاری می‌خواند و مقادیر نامعتبر را رد می‌کند', () => {
+    const artifact = { id: 'whatsapp', label: 'WhatsApp', package: 'com.whatsapp', available: true, version: '2.24.1', signers: ['a'.repeat(64)], imported_at: 1 };
+    expect(parseSnapshot({ ...snapshotData(), artifacts: [artifact] }).artifacts[0].version).toBe('2.24.1');
+    expect(parseSnapshot({ ...snapshotData(), artifacts: [{ id: 'qa', label: 'QA', package: 'com.example.qa', available: false }] }).artifacts[0].signers).toBeUndefined();
+    for (const broken of [{ ...artifact, signers: 'not-a-list' }, { ...artifact, version: 7 }, { ...artifact, imported_at: 'now' }]) {
+      expect(() => parseSnapshot({ ...snapshotData(), artifacts: [broken] })).toThrow();
+    }
   });
   it('فیلدهای اندازه‌گیری‌نشده و تنظیمات ناقص را می‌پذیرد', () => {
     const result = parseSnapshot({ ...snapshotData(), devices: [device], errors: [{ component: 'configuration', message: 'unavailable' }] });
@@ -52,6 +68,7 @@ describe('وضعیت واقعی و مرز اعتماد API', () => {
   it('صف توقف را با پایان واقعی توقف اشتباه نمی‌گیرد', () => {
     expect(deviceStatus(device, [job])).toBe('running');
     expect(deviceStatus(device, [{ ...job, state: 'running' }])).toBe('stopping');
+    expect(deviceStatus(device, [{ ...job, action: 'restart', state: 'running' }])).toBe('booting');
     expect(activeDevices([device])).toBe(1);
     expect(deviceStatus({ ...device, containers: { ...device.containers, android: 'stopped' } }, [])).toBe('off');
   });

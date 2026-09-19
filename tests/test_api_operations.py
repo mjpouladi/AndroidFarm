@@ -11,6 +11,7 @@ import unittest
 from unittest.mock import Mock, patch
 
 from ops import inventory
+from ops.apk_repository import RepositoryError as apk_repository_error
 from ops.secureio import atomic_json
 from provisioner import Config
 from services.api.operations import Operations, OperationError, bounded_process
@@ -85,6 +86,9 @@ class ApiOperationsTests(unittest.TestCase):
         self.assertNotIn('shell', kwargs)
         self.assertEqual(result['screen_path'], '/d/num01/')
         self.assertNotIn('never-show-this', json.dumps(result))
+        restarted = self.ops.execute({'action': 'restart', 'device': 'num01'})
+        self.assertEqual(self.runner.call_args.args[0][-3:], ['restart', '--id', 'num01'])
+        self.assertEqual(restarted['screen_path'], '/d/num01/')
         self.runner.return_value.returncode = 1
         with self.assertRaises(OperationError) as failure:
             self.ops.execute({'action': 'down', 'device': 'num01'})
@@ -190,6 +194,90 @@ class ApiOperationsTests(unittest.TestCase):
         job['params']['apk_path'] = '/tmp/unreviewed.apk'
         with self.assertRaises(ValueError):
             self.ops.validate_job(job)
+
+    def test_direct_egress_provisioning_needs_no_proxy_and_rejects_mixed_requests(self):
+        self.app_catalog()
+        seen = {}
+
+        def run(argv, **_):
+            seen['request'] = json.loads(Path(argv[-1]).read_text())
+            return subprocess.CompletedProcess(argv, 0, 'num02: ready\n', '')
+
+        self.runner.side_effect = run
+        store = Mock()
+        base = {'phone': '+12025551235', 'owner_authorized': True, 'artifact_id': 'qa-app'}
+        with patch.object(self.ops, '_store', return_value=store):
+            result = self.ops.execute({'action': 'provision', 'params': dict(base, egress='direct')})
+        self.assertEqual(result['device'], 'num02')
+        self.assertEqual(seen['request']['egress'], 'direct')
+        self.assertNotIn('proxy_id', seen['request'])
+        store.show.assert_not_called()
+        for params in ({'proxy_id': 'qa-proxy', 'egress': 'direct'}, {'egress': 'tor'}, {},
+                       {'proxy_id': None, 'egress': 'proxy'}):
+            with self.subTest(params=params), self.assertRaises(ValueError):
+                self.ops.validate_job({'action': 'provision', 'params': dict(base, **params)})
+
+    def test_staged_uploads_are_private_and_imported_only_by_reference(self):
+        import io
+        staged = self.ops.stage_upload(io.BytesIO(b'PK\x03\x04payload'), 11)
+        token = staged['upload']
+        path = self.root / 'web-uploads' / f'{token}.apk'
+        self.assertTrue(path.is_file())
+        self.assertEqual(path.stat().st_mode & 0o777, 0o600)
+        with self.assertRaisesRegex(ValueError, 'not an APK'):
+            self.ops.stage_upload(io.BytesIO(b'plain text'), 10)
+        base = {'action': 'artifact-import', 'params': {'upload': token}}
+        normalized = self.ops.validate_job(base)
+        self.assertEqual(normalized['params'], {'upload': token})
+        for params in ({'upload': 'z' * 32}, {'upload': '../etc/passwd'}, {'upload': token, 'apk_path': '/x.apk'},
+                       {'upload': token, 'permissions': ['android.permission.ROOT']},
+                       {'upload': token, 'activity': '; shell'}, {'upload': token, 'id': 'Bad Id'},
+                       {'upload': token, 'allow_signer_change': 'yes'}):
+            with self.subTest(params=params), self.assertRaises((ValueError, RuntimeError)):
+                self.ops.validate_job({'action': 'artifact-import', 'params': params})
+        summary = {'id': 'whatsapp', 'package': 'com.whatsapp', 'label': 'WhatsApp', 'sha256': 'c' * 64,
+                   'signers': ['a' * 64], 'signer_changed': False, 'path': str(self.root / 'repo/c.apk'),
+                   'version_name': '2.24', 'version_code': 1, 'activity': None, 'permissions': [], 'pruned': []}
+        with patch('services.api.operations.apk_repository.import_apk', return_value=dict(summary)) as importer, \
+                patch('services.api.operations.provisioner.host_lifecycle_lock', return_value=nullcontext()):
+            result = self.ops.execute({'action': 'artifact-import',
+                                       'params': {'upload': token, 'label': 'واتس‌اپ',
+                                                  'permissions': ['android.permission.CAMERA']}})
+        self.assertEqual(importer.call_args.args[0], path)
+        self.assertEqual(importer.call_args.kwargs['catalog_path'], self.root / 'apps.json')
+        self.assertEqual(importer.call_args.kwargs['trust_path'], self.config.apk_trust_file)
+        self.assertEqual(importer.call_args.kwargs['label'], 'واتس‌اپ')
+        self.assertEqual(importer.call_args.kwargs['permissions'], ['android.permission.CAMERA'])
+        self.assertEqual(result['artifact']['id'], 'whatsapp')
+        self.assertNotIn('path', result['artifact'])
+        self.assertFalse(path.exists())  # consumed even on success
+        self.ops.discard_upload(token)  # idempotent when already gone
+        # A failed import also discards the staged file and reports a controlled message.
+        again = self.ops.stage_upload(io.BytesIO(b'PK\x03\x04payload'), 11)['upload']
+        with patch('services.api.operations.apk_repository.import_apk',
+                   side_effect=apk_repository_error('APK signer differs from the certificate trusted')), \
+                patch('services.api.operations.provisioner.host_lifecycle_lock', return_value=nullcontext()), \
+                self.assertRaisesRegex(OperationError, 'signer differs'):
+            self.ops.execute({'action': 'artifact-import', 'params': {'upload': again}})
+        self.assertFalse((self.root / 'web-uploads' / f'{again}.apk').exists())
+
+    def test_snapshot_reports_direct_egress_devices_without_a_proxy(self):
+        self.app_catalog()
+        state = inventory.load(self.root / 'inventory.json')
+        record, _ = inventory.choose(state, 'phone-hash-2', 'direct-hash', 'request-hash-2')
+        record.update(phone_masked='+12***1235', phase='ready_for_operator', expected_egress_ip=None,
+                      egress='direct')
+        inventory.save(self.root / 'inventory.json', state)
+        store = Mock()
+        store.list.return_value = []
+        with patch.object(self.ops, '_store', return_value=store), \
+                patch('services.api.operations.resources.probe', return_value={'capacity': 10}), \
+                patch('services.api.operations.provisioner.bulk_managed_inspections', return_value={}):
+            rows = {row['id']: row for row in self.ops.snapshot()['devices']}
+        self.assertEqual(rows['num01']['egress'], 'proxy')
+        self.assertEqual(rows['num02']['egress'], 'direct')
+        self.assertIsNone(rows['num02']['proxy'])
+        self.assertIsNone(rows['num02']['proxy_id'])
 
     def test_failed_provision_also_removes_private_request(self):
         self.app_catalog()

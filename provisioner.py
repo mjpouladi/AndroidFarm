@@ -149,12 +149,20 @@ def proxy_endpoint(config, device):
     if not path.exists():
         return '-'
     secret = read_private_json(path, f'{device} proxy secret')
+    if secret.get('type') == 'direct':
+        return 'direct'
     return f'{secret.get("type", "proxy")}://{secret.get("server", "?")}:{secret.get("server_port", "?")}'
 
 
 def validate_managed_proxy(config, device, record):
     """Fail closed when a registry-managed proxy is disabled, moved or stale."""
     proxy_id = record.get('proxy_id')
+    if record.get('egress') == 'direct':
+        installed = read_private_json(config.secret_dir / f'{device}.json',
+                                      f'{device} installed egress secret')
+        if proxy_id or installed != {'type': 'direct'}:
+            raise RuntimeError('direct egress device has an unexpected proxy configuration')
+        return
     if not proxy_id:
         return
     from ops.proxy_store import ProxyStore
@@ -225,7 +233,10 @@ def accept_idempotent_running(config, device, record):
     result = farmctl(config, 'ip', device, capture=True)
     payload = json.loads(result.stdout)
     expected = record.get('expected_egress_ip')
-    if payload.get('proxy_namespace') != expected or payload.get('android_shell') != expected:
+    if expected is None and record.get('egress') == 'direct':
+        # Unpinned direct egress: the namespace and the Android shell must agree.
+        expected = payload.get('proxy_namespace')
+    if not expected or payload.get('proxy_namespace') != expected or payload.get('android_shell') != expected:
         try:
             invoke('account_policy.py', 'hold', device, '--reason', 'ip-change')
         except subprocess.SubprocessError as exc:
@@ -309,6 +320,8 @@ def build_parser():
                              'android.permission.RECORD_AUDIO'])
     down = sub.add_parser('down', help='stop while preserving all data')
     down.add_argument('--id', dest='device', required=True)
+    restart = sub.add_parser('restart', help='guarded stop followed by the attested start of an allocated device')
+    restart.add_argument('--id', dest='device', required=True)
     check = sub.add_parser('check', help='check proxy, Android boot and ADB')
     check.add_argument('--id', dest='device', required=True)
     check_ip = sub.add_parser('check-ip', help='compare proxy namespace and Android-shell egress')
@@ -335,6 +348,21 @@ def build_parser():
     render_profile.add_argument('--profile-file', type=Path,
                                 help='validated JSON profile with Android version, display and locale')
     render.add_argument('--output', type=Path, required=True)
+    apps = sub.add_parser('apps', help='manage the private APK repository used by every installation')
+    apps_actions = apps.add_subparsers(dest='apps_action', required=True)
+    apps_import = apps_actions.add_parser('import', help='copy, verify and register an APK for reuse')
+    apps_import.add_argument('--apk', required=True, type=Path, help='root-owned APK, e.g. /root/farm-input/WhatsApp.apk')
+    apps_import.add_argument('--id', help='catalog identifier; derived from the package name when omitted')
+    apps_import.add_argument('--label', help='name shown in the console')
+    apps_import.add_argument('--activity', help='launcher component; read from the APK when omitted')
+    apps_import.add_argument('--grant', action='append', default=[],
+                             choices=['android.permission.CAMERA', 'android.permission.READ_CONTACTS',
+                                      'android.permission.RECORD_AUDIO'])
+    apps_import.add_argument('--allow-signer-change', action='store_true',
+                             help='accept a new signing certificate after verifying the publisher fingerprint')
+    apps_actions.add_parser('list', help='show registered applications without file contents')
+    apps_remove = apps_actions.add_parser('remove', help='unregister an application and prune its file')
+    apps_remove.add_argument('--id', required=True)
     proxy = sub.add_parser('proxy', help='manage authenticated sticky proxy connections')
     proxy_actions = proxy.add_subparsers(dest='proxy_action', required=True)
     proxy_add = proxy_actions.add_parser('add', help='register a dedicated upstream proxy')
@@ -430,6 +458,23 @@ def main(argv=None):
         print(output)
         return
     config = load_config(args.config)
+    if args.command == 'apps':
+        from ops import apk_repository
+        catalog = Path('/etc/android-farm/apps.json')
+        if not config.apk_trust_file:
+            raise RuntimeError('the APK repository requires a configured apk_trust_file')
+        with host_lifecycle_lock():
+            if args.apps_action == 'import':
+                result = apk_repository.import_apk(
+                    args.apk, catalog_path=catalog, trust_path=config.apk_trust_file,
+                    label=args.label, app_id=args.id, permissions=args.grant, activity=args.activity,
+                    allow_signer_change=args.allow_signer_change)
+            elif args.apps_action == 'list':
+                result = apk_repository.list_apps(catalog)
+            else:
+                result = apk_repository.remove_app(args.id, catalog_path=catalog)
+        print(json.dumps(result, indent=2, ensure_ascii=False))
+        return
     if args.command == 'proxy':
         from ops.proxy_store import ProxyStore
         store = ProxyStore(config.proxy_registry, config.proxy_store_dir)
@@ -493,16 +538,22 @@ def main(argv=None):
         if not matches:
             raise RuntimeError('provision completed without a device identifier')
         print('screen:', web_url(config, matches[-1]))
-    elif args.command == 'up':
+    elif args.command in ('up', 'restart'):
         device = canonical_device(args.device)
         record = inventory.find(inventory.load(config.state_dir / 'inventory.json'), device)
         if not record:
             raise RuntimeError('device is not allocated in the managed inventory')
         validate_managed_proxy(config, device, record)
-        already_running = accept_idempotent_running(config, device, record)
+        if args.command == 'restart':
+            # A restart is a full guarded stop followed by the same attested
+            # start path; it is never a bare `docker restart`.
+            farmctl(config, 'stop', device)
+            already_running = False
+        else:
+            already_running = accept_idempotent_running(config, device, record)
         if not already_running:
             farmctl(config, 'start', device)
-        if any((args.apk, args.apk_sha256, args.package, args.activity, args.grant)):
+        if args.command == 'up' and any((args.apk, args.apk_sha256, args.package, args.activity, args.grant)):
             if not all((args.apk, args.apk_sha256, args.package)) or not config.apk_trust_file:
                 raise RuntimeError('APK install requires --apk, --apk-sha256, --package and configured apk_trust_file')
             from ops import app_installer
@@ -522,7 +573,10 @@ def main(argv=None):
         if not record:
             raise RuntimeError('device is not allocated in the managed inventory')
         expected = record.get('expected_egress_ip')
-        payload.update(expected=expected, matches=(payload['proxy_namespace'] == expected == payload['android_shell']))
+        if expected is None and record.get('egress') == 'direct':
+            expected = payload['proxy_namespace']
+        payload.update(expected=expected, egress=record.get('egress', 'proxy'),
+                       matches=bool(expected) and (payload['proxy_namespace'] == expected == payload['android_shell']))
         print(json.dumps(payload, indent=2) if args.json else
               f"{device}: proxy={payload['proxy_namespace']} android={payload['android_shell']} expected={expected} "
               f"match={'yes' if payload['matches'] else 'NO'}")

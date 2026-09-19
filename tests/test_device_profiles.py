@@ -9,6 +9,8 @@ from ops.device_profiles import (
     DeviceProfile,
     apply_profile,
     load,
+    parse_cpus,
+    parse_memory_bytes,
     validate,
 )
 
@@ -22,6 +24,8 @@ VALID = {
     "device_model": "Android Farm QA Phone HD",
     "locale": "en-US",
 }
+VALID_V2 = dict(VALID, schema_version=2, timezone="Asia/Tehran",
+                resources={"cpus": 4.0, "memory_gib": 4.0})
 
 
 class DeviceProfileTests(unittest.TestCase):
@@ -30,11 +34,25 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertIsInstance(profile, DeviceProfile)
         self.assertEqual(profile.android_version, 12)
         self.assertEqual(profile.locale, "en-US")
-        self.assertEqual(profile.to_dict(), VALID)
+        self.assertEqual(profile.timezone, "Asia/Tehran")
+        self.assertEqual((profile.cpus, profile.memory_mib, profile.memory_limit), (4.0, 4096, "4096m"))
+        self.assertEqual(profile.to_dict(), VALID_V2)
         self.assertRegex(profile.digest, r"^[0-9a-f]{64}$")
 
         lower = validate(dict(VALID, locale="FA-ir"))
         self.assertEqual(lower.locale, "fa-IR")
+
+    def test_schema_one_profiles_keep_their_digest_and_have_no_optional_fields(self):
+        profile = validate(VALID)
+        self.assertEqual(profile.to_dict(), VALID)
+        self.assertIsNone(profile.timezone)
+        self.assertIsNone(profile.cpus)
+        self.assertIsNone(profile.memory_limit)
+        # Optional keys are a schema 2 feature; schema 1 files stay strict.
+        for extra in ({"timezone": "UTC"}, {"resources": {"cpus": 2, "memory_gib": 2}}):
+            with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "unsupported"):
+                validate(dict(VALID, **extra))
+        self.assertNotEqual(profile.digest, validate(VALID_V2).digest)
 
     def test_digest_is_canonical_and_load_rejects_invalid_json(self):
         reordered = {key: VALID[key] for key in reversed(VALID)}
@@ -49,9 +67,10 @@ class DeviceProfileTests(unittest.TestCase):
         for extra in ("imei", "android_id", "serial", "ro.serialno"):
             with self.subTest(extra=extra), self.assertRaisesRegex(ValueError, "unsupported"):
                 validate(dict(VALID, **{extra: "forbidden"}))
-        for version in (10, 13, True):
+        for version in (10, 14, True):
             with self.subTest(version=version), self.assertRaises(ValueError):
                 validate(dict(VALID, android_version=version))
+        self.assertEqual(validate(dict(VALID, android_version=13)).android_version, 13)
 
     def test_rejects_real_brand_impersonation_and_opaque_models(self):
         for model in ("Samsung Galaxy S21", "Google Pixel 6 QA", "Ordinary Phone", "QA Phone\nInjected"):
@@ -66,10 +85,44 @@ class DeviceProfileTests(unittest.TestCase):
             dict(VALID, resolution={"width": 720, "height": 1280, "depth": 24}),
             dict(VALID, locale="en_US"),
             dict(VALID, locale="en-US-extra-variant"),
+            dict(VALID, schema_version=3),
         ]
         for value in invalid:
             with self.subTest(value=value), self.assertRaises(ValueError):
                 validate(value)
+
+    def test_timezone_must_be_a_real_iana_zone(self):
+        for zone in ("UTC", "Europe/Berlin", "America/Argentina/Buenos_Aires", "Etc/GMT+3"):
+            with self.subTest(zone=zone):
+                self.assertEqual(validate(dict(VALID_V2, timezone=zone)).timezone, zone)
+        for zone in ("Tehran", "asia/tehran", "../../etc/passwd", "Asia/Tehran; rm -rf /",
+                     "Mars/Olympus", "", 3):
+            with self.subTest(zone=zone), self.assertRaisesRegex(ValueError, "timezone"):
+                validate(dict(VALID_V2, timezone=zone))
+
+    def test_resource_ceilings_stay_within_the_audited_budget(self):
+        profile = validate(dict(VALID_V2, resources={"cpus": 1.5, "memory_gib": 2.25}))
+        self.assertEqual((profile.cpus, profile.memory_mib, profile.memory_limit), (1.5, 2304, "2304m"))
+        for resources in ({"cpus": 0.5, "memory_gib": 4}, {"cpus": 4.5, "memory_gib": 4},
+                          {"cpus": 4, "memory_gib": 1}, {"cpus": 4, "memory_gib": 8},
+                          {"cpus": 1.1, "memory_gib": 4}, {"cpus": True, "memory_gib": 4},
+                          {"cpus": 4}, {"cpus": 4, "memory_gib": 4, "pids": 1}, "4 cpus"):
+            with self.subTest(resources=resources), self.assertRaisesRegex(ValueError, "resources"):
+                validate(dict(VALID_V2, resources=resources))
+
+    def test_compose_resource_values_are_parsed_in_every_rendering(self):
+        self.assertEqual(parse_memory_bytes("4g"), 4 * 1024 ** 3)
+        self.assertEqual(parse_memory_bytes("2304m"), 2304 * 1024 ** 2)
+        self.assertEqual(parse_memory_bytes("4294967296"), 4 * 1024 ** 3)
+        self.assertEqual(parse_memory_bytes(4294967296), 4 * 1024 ** 3)
+        self.assertEqual(parse_cpus(4), 4.0)
+        self.assertEqual(parse_cpus("1.5"), 1.5)
+        for value in ("4 cows", None, True, "-1"):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_memory_bytes(value)
+        for value in (None, True, "many", 0):
+            with self.subTest(value=value), self.assertRaises(ValueError):
+                parse_cpus(value)
 
     def test_apply_profile_is_copy_on_write_and_preserves_honest_identity(self):
         original = generate(1)
@@ -102,8 +155,22 @@ class DeviceProfileTests(unittest.TestCase):
         self.assertIn(serial, command)
         self.assertFalse(any("imei" in item.lower() or "android_id" in item.lower() for item in command))
         self.assertEqual(android["labels"][PROFILE_DIGEST_LABEL], profile.digest)
+        # A profile without ceilings leaves the audited budget untouched.
+        self.assertEqual((android["cpus"], android["mem_limit"]), (4.0, "4g"))
         for prefix in ("androidboot.redroid_width=", "ro.product.model=", "ro.product.brand="):
             self.assertEqual(sum(item.startswith(prefix) for item in command), 1)
+
+    def test_apply_profile_lowers_only_the_android_ceiling(self):
+        rendered = apply_profile(generate(1), "num01",
+                                 validate(dict(VALID_V2, android_version=13,
+                                               resources={"cpus": 2, "memory_gib": 3})))
+        android = rendered["services"]["android-num01"]
+        self.assertEqual(android["image"], "redroid/redroid:13.0.0-latest")
+        self.assertEqual((android["cpus"], android["mem_limit"]), (2.0, "3072m"))
+        self.assertEqual(rendered["services"]["proxy-num01"]["cpus"], 0.5)
+        self.assertEqual(rendered["services"]["screen-num01"]["mem_limit"], "1g")
+        # Timezone is applied through ADB after boot, never as a kernel argument.
+        self.assertFalse(any("timezone" in item.lower() for item in android["command"]))
 
     def test_apply_profile_validates_compose_shape(self):
         with self.assertRaisesRegex(ValueError, "missing"):

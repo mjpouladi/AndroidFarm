@@ -1,5 +1,5 @@
 {
-  "schema_version": 1,
+  "schema_version": 2,
   "android_version": 12,
   "resolution": {
     "width": 720,
@@ -8,5 +8,10 @@
   "dpi": 240,
   "fps": 20,
   "device_model": "Android Farm QA Phone HD",
-  "locale": "en-US"
+  "locale": "en-US",
+  "timezone": "Asia/Tehran",
+  "resources": {
+    "cpus": 4,
+    "memory_gib": 4
+  }
 }

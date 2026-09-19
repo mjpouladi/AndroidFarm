@@ -5,6 +5,7 @@ export type Device = {
   containers: { android: string; proxy: string; screen: string };
   adb: string | null; screen_path: string; screen_ready: boolean;
   proxy: string | null; proxy_id?: string; expected_egress_ip: string | null;
+  egress?: 'proxy' | 'direct';
   phone: string | null; cpu: string | null; memory: string | null;
   running?: boolean;
 };
@@ -17,7 +18,8 @@ export type JobState = 'queued' | 'running' | 'succeeded' | 'failed' | 'interrup
 export type Job = { id: string; action: string; device: string | null; state: JobState;
   created_at: number; updated_at: number; error: string | null; result: Record<string, unknown> | null };
 export type Backup = { id: string; device: string; created_at: number; size_bytes: number };
-export type Artifact = { id: string; label: string; package: string; available: boolean };
+export type Artifact = { id: string; label: string; package: string; available: boolean;
+  version?: string | null; signers?: string[]; imported_at?: number | null };
 export type ApplicationCatalog = { state: 'setup_required' | 'files_required' | 'ready' | 'invalid' };
 export type SecuritySettings = { web_username: string | null; grafana_username: string | null;
   credential_rotation_available: boolean; proxy_credentials_available: boolean };
@@ -33,28 +35,32 @@ export const statusText: Record<DeviceStatus, string> = { running: 'روشن', o
   queued: 'در صف', stopping: 'در حال توقف', backup: 'پشتیبان‌گیری', error: 'نیاز به بررسی', unknown: 'نامشخص' };
 export const jobStateText: Record<JobState, string> = { queued: 'در صف', running: 'در حال اجرا', succeeded: 'موفق',
   failed: 'ناموفق', interrupted: 'متوقف‌شده پس از وقفه', cancelled: 'لغوشده' };
-export const actionText: Record<string, string> = { up: 'روشن‌کردن', down: 'خاموش‌کردن', check: 'بررسی ADB',
+export const actionText: Record<string, string> = { up: 'روشن‌کردن', down: 'خاموش‌کردن', restart: 'راه‌اندازی مجدد', check: 'بررسی ADB',
   'check-ip': 'بررسی IP خروجی', backup: 'پشتیبان‌گیری', provision: 'آماده‌سازی دستگاه',
   'proxy-add': 'ثبت پراکسی', 'proxy-test': 'تست پراکسی', 'proxy-enable': 'فعال‌کردن پراکسی', 'proxy-disable': 'غیرفعال‌کردن پراکسی',
-  'credential-rotate': 'تغییر اطلاعات ورود', 'proxy-credentials': 'تغییر رمز پراکسی', 'core-activate': 'راه‌اندازی سرویس‌های مرکزی', release: 'رفع توقف حفاظتی' };
+  'credential-rotate': 'تغییر اطلاعات ورود', 'proxy-credentials': 'تغییر رمز پراکسی', 'core-activate': 'راه‌اندازی سرویس‌های مرکزی', release: 'رفع توقف حفاظتی',
+  'artifact-import': 'ثبت APK در مخزن', 'artifact-remove': 'حذف APK از مخزن' };
 export const runningContainer = (state: string) => ['running', 'healthy', 'starting', 'unhealthy', 'paused', 'restarting'].includes(state);
 export const activeDevices = (devices: Device[]) => devices.filter(d => d.running ?? runningContainer(d.containers.android)).length;
 export const activeJob = (job: Job) => job.state === 'queued' || job.state === 'running';
 export const formatTime = (stamp: number) => new Date(stamp * 1000).toLocaleString('fa-IR', { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
 export const formatSize = (bytes: number) => bytes >= 1024 ** 3 ? `${fa(bytes / 1024 ** 3)} GB` : `${fa(bytes / 1024 ** 2)} MB`;
+// Phases in which the same request may be replayed to finish an interrupted preparation.
+export const resumablePhases = ['reserved', 'volume_created', 'secret_installed', 'identity_baselining', 'starting', 'installing_apk', 'failed'];
 export const provisionableProxies = (proxies: ProxyRecord[], devices: Device[]) => proxies.filter(proxy => {
   if (proxy.state !== 'enabled') return false;
   if (!proxy.assigned_device) return true;
   const device = devices.find(item => item.id === proxy.assigned_device);
-  return !!device && ['reserved', 'volume_created', 'secret_installed', 'identity_baselining', 'starting', 'installing_apk', 'failed'].includes(device.phase);
+  return !!device && resumablePhases.includes(device.phase);
 });
+export const egressText = (device: Pick<Device, 'egress' | 'proxy'>) => device.egress === 'direct' ? 'خروجی مستقیم میزبان' : device.proxy || '—';
 
 export function deviceStatus(device: Device, jobs: Job[]): DeviceStatus {
   const job = jobs.find(j => j.device === device.id && activeJob(j));
   if (job?.state === 'running') {
     if (job.action === 'down') return 'stopping';
     if (job.action === 'backup') return 'backup';
-    if (job.action === 'up' || job.action === 'provision') return 'booting';
+    if (job.action === 'up' || job.action === 'provision' || job.action === 'restart') return 'booting';
   }
   if (device.hold || Object.values(device.containers).includes('unhealthy')) return 'error';
   if (device.containers.android === 'paused') return 'error';
@@ -108,7 +114,8 @@ export function parseSnapshot(value: unknown): Snapshot {
     if (!object(item) || !text(item.id) || !text(item.phase) || !(item.hold === null || object(item.hold)) || !object(item.containers) ||
         !['android', 'proxy', 'screen'].every(key => text((item.containers as Record<string, unknown>)[key])) ||
         !nullableText(item.adb) || !text(item.screen_path) || typeof item.screen_ready !== 'boolean' || !nullableText(item.proxy) ||
-        !nullableText(item.expected_egress_ip) || !nullableText(item.phone) || !nullableText(item.cpu) || !nullableText(item.memory)) return invalid();
+        !nullableText(item.expected_egress_ip) || !nullableText(item.phone) || !nullableText(item.cpu) || !nullableText(item.memory) ||
+        !(item.egress === undefined || ['proxy', 'direct'].includes(String(item.egress)))) return invalid();
   }
   for (const item of value.proxies as unknown[]) {
     if (!object(item) || !['id', 'label', 'server', 'expected_egress_ip'].every(key => text(item[key])) || !finite(item.server_port) ||
@@ -117,7 +124,12 @@ export function parseSnapshot(value: unknown): Snapshot {
         !finite(item.last_health.checked_at) || !nullableText(item.last_health.observed_egress_ip))) return invalid();
   }
   for (const item of value.backups as unknown[]) if (!object(item) || !text(item.id) || !text(item.device) || !finite(item.created_at) || !finite(item.size_bytes)) return invalid();
-  for (const item of value.artifacts as unknown[]) if (!object(item) || !text(item.id) || !text(item.label) || !text(item.package) || typeof item.available !== 'boolean') return invalid();
+  for (const item of value.artifacts as unknown[]) {
+    if (!object(item) || !text(item.id) || !text(item.label) || !text(item.package) || typeof item.available !== 'boolean' ||
+        !(item.version === undefined || nullableText(item.version)) ||
+        !(item.signers === undefined || (Array.isArray(item.signers) && item.signers.every(text))) ||
+        !(item.imported_at === undefined || item.imported_at === null || finite(item.imported_at))) return invalid();
+  }
   for (const item of value.errors as unknown[]) if (!object(item) || !text(item.component) || !text(item.message)) return invalid();
   (value.jobs as unknown[]).forEach(parseJob);
   return { ...value, resources: value.resources === null ? null : parseResourceReport(value.resources) } as Snapshot;

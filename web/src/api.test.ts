@@ -1,5 +1,5 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
-import { cancelJob, fetchSnapshot, pollSnapshots, submitJob } from './api';
+import { cancelJob, fetchSnapshot, pollSnapshots, submitJob, uploadArtifact } from './api';
 
 const snapshotData = () => ({ schema_version: 1, collected_at: Date.now() / 1000, csrf_token: 'test-csrf',
   resources: null, devices: [], proxies: [], artifacts: [], backups: [], errors: [], jobs: [], settings: {} });
@@ -28,6 +28,23 @@ describe('درخواست‌های واقعی API', () => {
     expect(await submitJob({ action: 'up', device: 'num01' }, 'csrf', 'request-key')).toEqual(job);
     expect(mock).toHaveBeenCalledWith('/api/v1/jobs', expect.objectContaining({ method: 'POST',
       headers: expect.objectContaining({ 'X-Farm-CSRF': 'csrf', 'Idempotency-Key': 'request-key' }), body: JSON.stringify({ action: 'up', device: 'num01' }) }));
+  });
+  it('APK را به‌صورت خام با CSRF، برچسب کدشده و مجوزها بارگذاری می‌کند', async () => {
+    const mock = vi.fn().mockResolvedValue(response({ job: { ...job, action: 'artifact-import', device: null } }, 202)); vi.stubGlobal('fetch', mock);
+    const file = new File([new Uint8Array([0x50, 0x4b, 0x03, 0x04, 1, 2])], 'WhatsApp.apk', { type: 'application/vnd.android.package-archive' });
+    const result = await uploadArtifact(file, 'csrf', { label: 'واتس‌اپ', permissions: ['android.permission.CAMERA'], allowSignerChange: true }, 'upload-key');
+    expect(result.action).toBe('artifact-import');
+    const [url, init] = mock.mock.calls[0];
+    expect(url).toBe('/api/v1/artifacts/upload');
+    expect(init.method).toBe('POST');
+    expect(init.body).toBe(file);
+    expect(init.headers).toEqual(expect.objectContaining({ 'X-Farm-CSRF': 'csrf', 'Idempotency-Key': 'upload-key',
+      'Content-Type': 'application/vnd.android.package-archive', 'X-Farm-Artifact-Filename': 'WhatsApp.apk',
+      'X-Farm-Artifact-Label': encodeURIComponent('واتس‌اپ'), 'X-Farm-Artifact-Permissions': 'android.permission.CAMERA',
+      'X-Farm-Artifact-Allow-Signer-Change': 'true' }));
+    await expect(uploadArtifact(new File([], 'empty.apk'), 'csrf')).rejects.toThrow('خالی');
+    await expect(uploadArtifact(file, '')).rejects.toThrow();
+    expect(mock).toHaveBeenCalledTimes(1);
   });
   it('بدون CSRF هیچ تغییری ارسال نمی‌کند', async () => {
     const mock = vi.fn(); vi.stubGlobal('fetch', mock);

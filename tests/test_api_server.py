@@ -45,6 +45,51 @@ class APITests(unittest.TestCase):
         output = self.app(env, lambda status, values: headers.extend([status, dict(values)]))
         return int(headers[0].split()[0]), headers[1], json.loads(b''.join(output))
 
+    def upload(self, body=b'PK\x03\x04apk', **overrides):
+        env = {'REQUEST_METHOD': 'POST', 'PATH_INFO': '/api/v1/artifacts/upload', 'QUERY_STRING': '',
+               'HTTP_AUTHORIZATION': 'valid', 'HTTP_ORIGIN': 'https://farm.example.com',
+               'HTTP_X_FARM_CSRF': self.app.csrf, 'CONTENT_TYPE': 'application/vnd.android.package-archive',
+               'CONTENT_LENGTH': str(len(body)), 'wsgi.input': io.BytesIO(body),
+               'HTTP_IDEMPOTENCY_KEY': str(uuid.uuid4()),
+               'HTTP_X_FARM_ARTIFACT_LABEL': '%D9%88%D8%A7%D8%AA%D8%B3%E2%80%8C%D8%A7%D9%BE',
+               'HTTP_X_FARM_ARTIFACT_FILENAME': 'WhatsApp.apk',
+               'HTTP_X_FARM_ARTIFACT_PERMISSIONS': 'android.permission.CAMERA'}
+        env.update(overrides)
+        headers = []
+        output = self.app(env, lambda status, values: headers.extend([status, dict(values)]))
+        return int(headers[0].split()[0]), headers[1], json.loads(b''.join(output))
+
+    def test_apk_upload_is_staged_privately_and_imported_through_the_queue(self):
+        self.operations.stage_upload.return_value = {'upload': 'f' * 32}
+        code, _, body = self.upload()
+        self.assertEqual(code, 202)
+        stream, length = self.operations.stage_upload.call_args.args
+        self.assertEqual(length, 7)
+        self.assertIsInstance(stream, io.BytesIO)
+        submitted = self.operations.validate_job.call_args.args[0]
+        self.assertEqual(submitted['action'], 'artifact-import')
+        self.assertEqual(submitted['params'], {'upload': 'f' * 32, 'label': 'واتس‌اپ', 'filename': 'WhatsApp.apk',
+                                               'permissions': ['android.permission.CAMERA']})
+        self.assertEqual(body['job']['action'], 'artifact-import')
+        self.assertEqual(self.queue.list()[0]['state'], 'queued')
+        self.operations.discard_upload.assert_not_called()
+
+    def test_apk_upload_rejects_wrong_type_size_origin_and_cleans_up_on_validation_failure(self):
+        self.operations.stage_upload.return_value = {'upload': 'f' * 32}
+        self.assertEqual(self.upload(CONTENT_TYPE='application/json')[0], 415)
+        self.assertEqual(self.upload(CONTENT_LENGTH=str(256 * 1024 ** 2 + 1))[0], 413)
+        self.assertEqual(self.upload(HTTP_ORIGIN='https://evil.example')[0], 403)
+        self.assertEqual(self.upload(HTTP_X_FARM_CSRF='guess')[0], 403)
+        self.assertEqual(self.upload(HTTP_AUTHORIZATION='')[0], 401)
+        self.assertEqual(self.upload(QUERY_STRING='x=1')[0], 400)
+        self.operations.stage_upload.assert_not_called()
+        self.operations.validate_job.side_effect = ValueError('unsupported Android runtime permissions')
+        code, _, body = self.upload(HTTP_X_FARM_ARTIFACT_PERMISSIONS='android.permission.ROOT')
+        self.assertEqual(code, 400)
+        self.assertIn('permissions', body['error']['message'])
+        self.operations.discard_upload.assert_called_once_with('f' * 32)
+        self.assertEqual(self.queue.list(), [])
+
     def test_auth_required_even_without_reverse_proxy(self):
         for path, method in [('/api/v1/snapshot', 'GET'), ('/api/v1/health', 'GET'),
                              ('/api/v1/jobs', 'POST')]:

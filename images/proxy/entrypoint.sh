@@ -9,7 +9,22 @@ iptables -P FORWARD DROP
 ip6tables -P OUTPUT DROP
 ip6tables -P INPUT DROP
 ip6tables -P FORWARD DROP
+rm -f /run/direct
 python3 /configure.py
+if [ -f /run/direct ]; then
+    # Direct host egress: the mounted secret selected {"type": "direct"}. The
+    # sidecar still owns the shared namespace, the loopback-only ADB port and
+    # the ingress policy; only the transparent tunnel is absent. The host guard
+    # chain (ops/farmctl.py) remains the authority for holds and stops.
+    iptables -F OUTPUT
+    iptables -F INPUT
+    iptables -P OUTPUT ACCEPT
+    iptables -A INPUT -i lo -j ACCEPT
+    iptables -A INPUT -m conntrack --ctstate ESTABLISHED,RELATED -j ACCEPT
+    iptables -A INPUT -p tcp -s "$CONTROL_CIDR" --dport 5555 -j ACCEPT
+    iptables -A INPUT -p tcp -s "$EGRESS_CIDR" --dport 5555 -j ACCEPT
+    exec python3 -c 'import signal, sys; signal.signal(signal.SIGTERM, lambda *_: sys.exit(0)); signal.pause()'
+fi
 UPSTREAM_IP=$(cat /run/upstream-ip)
 UPSTREAM_PORT=$(cat /run/upstream-port)
 iptables -F OUTPUT

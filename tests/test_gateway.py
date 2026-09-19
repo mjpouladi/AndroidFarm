@@ -113,7 +113,19 @@ class GatewayTests(unittest.TestCase):
         self.assertIn('proxy_set_header Host $http_host;', api)
         self.assertIn('proxy_set_header X-Forwarded-Proto $scheme;', api)
         self.assertIn('proxy_pass $console_api_upstream$request_uri;', api)
-        self.assertEqual(public.count('proxy_set_header Authorization $http_authorization;'), 1)
+        # Exactly two API locations forward the browser credential: the JSON API
+        # and the raw APK upload route, which needs a larger body ceiling.
+        self.assertEqual(public.count('proxy_set_header Authorization $http_authorization;'), 2)
+        upload = public.split('location = /api/v1/artifacts/upload {', 1)[1].split('}', 1)[0]
+        self.assertIn('client_max_body_size 256m;', upload)
+        self.assertIn('proxy_set_header Authorization $http_authorization;', upload)
+        self.assertIn('proxy_pass $console_upload_upstream$request_uri;', upload)
+        self.assertIn('client_max_body_size 64k;', api)
+        console = (ROOT / 'web/nginx.conf').read_text()
+        console_upload = console.split('location = /api/v1/artifacts/upload {', 1)[1].split('}', 1)[0]
+        self.assertIn('client_max_body_size 256m;', console_upload)
+        self.assertIn('proxy_pass http://unix:/run/farm-api/control.sock;', console_upload)
+        self.assertIn('client_max_body_size 64k;', console.split('location /api/ {', 1)[1].split('}', 1)[0])
 
     def test_console_api_is_unix_only_and_reauthenticates_preserved_credentials(self):
         console = yaml.safe_load(COMPOSE)['services']['console']

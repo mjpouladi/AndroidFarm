@@ -19,7 +19,7 @@ try:
     from .secureio import atomic_json, read_private_json, require_private_directory, require_private_file
     from .device_ids import canonical_device, device_index, network_plan
     from .device_profiles import (PROFILE_DIGEST_LABEL, REDROID_IMAGES, apply_profile,
-                                  load as load_device_profile)
+                                  load as load_device_profile, parse_cpus, parse_memory_bytes)
     from .proxy_store import ProxyStore
 except ImportError:
     from resources import probe, admission, local_docker
@@ -29,7 +29,7 @@ except ImportError:
     from secureio import atomic_json, read_private_json, require_private_directory, require_private_file
     from device_ids import canonical_device, device_index, network_plan
     from device_profiles import (PROFILE_DIGEST_LABEL, REDROID_IMAGES, apply_profile,
-                                  load as load_device_profile)
+                                  load as load_device_profile, parse_cpus, parse_memory_bytes)
     from proxy_store import ProxyStore
 
 DATA_ROOT = Path('/opt/farm/data/instances')
@@ -73,6 +73,12 @@ def validate_managed_proxy(device, record, secret_dir,
                            store_dir=Path('/etc/android-farm/proxies')):
     """Attest registry assignment and installed credentials inside the lifecycle lock."""
     proxy_id = record.get('proxy_id')
+    if record.get('egress') == 'direct':
+        installed = read_private_json(Path(secret_dir) / f'{device}.json',
+                                      f'{device} installed egress secret')
+        if proxy_id or installed != {'type': 'direct'}:
+            raise RuntimeError('direct egress device has an unexpected proxy configuration')
+        return
     if not proxy_id:  # Read-only compatibility for legacy file-managed proxies.
         return
     store = ProxyStore(registry, store_dir)
@@ -98,12 +104,18 @@ def assert_capacity(active, device, report=None):
 def guard(device, secret_dir, allow_upstream=True):
     """Independent host egress guard; Android privileged namespace cannot flush it."""
     secret = read_private_json(secret_dir / f'{device}.json', 'installed proxy secret')
-    ip = str(ipaddress.IPv4Address(secret['server']))
-    if not ipaddress.ip_address(ip).is_global:
-        raise RuntimeError('upstream must be a public IPv4')
-    port = int(secret['server_port'])
-    if not 1 <= port <= 65535:
-        raise RuntimeError('invalid upstream port')
+    direct = secret.get('type') == 'direct'
+    if direct:
+        if secret != {'type': 'direct'}:
+            raise RuntimeError('direct egress secret carries unexpected upstream fields')
+        ip = port = None
+    else:
+        ip = str(ipaddress.IPv4Address(secret['server']))
+        if not ipaddress.ip_address(ip).is_global:
+            raise RuntimeError('upstream must be a public IPv4')
+        port = int(secret['server_port'])
+        if not 1 <= port <= 65535:
+            raise RuntimeError('invalid upstream port')
     addresses = network_plan(device_index(device, aliases=False))
     bridge, chain = addresses['bridge'], addresses['iptables_chain']
     run('iptables', '-w', '-S', 'DOCKER-USER', capture=True)
@@ -115,7 +127,10 @@ def guard(device, secret_dir, allow_upstream=True):
     # privileged Android namespace without a deny rule.
     rules = []
     if allow_upstream:
-        rules.append(f'-A {chain} -p tcp -d {ip} --dport {port} -j RETURN')
+        # Direct host egress has no pinned upstream: the open guard passes the
+        # bridge through, and a hold or stop still turns it into a full DROP.
+        rules.append(f'-A {chain} -j RETURN' if direct else
+                     f'-A {chain} -p tcp -d {ip} --dport {port} -j RETURN')
     rules.append(f'-A {chain} -j DROP')
     payload = '\n'.join(['*filter', f'-F {chain}', *rules, 'COMMIT', ''])
     result = subprocess.run(['iptables-restore', '-w', '--noflush'], input=payload, text=True,
@@ -347,6 +362,14 @@ def validate_compose(config, device, secret_dir, expected_profile=None, access_m
         if (android.get('image') != REDROID_IMAGES[expected_profile.android_version] or
                 android.get('labels', {}).get(PROFILE_DIGEST_LABEL) != expected_profile.digest):
             raise RuntimeError('Compose drift: Android QA profile image or digest differs')
+        if expected_profile.cpus is not None:
+            try:
+                cpus = parse_cpus(android.get('cpus'))
+                memory = parse_memory_bytes(android.get('mem_limit'))
+            except ValueError:
+                raise RuntimeError('Compose drift: Android resource ceiling is missing or unreadable') from None
+            if cpus != expected_profile.cpus or memory != expected_profile.memory_mib * 1024 ** 2:
+                raise RuntimeError('Compose drift: Android resource ceiling differs from the QA profile')
     if not isinstance(command, list) or not required_properties.issubset(set(command)):
         raise RuntimeError('Compose drift: Android must keep the audited honest QA properties')
     volume_config = config.get('volumes', {}).get(volume, {})
@@ -481,13 +504,17 @@ def main():
                 raise RuntimeError('device is not allocated in the managed inventory')
             if record.get('phase') not in {*inventory.COMPLETE_PHASES, 'starting', 'identity_baselining'}:
                 raise RuntimeError('device is not in a startable managed phase; resume it only through device-provisioner')
-            expected_ip = record.get('expected_egress_ip') or record.get('egress_ip')
-            try:
-                expected_ip = str(ipaddress.IPv4Address(expected_ip))
-            except (ipaddress.AddressValueError, TypeError):
-                raise RuntimeError('device has no valid approved egress IP')
-            if not ipaddress.ip_address(expected_ip).is_global:
-                raise RuntimeError('approved egress IP must be public')
+            # Direct host egress is unpinned unless the request named an IP;
+            # proxy devices always start against their approved sticky IP.
+            direct = record.get('egress') == 'direct'
+            expected_ip = record.get('expected_egress_ip') or (None if direct else record.get('egress_ip'))
+            if expected_ip is not None or not direct:
+                try:
+                    expected_ip = str(ipaddress.IPv4Address(expected_ip))
+                except (ipaddress.AddressValueError, TypeError):
+                    raise RuntimeError('device has no valid approved egress IP')
+                if not ipaddress.ip_address(expected_ip).is_global:
+                    raise RuntimeError('approved egress IP must be public')
             validate_managed_proxy(d, record, args.secret_dir,
                                    args.proxy_registry, args.proxy_store_dir)
             validate_managed_volume(d, record)
@@ -518,9 +545,12 @@ def main():
                 override_root = require_private_directory(Path('/var/lib/android-farm/device-overrides'),
                                                           'device override directory', create=True)
                 override_path = override_root / f'{d}.json'
+                android_override = {'image': android['image'], 'command': android['command'],
+                                    'labels': {PROFILE_DIGEST_LABEL: expected_profile.digest}}
+                if expected_profile.cpus is not None:
+                    android_override.update(cpus=android['cpus'], mem_limit=android['mem_limit'])
                 atomic_json(override_path, {'services': {
-                    android_name: {'image': android['image'], 'command': android['command'],
-                                   'labels': {PROFILE_DIGEST_LABEL: expected_profile.digest}},
+                    android_name: android_override,
                     screen_name: {'environment': {
                         'SCREEN_WIDTH': screen_environment['SCREEN_WIDTH'],
                         'SCREEN_HEIGHT': screen_environment['SCREEN_HEIGHT'],
@@ -544,7 +574,8 @@ def main():
             try:
                 run(*compose, 'up', '-d', '--no-deps', '--force-recreate', f'proxy-{d}')
                 wait_proxy(d)
-                if proxy_egress_ip(d) != expected_ip:
+                first_ip = proxy_egress_ip(d)
+                if expected_ip is not None and first_ip != expected_ip:
                     raise RuntimeError('approved sticky egress IP mismatch; device returned to stopped state')
                 guard(d, args.secret_dir, allow_upstream=False)
                 run(*compose, 'up', '-d', '--no-deps', '--force-recreate', f'android-{d}')
@@ -559,12 +590,12 @@ def main():
                 guard(d, args.secret_dir, allow_upstream=True)
                 wait_proxy(d)
                 proxy_ip = proxy_egress_ip(d)
-                if proxy_ip != expected_ip:
+                if proxy_ip != (expected_ip or first_ip):
                     raise RuntimeError('approved sticky egress IP mismatch; device returned to stopped state')
                 run('docker', 'unpause', f'android-{d}', timeout=30)
                 android_paused = False
                 android_ip = android_egress_ip(d)
-                if android_ip != expected_ip:
+                if android_ip != proxy_ip:
                     raise RuntimeError('Android-shell egress IP mismatch; device returned to stopped state')
                 print(f'{d} started; identity and egress verified. Use check and browser acceptance tests.')
             except BaseException:
