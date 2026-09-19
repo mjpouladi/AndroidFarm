@@ -8,6 +8,7 @@ host control-plane role without storing an API token.
 from __future__ import annotations
 
 import argparse
+import base64
 from contextlib import contextmanager
 import getpass
 import hashlib
@@ -26,6 +27,7 @@ import urllib.error
 import urllib.request
 from urllib.parse import urlsplit
 import uuid
+import warnings
 
 ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
@@ -110,14 +112,15 @@ def save_state(state: dict, path: Path = STATE_FILE) -> None:
                "coolify_url", "server_uuid", "app_uuid", "source_commit", "release_id",
                "deployment_uuid", "deployment_commit", "deployment_env_hash", "deployment_finished",
                "deployment_requested", "deployment_before", "updated_at", "auth_user", "control_plane_release"}
-    allowed.update({"access_mode", "public_ip", "http_port"})
+    allowed.update({"access_mode", "public_ip", "http_port", "credentials_sync_pending"})
     require_private_directory(path.parent, "quickstart state directory", create=True)
     atomic_json(path, {**{key: value for key, value in state.items() if key in allowed},
                        "updated_at": int(time.time())})
 
 
 def prepare_auth(paths: install.Paths, state: dict, *,
-                 rotate: bool = False) -> tuple[str | None, Path | None]:
+                 rotate: bool = False, username: str | None = None,
+                 password: str | None = None) -> tuple[str | None, Path | None]:
     """Preserve existing credentials unless rotation was explicitly requested.
 
     Validate existing files before replacing the private plaintext password.
@@ -126,11 +129,20 @@ def prepare_auth(paths: install.Paths, state: dict, *,
     """
     require_private_directory(paths.config_dir, "farm config directory", create=True)
     password_path = paths.config_dir / "web-login-password"
+    username_path = paths.config_dir / "web-login-user"
     managed_password = password_path.exists() or password_path.is_symlink()
-    user = state.get("auth_user", "operator")
+    existing_user = (install._private_password(username_path) if username_path.exists() or username_path.is_symlink()
+                     else state.get("auth_user", "operator" if managed_password else "mjpouladi"))
+    user = username if username is not None else existing_user
+    if (not isinstance(user, str) or not install.AUTH_USER_RE.fullmatch(user) or
+            (username is not None and username.startswith("-"))):
+        raise RuntimeError("نام کاربری باید ۱ تا ۶۴ نویسهٔ مجاز انگلیسی، عدد، نقطه، خط تیره یا زیرخط باشد.")
+    if password is not None:
+        validate_admin_password(password)
     if managed_password:
         install._private_password(password_path)
-        if not rotate:
+        if not rotate and username is None and password is None:
+            state["auth_user"] = str(user)
             return str(user), password_path
     # Preserve credentials installed by the advanced/manual path.
     users = paths.traefik_dynamic_dir / "farm-users.htpasswd"
@@ -138,7 +150,7 @@ def prepare_auth(paths: install.Paths, state: dict, *,
         valid, _ = install.traefik_users_status(users)
         if not valid:
             raise RuntimeError("فایل ورود قبلی مجوز امن ندارد؛ نصب متوقف شد.")
-        if not rotate:
+        if not rotate and username is None and password is None:
             return None, None
         # Never print record contents: they contain a reusable password hash.
         if users.stat().st_size > 4096:
@@ -149,18 +161,49 @@ def prepare_auth(paths: install.Paths, state: dict, *,
             raise RuntimeError("فایل ورود قبلی معتبر نیست؛ رمز تغییر نکرد.") from exc
         if len(records) != 1:
             raise RuntimeError("تغییر خودکار رمز فقط برای فایل ورود تک‌کاربره مجاز است.")
-        existing_user, separator, hashed_password = records[0].partition(":")
-        if (not separator or not install.AUTH_USER_RE.fullmatch(existing_user) or
+        recorded_user, separator, hashed_password = records[0].partition(":")
+        if (not separator or not install.AUTH_USER_RE.fullmatch(recorded_user) or
                 not hashed_password.startswith(("$2a$", "$2b$", "$2y$"))):
             raise RuntimeError("فایل ورود تک‌کاربرهٔ bcrypt معتبر نیست؛ رمز تغییر نکرد.")
-        if managed_password and user != existing_user:
+        pending_rename = (state.get("credentials_sync_pending") is True and username == existing_user)
+        if managed_password and existing_user != recorded_user and not pending_rename:
             raise RuntimeError("نام کاربری ذخیره‌شده با فایل ورود یکسان نیست؛ رمز تغییر نکرد.")
-        user = existing_user
+        user = username if username is not None else recorded_user
     if not isinstance(user, str) or not install.AUTH_USER_RE.fullmatch(user):
         raise RuntimeError("نام کاربری ذخیره‌شده معتبر نیست؛ رمز تغییر نکرد.")
-    install._atomic_write(password_path, (secrets.token_urlsafe(30) + "\n").encode(), 0o600)
+    if password is not None or rotate or not managed_password:
+        new_password = password if password is not None else secrets.token_urlsafe(30)
+        install._atomic_write(password_path, (new_password + "\n").encode(), 0o600)
+    install._atomic_write(username_path, (user + "\n").encode(), 0o600)
     state["auth_user"] = user
     return user, password_path
+
+
+def validate_admin_password(value: str) -> None:
+    try:
+        length = len(value.encode("utf-8")) if isinstance(value, str) else 0
+    except UnicodeError:
+        length = 0
+    if (not isinstance(value, str) or not 12 <= length <= 72 or value != value.strip() or
+            any(ord(character) < 32 or ord(character) == 127 for character in value)):
+        raise ValueError("رمز مدیر باید ۱۲ تا ۷۲ بایت UTF-8 و بدون نویسهٔ کنترلی باشد.")
+
+
+def ask_admin_password() -> str:
+    # getpass otherwise falls back to echoed input when no controlling TTY is
+    # available. Never accept that fallback for an administrator credential.
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter("error", getpass.GetPassWarning)
+            value = getpass.getpass("رمز جدید مدیر سامانه و مانیتورینگ (مخفی): ")
+            validate_admin_password(value)
+            confirmation = getpass.getpass("تکرار رمز جدید (مخفی): ")
+            validate_admin_password(confirmation)
+    except getpass.GetPassWarning:
+        raise RuntimeError("ورود مخفی رمز ممکن نیست؛ فرمان را در ترمینال تعاملی SSH اجرا کنید.") from None
+    if not secrets.compare_digest(value.encode("utf-8"), confirmation.encode("utf-8")):
+        raise ValueError("تکرار رمز یکسان نیست؛ رمز تغییر نکرد.")
+    return value
 
 
 def local_addresses(runner: Callable = subprocess.run) -> tuple[set[str], set[str]]:
@@ -258,6 +301,49 @@ def web_auth_ready(url: str, *, allow_loopback: bool = False) -> bool:
         return False
 
 
+def authenticated_api_ready(url: str, user: str, password_file: Path) -> bool:
+    """Verify the actual API, retaining secrets only in memory and TLS/loopback."""
+    parsed = urlsplit(url)
+    if (parsed.username or parsed.password or parsed.query or parsed.fragment or not parsed.hostname or
+            not (parsed.scheme == "https" or (parsed.scheme == "http" and parsed.hostname == "127.0.0.1"))):
+        return False
+    try:
+        password = install._private_password(password_file)
+        authorization = base64.b64encode(f"{user}:{password}".encode("utf-8")).decode("ascii")
+        request = urllib.request.Request(url.rstrip("/") + "/api/v1/health",
+                                         headers={"Authorization": "Basic " + authorization})
+        opener = urllib.request.build_opener(urllib.request.ProxyHandler({}), NoRedirect)
+        with opener.open(request, timeout=10) as response:
+            body = response.read(4097)
+            return response.status == 200 and len(body) <= 4096 and json.loads(body).get("status") == "ok"
+    except (OSError, RuntimeError, ValueError, TypeError, AttributeError, urllib.error.URLError):
+        return False
+
+
+def diagnose(*, include_journal: bool = True) -> dict:
+    from installer.control_plane import diagnose_control_plane
+    result = diagnose_control_plane(include_journal=include_journal)
+    result["core"] = core_runtime_status()
+    result["ready"] = bool(result["ready"] and all(result["core"].values()))
+    return result
+
+
+def repair_control_plane(*, state_path: Path = install.Paths.state_dir / "install-state.json",
+                         control_installer: Callable | None = None) -> dict:
+    """Reconcile existing host services without deploying or changing devices."""
+    from installer.control_plane import install_control_plane
+    state = read_private_json(state_path, "installer state")
+    release_id = state.get("release_id")
+    if (state.get("status") != "ready" or not isinstance(release_id, str) or
+            not re.fullmatch(r"[0-9a-f]{16}", release_id)):
+        raise RuntimeError("نصب میزبان هنوز نهایی نشده؛ همان فرمان install.sh را بدون گزینهٔ تعمیر اجرا کنید.")
+    release = Path(str(state.get("release_dir", "")))
+    if release.name != release_id or install.anchor_release_from_labels(install.anchor_labels()) != release_id:
+        raise RuntimeError("نسخهٔ میزبان و Coolify همسان نیست؛ نصب کامل را برای ادامهٔ ارتقا اجرا کنید.")
+    (control_installer or install_control_plane)(release)
+    return diagnose()
+
+
 def core_runtime_status(runner: Callable = subprocess.run) -> dict[str, bool]:
     status = {name: False for name in CORE_CONTAINERS}
     try:
@@ -314,7 +400,8 @@ def resume_deployments(client, state: dict, state_path: Path, *, retry_unknown: 
 
 def run_setup(settings: install.Settings, client, state: dict, *, state_path: Path = STATE_FILE,
               commit: str, server_uuid: str, requested_app: str | None = None,
-              control_installer: Callable | None = None, retry_deploy: bool = False) -> dict:
+              control_installer: Callable | None = None, retry_deploy: bool = False,
+              credential_sync: Callable | None = None) -> dict:
     if control_installer is None:
         from installer.control_plane import install_control_plane
         control_installer = install_control_plane
@@ -375,6 +462,10 @@ def run_setup(settings: install.Settings, client, state: dict, *, state_path: Pa
     control_installer(Path(finalized["release_dir"]))
     state.update(phase="control_plane_ready", control_plane_release=finalized["release_id"])
     save_state(state, state_path)
+    if credential_sync is not None:
+        credential_sync()
+        state["credentials_sync_pending"] = False
+        save_state(state, state_path)
     say("۵/۵ — بررسی نهایی میزبان و احراز هویت کنسول عملیاتی…")
     health = install.doctor(settings)
     core = core_runtime_status()
@@ -387,6 +478,11 @@ def run_setup(settings: install.Settings, client, state: dict, *, state_path: Pa
             for name, url in urls.items()}
     else:
         web = {name: web_auth_ready(url) for name, url in urls.items()}
+    if settings.auth_user and settings.auth_password_file:
+        api_origin = (f"http://127.0.0.1:{settings.http_port}" if settings.access_mode == "ip"
+                      else urls["console"])
+        web["api"] = authenticated_api_ready(api_origin, settings.auth_user, settings.auth_password_file)
+        urls["api"] = urls["console"].rstrip("/") + "/api/v1/health"
     ready = health["status"] == "ready" and all(web.values()) and all(core.values())
     state["phase"] = "ready" if ready else "needs_attention"
     save_state(state, state_path)
@@ -409,6 +505,14 @@ def build_parser() -> argparse.ArgumentParser:
                         help="پس از بررسی دستی نبود Deploy در Coolify، درخواست نامعلوم قبلی را دوباره ارسال کن")
     parser.add_argument("--rotate-web-password", action="store_true",
                         help="رمز تصادفی تازه برای همان کاربر وب بساز و هنگام استقرار اعمال کن")
+    parser.add_argument("--admin-user", help="نام مدیر کنسول و مانیتورینگ؛ نصب جدید mjpouladi، نصب موجود بدون تغییر")
+    parser.add_argument("--set-admin-password", action="store_true",
+                        help="رمز مدیر کنسول و مانیتورینگ را مخفی و با تأیید دوباره دریافت کن")
+    maintenance = parser.add_mutually_exclusive_group()
+    maintenance.add_argument("--diagnose", action="store_true",
+                             help="گزارش امن و فقط خواندنی سرویس‌ها و اتصال API، بدون توکن Coolify")
+    maintenance.add_argument("--repair-control-plane", action="store_true",
+                             help="بازیابی سرویس‌های مشترک همان نسخهٔ نصب‌شده، بدون Deploy یا روشن‌کردن دستگاه‌ها")
     return parser
 
 
@@ -451,6 +555,17 @@ def main(argv=None) -> int:
     args = build_parser().parse_args(argv)
     try:
         require_host()
+        if (args.diagnose or args.repair_control_plane) and (args.admin_user or args.set_admin_password or args.rotate_web_password):
+            raise ValueError("تغییر مشخصات ورود را با نصب عادی اجرا کنید؛ گزینه‌های تشخیص و تعمیر رمز را تغییر نمی‌دهند.")
+        if args.diagnose:
+            result = diagnose()
+            say(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
+            return 0 if result["ready"] else 2
+        if args.repair_control_plane:
+            with setup_lock():
+                result = repair_control_plane()
+            say(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
+            return 0 if result["ready"] else 2
         from installer.coolify_api import CoolifyClient
         with setup_lock():
             state = load_state()
@@ -470,7 +585,16 @@ def main(argv=None) -> int:
             state.update(**access, coolify_url=url, server_uuid=server)
             save_state(state)
             paths = install.Paths()
-            user, password = prepare_auth(paths, state, rotate=args.rotate_web_password)
+            new_install = not (paths.traefik_dynamic_dir / "farm-users.htpasswd").exists()
+            selected_password = ask_admin_password() if args.set_admin_password else None
+            auth_options = {"rotate": args.rotate_web_password}
+            if args.admin_user is not None:
+                auth_options["username"] = args.admin_user
+            if selected_password is not None:
+                auth_options["password"] = selected_password
+            user, password = prepare_auth(paths, state, **auth_options)
+            if new_install or args.admin_user is not None or args.set_admin_password:
+                state["credentials_sync_pending"] = True
             save_state(state)
             settings = install.Settings(ROOT, access["farm_domain"], access["console_domain"],
                                         "auto", "auto", paths, auth_user=user, auth_password_file=password,
@@ -483,8 +607,17 @@ def main(argv=None) -> int:
                 domains = list(dict.fromkeys([settings.farm_domain, settings.console_domain,
                                              f"metrics.{settings.farm_domain}"]))
                 say("DNS این نام‌ها باید به همین سرور اشاره کند: " + "، ".join(domains))
+            def synchronize_credentials():
+                from services.api.credentials import CredentialManager
+                if not user or not password:
+                    raise RuntimeError("برای هماهنگ‌سازی حساب مدیر، نام و فایل خصوصی رمز لازم است.")
+                manager = CredentialManager(paths.traefik_dynamic_dir / "farm-users.htpasswd",
+                                            paths.config_dir, paths.state_dir)
+                manager.rotate("platform", user, install._private_password(password))
+
             outcome = run_setup(settings, client, state, commit=commit, server_uuid=server,
-                                requested_app=args.app_uuid, retry_deploy=args.retry_deploy)
+                                requested_app=args.app_uuid, retry_deploy=args.retry_deploy,
+                                credential_sync=synchronize_credentials if state.get("credentials_sync_pending") else None)
             say("نصب تکمیل شد." if outcome["ready"] else "اجزای نصب آماده‌اند؛ موارد زیر هنوز نیاز به بررسی دارند:")
             for check in outcome["doctor"]["checks"]:
                 if check["status"] != "pass":
@@ -513,6 +646,8 @@ def main(argv=None) -> int:
         # API client errors contain only sanitized status/context, never bodies.
         say(f"نصب کامل نشد: {exc}")
         say("وضعیت امن حفظ شده است؛ پس از رفع مورد، همان فرمان نصب را دوباره اجرا کنید.")
+        say("گزارش امن، بدون توکن: sudo python3 /opt/android-farm/source/installer/quickstart.py --diagnose")
+        say("ادامهٔ نصب/ارتقا: sudo bash /opt/android-farm/source/install.sh")
         return 1
     except KeyboardInterrupt:
         say("نصب متوقف شد. داده‌ها حفظ شده‌اند؛ با همان فرمان ادامه دهید.")

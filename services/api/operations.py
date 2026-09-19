@@ -22,6 +22,8 @@ from ops import app_installer, inventory, proxy_store, resources
 from ops.device_ids import canonical_device
 from ops.secureio import (atomic_json, read_private_json, require_private_directory,
                           require_private_file, require_trusted_release_file)
+from .components import Components, ComponentError
+from .authstate import auth_revision
 
 
 ROOT = Path(__file__).resolve().parents[2]
@@ -140,10 +142,21 @@ def bounded_process(argv, *, cwd, timeout=3600):
 
 class Operations:
     def __init__(self, config_path=Path('/etc/android-farm/provisioner.json'), *,
-                 catalog_path=CATALOG, runner=None):
+                 catalog_path=CATALOG, runner=None, auth_file=Path('/data/coolify/proxy/dynamic/farm-users.htpasswd'),
+                 credential_manager=None, components=None):
         self.config_path = Path(config_path)
         self.catalog_path = Path(catalog_path)
         self.runner = runner or bounded_process
+        self.auth_file = Path(auth_file)
+        self.credential_manager = credential_manager
+        self.components = components or Components()
+
+    def _credentials(self, config):
+        if self.credential_manager is not None:
+            return self.credential_manager
+        from .credentials import CredentialManager
+        return CredentialManager(self.auth_file, config_dir=self.config_path.parent,
+                                 state_dir=config.state_dir)
 
     def _config(self):
         return provisioner.load_config(self.config_path)
@@ -201,10 +214,11 @@ class Operations:
         except (OSError, RuntimeError):
             return False
 
-    def validate_job(self, payload):
-        _fields(payload, {'action'}, {'device', 'params'})
+    def validate_job(self, payload, *, trusted=False):
+        _fields(payload, {'action'}, {'device', 'params', 'auth_revision'} if trusted else {'device', 'params'})
         action = payload['action']
-        if not isinstance(action, str) or action not in LIFECYCLE | PROXY_ACTIONS | {'provision', 'proxy-add'}:
+        if not isinstance(action, str) or action not in LIFECYCLE | PROXY_ACTIONS | {
+                'provision', 'proxy-add', 'credential-rotate', 'proxy-credentials', 'core-activate'}:
             raise ValueError('unsupported action')
         params = payload.get('params', {})
         if not isinstance(params, dict):
@@ -223,7 +237,34 @@ class Operations:
             return {'action': action, 'device': device, 'params': dict(params)}
         if 'device' in payload:
             raise ValueError('this action does not accept a device field')
-        if action == 'provision':
+        if action == 'core-activate':
+            _fields(params, set())
+        elif action == 'credential-rotate':
+            fields = {'target', 'username', 'password'}
+            _fields(params, fields if trusted else fields | {'current_password'},
+                    {'current_password'} if trusted else set())
+            if params['target'] not in ('web', 'grafana', 'platform'):
+                raise ValueError('مقصد تغییر رمز معتبر نیست.')
+            if not isinstance(params['username'], str) or not re.fullmatch(r'[A-Za-z0-9._][A-Za-z0-9._-]{0,63}', params['username']):
+                raise ValueError('نام کاربری باید ۱ تا ۶۴ کاراکتر مجاز باشد.')
+            _text(params['password'], 'password', 72)
+            if not 12 <= len(params['password'].encode('utf-8')) <= 72:
+                raise ValueError('رمز جدید باید بین ۱۲ و ۷۲ بایت UTF-8 باشد.')
+            if params['password'] != params['password'].strip():
+                raise ValueError('ابتدا یا انتهای رمز نباید فاصله داشته باشد.')
+            if 'current_password' in params:
+                _text(params['current_password'], 'current password', 4096)
+        elif action == 'proxy-credentials':
+            fields = {'id', 'password'}
+            _fields(params, fields if trusted else fields | {'current_password'},
+                    {'current_password'} if trusted else set())
+            self._store(config).show(_identifier(params['id']))
+            _text(params['password'], 'proxy password', 4096)
+            if params['password'] != params['password'].strip():
+                raise ValueError('ابتدا یا انتهای رمز نباید فاصله داشته باشد.')
+            if 'current_password' in params:
+                _text(params['current_password'], 'current password', 4096)
+        elif action == 'provision':
             _fields(params, {'phone', 'owner_authorized', 'proxy_id', 'artifact_id'})
             if (not isinstance(params['phone'], str) or
                     not re.fullmatch(r'\+[1-9][0-9]{9,14}', params['phone']) or
@@ -279,9 +320,42 @@ class Operations:
             raise OperationError('operation could not complete; refresh state and check the host configuration and proxy health') from None
 
     def _execute(self, job):
-        job = self.validate_job(job)  # Recheck queued identifiers against current state.
+        generation = job.get('auth_revision')
+        # Current-password reauthentication happened in the HTTP boundary and
+        # was discarded before queue persistence. Revalidate every other field.
+        job = self.validate_job(job, trusted=True)
         action, params = job['action'], job['params']
         config = self._config()
+        if action in {'credential-rotate', 'proxy-credentials'} and generation != auth_revision(self.auth_file):
+            raise OperationError('اطلاعات ورود فارم پس از ثبت درخواست تغییر کرده است؛ با حساب جدید دوباره درخواست دهید.')
+        if action == 'core-activate':
+            with provisioner.host_lifecycle_lock():
+                try:
+                    return dict(self.components.activate(), action=action)
+                except ComponentError as exc:
+                    raise OperationError(str(exc)) from None
+        if action == 'credential-rotate':
+            from .credentials import CredentialsError
+            try:
+                return dict(self._credentials(config).rotate(params['target'], params['username'], params['password']),
+                            action=action)
+            except CredentialsError as exc:
+                raise OperationError(str(exc)) from None
+        if action == 'proxy-credentials':
+            # Use the existing guarded rotation with stop, pinned-IP validation,
+            # two-copy synchronization and rollback. Never change session identity.
+            directory = require_private_directory(config.state_dir / 'web-requests',
+                                                   'web request directory', create=True)
+            path = directory / (uuid.uuid4().hex + '.password')
+            descriptor = os.open(path, os.O_CREAT | os.O_EXCL | os.O_WRONLY, 0o600)
+            try:
+                with os.fdopen(descriptor, 'w', encoding='utf-8') as stream:
+                    stream.write(params['password'] + '\n')
+                result = provisioner.rotate_managed_proxy_password(
+                    self._store(config), params['id'], path, config)
+                return {'action': action, 'completed': True, 'proxy': result}
+            finally:
+                path.unlink(missing_ok=True)
         if action in LIFECYCLE:
             device = job['device']
             flags = ('--json',) if action == 'check-ip' else ('--review-completed',) if action == 'release' else ()
@@ -369,6 +443,7 @@ class Operations:
     def snapshot(self):
         result = {'collected_at': int(time.time()), 'resources': None, 'devices': [], 'proxies': [],
                   'backups': [], 'artifacts': [], 'errors': [], 'settings': {}}
+        result['components'] = self.components.snapshot()
 
         def failure(component, message):
             result['errors'].append({'component': component, 'message': message})
@@ -379,6 +454,14 @@ class Operations:
             failure('configuration', 'private host configuration is missing or invalid')
             return result
         result['settings'] = {'console_url': config.console_url, 'access_mode': config.access_mode}
+        result['settings']['central_activation_available'] = True
+        try:
+            result['settings']['security'] = dict(self._credentials(config).summary(), proxy_credentials_available=True)
+        except (OSError, RuntimeError, ValueError):
+            result['settings']['security'] = {'web_username': None, 'grafana_username': None,
+                                              'credential_rotation_available': False,
+                                              'proxy_credentials_available': True}
+            failure('credentials', 'تنظیمات خصوصی حساب مدیریت در دسترس نیست.')
         try:
             result['resources'] = resources.probe()
         except (OSError, RuntimeError, subprocess.SubprocessError, ValueError, KeyError):

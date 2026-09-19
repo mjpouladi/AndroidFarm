@@ -10,10 +10,10 @@
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mjpouladi/AndroidFarm/main/install.sh -o install-android-farm.sh
-sudo bash install-android-farm.sh --domain commex-box.com
+sudo bash install-android-farm.sh --domain commex-box.com --admin-user mjpouladi --set-admin-password
 ```
 
-4. پس از پایان پنج مرحله، **[پلتفرم](https://commex-box.com)** و **[مانیتورینگ](https://metrics.commex-box.com)** را باز کنید. کاربر وب `operator` است؛ رمز را فقط در ترمینال خصوصی با `sudo cat /etc/android-farm/web-login-password` ببینید و به گفتگو یا لاگ اشتراکی نفرستید. `sudo device-provisioner status` وضعیت واقعی را نشان می‌دهد. صفحهٔ دستگاه پس از تخصیص/روشن‌شدن در `https://commex-box.com/d/num01/` است.
+4. رمز دلخواه را در دو ورودی مخفی راه‌انداز وارد کنید؛ فرمان بالا ورود فارم و مدیر داخلی Grafana را با کاربر `mjpouladi` هماهنگ می‌کند. پس از پایان پنج مرحله، **[پلتفرم](https://commex-box.com)** و **[مانیتورینگ](https://metrics.commex-box.com)** را باز کنید. `sudo device-provisioner status` وضعیت واقعی را نشان می‌دهد. صفحهٔ دستگاه پس از تخصیص/روشن‌شدن در `https://commex-box.com/d/num01/` است. نصب قبلی بدون گزینه‌های تغییر حساب، اطلاعات ورود قبلی خود را حفظ می‌کند.
 
 نصب تازه کنسول را روی خود دامنه و API Coolify را روی `http://127.0.0.1:8000` تنظیم می‌کند. اگر هر مرحله مبهم بود، **بخش ۵ همین سند** تمام مراحل DNS، توکن، نصب، آزمون و نخستین دستگاه را با جزئیات دارد. کنسول به API عملیاتی میزبان وصل است؛ همان عملیات از CLI نیز قابل انجام است. در نصب تازه فهرست دستگاه و برنامهٔ تأییدشده خالی است؛ آماده‌سازی برنامه در بخش ۹ آمده است.
 
@@ -34,6 +34,8 @@ sudo bash install-android-farm.sh --domain commex-box.com
 | Prometheus/Grafana | پیکربندی آماده | CPU، uptime، سلامت ADB، latency و سلامت proxy و تعداد recovery؛ باید روی سرور مقصد scrape و dashboard تأیید شود |
 | Ansible | پیکربندی آماده | API وب، Redis محلی، worker، timer سلامت، پروفایل‌های دستگاه و تشخیص drift؛ اجرا به‌صورت `serial: 1` و بدون حذف data |
 | کنسول وب | متصل به کنترل‌پلین میزبان | وضعیت و منابع واقعی، پراکسی، دستگاه، نصب APK تأییدشده و درخواست‌های پایدار؛ خطای backend آشکار است و با دادهٔ نمونه جایگزین نمی‌شود |
+| مدیریت اطلاعات ورود | پیاده‌سازی و آزمون واحد | تغییر حساب وب و مدیر واقعی Grafana، جداگانه یا مشترک، با تأیید رمز فعلی و بازگردانی در خطا؛ رمز اتصال پراکسی بدون تغییر هویت اتصال |
+| مدیریت سرویس‌های مرکزی | پیاده‌سازی و آزمون واحد | وضعیت systemd و کانتینرهای مدیریت‌شده، راه‌اندازی اجزای نصب‌شده، تشخیص و تعمیر کنترل‌پلین؛ دستگاه‌ها خودکار روشن نمی‌شوند |
 | پذیرش production | نیازمند اجرای Ubuntu | بوت Redroid، Binder، proxy واقعی، HTTP/Nginx یا TLS/Traefik، noVNC/WebSocket، kill-switch و restore باید روی میزبان واقعی با pilot تأیید شوند |
 
 وجود تست واحد یا parse شدن Compose جای آزمون پذیرش روی سرور مقصد را نمی‌گیرد.
@@ -197,7 +199,7 @@ Ubuntu 22.04/24.04 و Coolify باید از قبل نصب و پنل قابل و�
 
 ```bash
 curl -fsSL https://raw.githubusercontent.com/mjpouladi/AndroidFarm/main/install.sh -o install-android-farm.sh
-sudo bash install-android-farm.sh --domain commex-box.com
+sudo bash install-android-farm.sh --domain commex-box.com --admin-user mjpouladi --set-admin-password
 ```
 
 در نصب تازه، کنسول به‌صورت پیش‌فرض روی همان دامنه قرار می‌گیرد و API از `http://127.0.0.1:8000` استفاده می‌کند. بدون گزینهٔ `--domain` نیز راه‌انداز دامنه را می‌پرسد. نصب قبلی تنظیم‌های ذخیره‌شدهٔ خودش را حفظ می‌کند؛ برای تبدیل آن به این طرح، فرمان صریح انتهای همین بخش با `--console-domain commex-box.com` را اجرا کنید. پیش از تغییر نصب موجود، دستگاه‌های روشن را با `device-provisioner down --id numXX` خاموش کنید.
@@ -209,6 +211,7 @@ sudo bash install-android-farm.sh --domain commex-box.com
 | دامنه، اگر در فرمان نداده‌اید | `commex-box.com` |
 | آدرس Coolify، اگر در فرمان نداده‌اید | روی همین سرور، `http://127.0.0.1:8000`؛ HTTPS پنل فقط وقتی API آن از مبدأ شما قابل دسترس باشد |
 | API token | کل توکن گام قبل؛ ورودی آن پنهان است |
+| رمز جدید مدیریت و تکرار آن | رمز دلخواه با ۱۲ تا ۷۲ بایت UTF-8؛ ورودی پنهان، بدون آرگومان رمز در فرمان |
 | Server UUID، فقط اگر تشخیص خودکار مبهم باشد | UUID همین میزبان از صفحهٔ Servers در Coolify |
 
 توکن HTTP فقط برای آدرس loopback محلی پذیرفته می‌شود؛ URL راه‌دور Coolify باید HTTPS معتبر داشته باشد. لازم نیست فایل ENV بسازید یا از قبل App جدیدی در Coolify ایجاد کنید.
@@ -219,7 +222,7 @@ sudo bash install-android-farm.sh --domain commex-box.com
 2. `۲/۵`: ساخت یا بازیابی Project `android-farm` و Application `farm-core`؛
 3. `۳/۵`: انتقال ENV و Deploy از commit دقیق source؛ ساخت نخستین imageها ممکن است چند دقیقه طول بکشد؛
 4. `۴/۵`: فعال‌سازی API وب، CLI، Redis محلی، Worker و timer سلامت؛
-5. `۵/۵`: doctor، وضعیت سرویس‌ها، آمادگی socket خصوصی API با پاسخ 401، TLS و پاسخ 401 وب بدون credential.
+5. `۵/۵`: doctor، وضعیت سرویس‌ها، آمادگی socket خصوصی و مسیر داخلی کنسول با پاسخ 401، TLS، پاسخ 401 وب بدون credential و سلامت واقعی API با ورود معتبر.
 
 source موجود با تغییر محلی بازنویسی نمی‌شود؛ راه‌انداز در تعارض متوقف می‌شود. اگر Redis متعلق به سرویس دیگری روی میزبان باشد نیز آن را تصاحب نمی‌کند؛ برای آن نصب سفارشی از بخش ۱۴ استفاده کنید.
 
@@ -244,7 +247,7 @@ source موجود با تغییر محلی بازنویسی نمی‌شود؛ ر
 
 ### گام ۶ — ورود و آزمون اولیهٔ HTTPS
 
-خروجی راه‌انداز لینک‌ها و کاربر `operator` را نشان می‌دهد و **رمز را خودکار چاپ نمی‌کند**. رمز وب در `/etc/android-farm/web-login-password` با دسترسی خصوصی نگه داشته می‌شود. رمز اولیهٔ داخلی Grafana جداست و در `/etc/android-farm/monitoring/grafana-admin-password` قرار دارد. فقط روی terminal خصوصی خود، در صورت نیاز آن‌ها را بخوانید؛ محتوا را در گفتگو، تیکت یا log اشتراکی قرار ندهید:
+خروجی راه‌انداز لینک‌ها و نام کاربری را نشان می‌دهد و **رمز را خودکار چاپ نمی‌کند**. با فرمان این راهنما کاربر وب و مدیر Grafana برابر `mjpouladi` و رمز هر دو همان ورودی مخفی شماست. نصب قدیمی بدون گزینه‌های تغییر حساب، حساب قبلی را نگه می‌دارد. رمز وب در `/etc/android-farm/web-login-password` و رمز Grafana در `/etc/android-farm/monitoring/grafana-admin-password` با دسترسی خصوصی نگه داشته می‌شوند؛ نام‌های کاربری در فایل‌های مجاور `web-login-user` و `grafana-admin-user` هستند. فقط روی terminal خصوصی خود، در صورت نیاز آن‌ها را بخوانید؛ محتوا را در گفتگو، تیکت یا log اشتراکی قرار ندهید:
 
 ```bash
 sudo cat /etc/android-farm/web-login-password
@@ -253,16 +256,16 @@ sudo cat /etc/android-farm/monitoring/grafana-admin-password
 
 | مقصد | نشانی شما | ورود |
 |---|---|---|
-| کنسول عملیاتی | `https://commex-box.com/` | Basic Auth با `operator` |
-| Grafana | `https://metrics.commex-box.com/` | ابتدا Basic Auth، سپس `admin` و رمز اولیهٔ Grafana |
-| صفحهٔ دستگاه، پس از ساخت و روشن‌کردن | `https://commex-box.com/d/num01/` | Basic Auth با `operator` |
+| کنسول عملیاتی | `https://commex-box.com/` | Basic Auth با `mjpouladi` |
+| Grafana | `https://metrics.commex-box.com/` | ابتدا Basic Auth، سپس ورود داخلی Grafana با همان حساب تنظیم‌شده |
+| صفحهٔ دستگاه، پس از ساخت و روشن‌کردن | `https://commex-box.com/d/num01/` | Basic Auth با `mjpouladi` |
 
 از رایانهٔ اپراتور یا ترمینال سرور، TLS و محافظت دو سرویس آماده را بررسی کنید:
 
 ```bash
 curl -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
 curl -sS -o /dev/null -w '%{http_code}\n' https://metrics.commex-box.com/
-curl -u operator -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
+curl -u mjpouladi -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
 ```
 
 دو فرمان اول باید `401` بدهند؛ فرمان سوم رمز وب را تعاملی می‌پرسد و باید `200` بدهد. از `-k` برای نادیده‌گرفتن خطای گواهی استفاده نکنید؛ خطای TLS را با DNS، 80/443 و log proxy رفع کنید. در مرورگر گواهی معتبر، بازشدن کنسول و login داخلی Grafana را هم تأیید کنید.
@@ -273,7 +276,7 @@ curl -u operator -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
 
 ```bash
 sudo systemctl status android-farm-api.service --no-pager
-curl -u operator -fsS https://commex-box.com/api/v1/health
+curl -u mjpouladi -fsS https://commex-box.com/api/v1/health
 ```
 
 پاسخ API باید `{"status":"ok"}` باشد. مسیر `/d/num01/` تا پیش از ساخت و روشن‌شدن دستگاه می‌تواند 404 بدهد؛ صفحه و WebSocket دستگاه را پس از گام بعد آزمایش کنید.
@@ -315,6 +318,14 @@ sudo bash /opt/android-farm/source/install.sh
 ```
 
 state در `/var/lib/android-farm/quickstart.json` با mode `0600` است. برنامه با marker نصب شناخته می‌شود، برنامهٔ تکراری ساخته نمی‌شود و Deploy ناقص با UUID خودش پیگیری می‌شود. source جدید Deploy تازه می‌خواهد؛ پیش از ارتقا تمام دستگاه‌های فعال را متوقف کنید. اگر نصب قبلی با مسیر دستی ساخته شده است، UUID همان Application را با `--app-uuid YOUR_EXISTING_APPLICATION_UUID` بدهید؛ راه‌انداز مالکیت و تنظیم‌های آن را بررسی می‌کند.
+
+برای ارتقا همراه با تنظیم حساب وب و مدیر Grafana، این فرمان را اجرا و رمز جدید را فقط در دو ورودی مخفی وارد کنید:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com --admin-user mjpouladi --set-admin-password
+```
+
+`--admin-user` بدون گزینهٔ رمز، رمز خصوصی فعلی را حفظ می‌کند. `--set-admin-password` رمز را از آرگومان، ENV یا فایل Git نمی‌گیرد. نصب‌کننده فقط پس از آماده‌شدن سرویس‌ها، تغییر حساب Grafana را در پایگاه دادهٔ واقعی آن اعمال و بررسی می‌کند. رمز یا نام کاربری ENV به‌تنهایی حساب موجود Grafana را تغییر نمی‌دهد. اگر تنظیم حساب کامل نشود، نصب موفق گزارش نمی‌شود و همان فرمان قابل ادامه است.
 
 برای تبدیل نصب IP موجود به دامنه، ابتدا DNS و مراحل ۱ تا ۳ را کامل کنید و سپس:
 
@@ -402,6 +413,7 @@ sudo python3 installer/install.py apply \
 ```dotenv
 GRAFANA_DOMAIN=metrics.commex-box.com
 GRAFANA_ADMIN_USER=admin
+GRAFANA_USER_FILE=/etc/android-farm/monitoring/grafana-admin-user
 GRAFANA_PASSWORD_FILE=/etc/android-farm/monitoring/grafana-admin-password
 PROMETHEUS_RETENTION=30d
 ```
@@ -442,6 +454,20 @@ sudo python3 installer/install.py doctor \
 در مرحلهٔ دوم، installer وجود `farm-anchor` و برابری release را می‌سنجد، `/etc/android-farm/provisioner.json` و `/etc/android-farm/compose.env` را نهایی و wrapper `/usr/local/sbin/device-provisioner` را فعال می‌کند. وضعیت مطلوب doctor برابر `ready` است؛ `blocked` را پیش از pilot رفع کنید و `action_required` را آگاهانه بررسی کنید.
 
 ## ۶. مسیرهای وب، HTTPS و احراز هویت
+
+### مدیریت مرکزی رمزها و سرویس‌ها
+
+پس از اتصال API، در **تنظیمات → مدیریت مرکزی اطلاعات ورود**، حساب فعلی فارم و Grafana را می‌بینید؛ رمز ذخیره‌شده نمایش داده نمی‌شود. برای تغییر، محدودهٔ «فارم و Grafana با یک حساب»، «فقط ورود فارم» یا «فقط ورود Grafana» را انتخاب کنید، نام کاربری و رمز جدید را وارد و با رمز فعلی ورود فارم تأیید کنید. نتیجه را در صف عملیات پیگیری کنید؛ ثبت درخواست به معنی تمام‌شدن تغییر نیست. پس از تغییر ورود فارم، مرورگر باید با حساب جدید احراز هویت کند.
+
+Backend فایل bcrypt و میان‌افزار Traefik را به‌روز می‌کند، نسخهٔ خصوصی مورد استفادهٔ درگاه را همگام می‌کند و برای Grafana خود حساب موجود را تغییر می‌دهد. در خطای میانی، بازگردانی حساب‌ها و فایل‌ها امتحان می‌شود؛ اگر تأیید بازگردانی ممکن نباشد، عملیات ناموفق می‌ماند و اطلاعات بازیابی فقط در فایل خصوصی `/etc/android-farm/credential-recovery.json` روی میزبان ذخیره می‌شود. آن فایل را در گزارش خطا نفرستید.
+
+در بخش **رمز اتصال پراکسی**، رمز معتبر ارائه‌دهنده را برای اتصال موجود ثبت کنید. نام کاربریِ حاوی شناسهٔ sticky، endpoint و IP مورد انتظار تغییر نمی‌کنند. دستگاه تخصیص‌یافته برای اعمال و آزمون اتصال متوقف می‌شود و پس از موفقیت خاموش می‌ماند؛ روشن‌کردن دوباره با اپراتور است. این فرم رمز حساب شما را نزد فروشندهٔ پراکسی تغییر نمی‌دهد.
+
+بخش **وضعیت سرویس‌ها و ابزارها** وضعیت واقعی API، Redis، Worker، timer سلامت و کانتینرهای مرکزی را گزارش می‌کند. دکمهٔ «راه‌اندازی سرویس‌های مرکزی» فقط اجزای نصب‌شده و متعلق به همین فارم را start می‌کند. سرویس یا کانتینر غایب باید با راه‌انداز تعمیر شود. این دکمه دستگاه جدید نمی‌سازد، همهٔ Androidها را روشن نمی‌کند و توقف‌های حفاظتی را برنمی‌دارد.
+
+رمز SSH/root و حساب Coolify در سامانهٔ خودشان مدیریت می‌شوند. Redis از رمز ماشینی تولیدشدهٔ مستقل استفاده می‌کند. رابط وب به shell دلخواه یا Docker socket عمومی دسترسی نمی‌دهد. API فقط پوشهٔ احراز هویت اعتبارسنجی‌شدهٔ فارم را علاوه بر مسیرهای خصوصی لازم می‌تواند بنویسد؛ محدودیت‌های `ProtectHome` و `ProtectSystem` حفظ می‌شوند.
+
+### مسیرها و لایه‌های احراز هویت
 
 در این حالت `FARM_HTTP_BIND=127.0.0.1` و `FARM_TRAEFIK_ENABLED=true` است؛ Grafana به ریشهٔ دامنهٔ خودش برمی‌گردد و `GRAFANA_SERVE_FROM_SUB_PATH=false` می‌شود.
 
@@ -1070,7 +1096,7 @@ ss -ltnp | grep ':5551'
 | gateway: `mkdir() "/var/cache/nginx/fastcgi_temp" failed (30: Read-only file system)` | مسیر موقت Nginx در نسخهٔ قبلی خارج از tmpfs است؛ بخش «توقف درگاه به‌دلیل مسیر موقت Nginx» را ببینید |
 | پاسخ دامنه `403` با `error code: 1010` | سیاست Browser Integrity Check لبهٔ Cloudflare؛ بخش «خطای 1010 در Cloudflare» را ببینید |
 | `doctor: blocked` | remediation همان check را اجرا کنید؛ معمولاً Binder، release mismatch، auth file یا local Docker context است |
-| کنسول باز می‌شود ولی API خطا دارد | `sudo systemctl status android-farm-api.service --no-pager` و `sudo journalctl -u android-farm-api.service -n 100 --no-pager`؛ سپس `/api/v1/health` را با credential وب بررسی کنید |
+| کنسول `502` می‌دهد ولی socket میزبان پاسخ `401` دارد | بخش «تشخیص و تعمیر اتصال API»؛ در نسخهٔ قبلی tmpfs روی `/var/run` مسیر socket را در کنسول می‌پوشاند؛ ارتقای کامل لازم است |
 | API پشت HTTPS دائماً 401 می‌دهد | label کنسول باید `farm-console-auth@file` باشد تا Authorization برای تأیید مستقل API حفظ شود؛ همان راه‌انداز را برای هماهنگ‌کردن middleware و Compose دوباره اجرا کنید |
 | API برای عملیات 403 می‌دهد | صفحه را تازه‌سازی کنید؛ origin باید دقیقاً با دامنه/پورت نصب‌شده در `api.json` برابر باشد. برای تغییر آدرس، راه‌انداز را با گزینهٔ دامنه/IP صحیح اجرا کنید |
 | فهرست برنامهٔ پنل خالی است | کاتالوگ `/etc/android-farm/apps.json`، فایل APK خصوصی خارج از `/root` و policy signer را طبق بخش ۹ آماده کنید |
@@ -1084,6 +1110,48 @@ ss -ltnp | grep ':5551'
 | metricهای سلامت stale هستند | `android-farm-health.timer`، permission مسیر textfile و mount node-exporter را بررسی کنید |
 | worker retry می‌کند | journal، result task، lock device و DLQ را بررسی کنید؛ task دلخواه shell به صف نفرستید |
 | profile drift | device را stop، فایل profile و digest را بازبینی و start کنترل‌شده اجرا کنید |
+
+### تشخیص و تعمیر اتصال API
+
+«active» بودن سرویس systemd فقط اجرای پردازش را ثابت می‌کند. برای گزارش محدود و بدون نمایش ENV یا رمزها، روی میزبان اجرا کنید:
+
+```bash
+sudo python3 /opt/android-farm/source/installer/quickstart.py --diagnose
+```
+
+این حالت توکن Coolify نمی‌خواهد و تغییری ایجاد نمی‌کند؛ وضعیت واحدهای کنترل‌پلین، مجوز socket، پاسخ محلی API و مسیر کنسول را بررسی می‌کند. نسخه‌های قدیمی باید ابتدا با فرمان ارتقای بخش ۵ به‌روز شوند.
+
+برای بررسی اتصال بدون رمز، هر فرمان را جداگانه اجرا کنید:
+
+```bash
+sudo curl --unix-socket /run/android-farm-api/control.sock -sS -o /dev/null -w '%{http_code}\n' http://localhost/api/v1/health
+```
+
+```bash
+sudo docker exec farm-console wget -S -O /dev/null http://127.0.0.1:8080/api/v1/health
+```
+
+در هر دو آزمایش، `401` انتظار می‌رود؛ خروج ناموفق `wget` برای پاسخ 401 طبیعی است. `502` در کنسول یعنی Nginx به upstream دسترسی ندارد. `sudo docker logs --tail 25 farm-console` علت اتصال را نشان می‌دهد؛ نبودن socket، مجوز نامناسب و اتصال ردشده را از یکدیگر تفکیک کنید. برای تأیید سلامت خود صف و API، درخواست احراز هویت‌شدهٔ گام ۶ باید `200` و `status: ok` بدهد.
+
+برای تعمیر سرویس‌های میزبان از **همان release نصب‌شده و تأییدشده**:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --repair-control-plane
+```
+
+این حالت deploy جدید Coolify ایجاد نمی‌کند، توکن نمی‌خواهد و Androidها را روشن نمی‌کند. اگر release قدیمی یا ناهماهنگ است، ارتقای کامل بخش ۵ لازم است؛ تعمیر release قدیمی کد جدید API را وارد آن نمی‌کند.
+
+اگر میزبان پاسخ `401` می‌دهد ولی کنسول `502` و لاگ `No such file or directory` برای `/run/farm-api/control.sock` دارد، در نسخهٔ قبلی یک تداخل mount وجود دارد: در Alpine، `/var/run` پیوندی به `/run` است؛ tmpfs روی آن می‌تواند bind مسیر `/run/farm-api` را بپوشاند. نسخهٔ اصلاح‌شده tmpfs اضافهٔ `/var/run` کنسول را حذف می‌کند؛ Nginx unprivileged فایل PID و فایل‌های موقت خود را در `/tmp` می‌نویسد. [Dockerfile رسمی نسخهٔ 1.28.0](https://github.com/nginx/docker-nginx-unprivileged/blob/1.28.0/stable/alpine-slim/Dockerfile)، [تعریف مسیرهای Alpine](https://github.com/alpinelinux/aports/blob/master/main/alpine-baselayout/APKBUILD)
+
+برای رفع این تداخل، **ارتقای کامل بخش ۵ را اجرا کنید** تا Compose اصلاح‌شده redeploy شود. Restart ساده تنظیم tmpfs کانتینر موجود را تغییر نمی‌دهد. اگر پس از اصلاح Compose فقط اتصال قدیمی پوشه باقی مانده باشد، بازراه‌اندازی محدود کنسول می‌تواند آن را تازه کند؛ پس از آن آزمایش داخل کنسول باید `401` بدهد:
+
+```bash
+sudo docker restart farm-console
+```
+
+این فرمان Androidها را خاموش نمی‌کند. اگر خطا باقی ماند، مسیر bind باید دقیقاً `/run/android-farm-api` میزبان به `/run/farm-api` کنسول باشد؛ پوشه یا socket را حذف نکنید و مجوز عمومی ندهید.
+
+خطای `Control server error: ... /root/.gunicorn` در Gunicorn 26 مربوط به سوکت کنترل جانبی `gunicornc` است و به‌تنهایی قطعی HTTP API را ثابت نمی‌کند. سرویس فارم با systemd مدیریت می‌شود؛ نسخهٔ اصلاح‌شده این سوکت جانبی را با `control_socket_disable=True` خاموش می‌کند و سوکت HTTP خصوصی فارم را نگه می‌دارد. نیازی به بازکردن دسترسی `/root` یا برداشتن محدودیت‌های سرویس نیست. [تنظیم رسمی Gunicorn](https://gunicorn.org/reference/settings/#control_socket_disable)
 
 ### توقف درگاه به‌دلیل مسیر موقت Nginx
 

@@ -196,7 +196,8 @@ class CoolifyPermissionTests(unittest.TestCase):
     def test_configure_auth_creates_files_and_resumes_after_coolify_chown(self):
         source = self.root / "source"
         (source / "traefik").mkdir(parents=True)
-        middleware = b"http:\n  middlewares: {}\n"
+        from services.api.credentials import DEFAULT_MIDDLEWARE, render_middleware
+        middleware = DEFAULT_MIDDLEWARE
         (source / "traefik" / "farm-auth.yml").write_bytes(middleware)
         password = self.root / "password"
         password.write_text("test-only-password\n", encoding="utf-8")
@@ -214,7 +215,8 @@ class CoolifyPermissionTests(unittest.TestCase):
             initial = install.configure_traefik_auth(settings)
         self.assertEqual(command.call_args.args[0], ["htpasswd", "-niB", "operator"])
         self.assertEqual(self.users.read_text(encoding="utf-8"), record)
-        self.assertEqual((self.dynamic / "farm-auth.yml").read_bytes(), middleware)
+        self.assertEqual((self.dynamic / "farm-auth.yml").read_bytes(),
+                         render_middleware(middleware, initial['revision']))
         self.assertEqual(stat.S_IMODE(self.users.stat().st_mode), 0o600)
         self.assertEqual(self.users.stat().st_uid, 0)
 

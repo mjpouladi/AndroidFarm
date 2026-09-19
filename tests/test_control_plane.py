@@ -47,6 +47,9 @@ class ControlPlaneTests(unittest.TestCase):
                     self.assertIn("--unix-socket", argv)
                     self.assertNotIn("--user", argv)
                     return subprocess.CompletedProcess(argv, 0, "401", "")
+                if argv[0] == "docker":
+                    self.assertEqual(argv[1:4], ["exec", "farm-console", "wget"])
+                    return subprocess.CompletedProcess(argv, 1, "", "  HTTP/1.1 401 Unauthorized\n")
                 if argv[0] == "systemctl":
                     if not redis_probe_complete:
                         redis_probe_complete = True
@@ -218,6 +221,164 @@ class ControlPlaneTests(unittest.TestCase):
         self.assertNotIn("git clean", script)
         self.assertNotIn("rm -r", script)
         self.assertNotIn("coolify", script.lower())
+
+    def test_console_probe_rejects_spa_success_and_upstream_failure(self):
+        for code in ('200', '404', '502', '503'):
+            runner = Mock(return_value=subprocess.CompletedProcess([], 0, '', f'HTTP/1.1 {code} result'))
+            with self.subTest(code=code), self.assertRaisesRegex(RuntimeError, 'console cannot reach'):
+                control_plane._wait_console_api(runner, timeout=0)
+        runner = Mock(return_value=subprocess.CompletedProcess([], 1, '', 'HTTP/1.1 401 Unauthorized'))
+        control_plane._wait_console_api(runner, timeout=0)
+
+    @staticmethod
+    def managed_console():
+        return {"Id": "c" * 64, "Name": "/farm-console", "State": {"Running": True, "Paused": False},
+                "Config": {"Labels": {"farm.stack": "core", "farm.role": "console",
+                                       "com.docker.compose.project": "android-farm-core",
+                                       "com.docker.compose.service": "console"}},
+                "Mounts": [{"Type": "bind", "Source": str(control_plane.API_SOCKET.parent),
+                            "Destination": "/run/farm-api", "RW": False}]}
+
+    def test_stale_socket_bind_recovers_only_managed_console_and_rechecks_route(self):
+        calls = []
+        restarted = False
+
+        def runner(argv, **kwargs):
+            nonlocal restarted
+            calls.append(argv)
+            if argv[:2] == ["docker", "inspect"]:
+                return subprocess.CompletedProcess(argv, 0, json.dumps([self.managed_console()]), "")
+            if argv[:2] == ["docker", "restart"]:
+                restarted = True
+                return subprocess.CompletedProcess(argv, 0, "c" * 64, "")
+            if argv[0] == "curl":
+                return subprocess.CompletedProcess(argv, 0, "401", "")
+            if argv[3] == "test":
+                return subprocess.CompletedProcess(argv, 1, "", "")
+            if argv[3] == "wget":
+                return subprocess.CompletedProcess(argv, 1, "", "HTTP/1.1 " + ("401 Unauthorized" if restarted else "502 Bad Gateway"))
+            self.fail("unexpected recovery command")
+
+        with patch.object(control_plane, "_protected_api_socket", return_value=True):
+            self.assertTrue(control_plane._recover_console_socket_bind(runner))
+        restarts = [command for command in calls if command[:2] == ["docker", "restart"]]
+        self.assertEqual(restarts, [["docker", "restart", "--time", "10", "c" * 64]])
+        self.assertEqual(calls[-1][1:4], ["exec", "farm-console", "wget"])
+
+    def test_stale_socket_recovery_rejects_wrong_identity_or_mount_before_mutation(self):
+        for mismatch in ("project", "role", "name", "source", "writeable", "nested", "id"):
+            item = self.managed_console()
+            if mismatch == "project":
+                item["Config"]["Labels"]["com.docker.compose.project"] = "unrelated"
+            elif mismatch == "role":
+                item["Config"]["Labels"]["farm.role"] = "android"
+            elif mismatch == "name":
+                item["Name"] = "/another-console"
+            elif mismatch == "source":
+                item["Mounts"][0]["Source"] = "/data/coolify/generated-path"
+            elif mismatch == "writeable":
+                item["Mounts"][0]["RW"] = True
+            elif mismatch == "nested":
+                item["Mounts"].append({"Destination": "/run/farm-api/control.sock"})
+            elif mismatch == "id":
+                item["Id"] = "--invalid"
+            runner = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps([item]), ""))
+            with self.subTest(mismatch=mismatch), \
+                 patch.object(control_plane, "console_api_status", return_value="502"), \
+                 patch.object(control_plane, "_listener_status", return_value="401"), \
+                 patch.object(control_plane, "_protected_api_socket", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "identity or exact read-only socket bind"):
+                    control_plane._recover_console_socket_bind(runner)
+                self.assertEqual([call.args[0] for call in runner.call_args_list], [["docker", "inspect", "farm-console"]])
+
+    def test_socket_recovery_never_restarts_healthy_console_or_unreachable_api(self):
+        for console, host in (("401", "401"), ("502", "unreachable"), ("200", "401"), ("503", "401")):
+            runner = Mock()
+            with self.subTest(console=console, host=host), \
+                 patch.object(control_plane, "console_api_status", return_value=console), \
+                 patch.object(control_plane, "_listener_status", return_value=host):
+                self.assertFalse(control_plane._recover_console_socket_bind(runner))
+                runner.assert_not_called()
+        with patch.object(control_plane, "console_api_status", return_value="502"), \
+             patch.object(control_plane, "_listener_status", return_value="401"), \
+             patch.object(control_plane, "_protected_api_socket", return_value=False):
+            with self.assertRaisesRegex(RuntimeError, "not protected"):
+                control_plane._recover_console_socket_bind(runner)
+            runner.assert_not_called()
+
+    def test_socket_recovery_refuses_parent_tmpfs_that_restart_cannot_fix(self):
+        for path in ("/run", "/var/run", "/run/farm-api", "/var/run/farm-api/control.sock"):
+            item = self.managed_console()
+            item["HostConfig"] = {"Tmpfs": {path: ""}}
+            runner = Mock(return_value=subprocess.CompletedProcess([], 0, json.dumps([item]), ""))
+            with self.subTest(path=path), \
+                 patch.object(control_plane, "console_api_status", return_value="502"), \
+                 patch.object(control_plane, "_listener_status", return_value="401"), \
+                 patch.object(control_plane, "_protected_api_socket", return_value=True):
+                with self.assertRaisesRegex(RuntimeError, "tmpfs masks the API socket bind"):
+                    control_plane._recover_console_socket_bind(runner)
+                self.assertEqual([call.args[0] for call in runner.call_args_list], [["docker", "inspect", "farm-console"]])
+
+    def test_socket_recovery_requires_actual_absence_and_does_not_loop_restart(self):
+        for present_flag in ("-S", "-e", "-L"):
+            def runner(argv, **kwargs):
+                if argv[1] == "inspect":
+                    return subprocess.CompletedProcess(argv, 0, json.dumps([self.managed_console()]), "")
+                self.assertEqual(argv[1], "exec")
+                return subprocess.CompletedProcess(argv, 0 if argv[4] == present_flag else 1, "", "")
+            with self.subTest(present_flag=present_flag), \
+                 patch.object(control_plane, "console_api_status", return_value="502"), \
+                 patch.object(control_plane, "_listener_status", return_value="401"), \
+                 patch.object(control_plane, "_protected_api_socket", return_value=True):
+                self.assertFalse(control_plane._recover_console_socket_bind(runner))
+        runner = Mock(side_effect=lambda argv, **kwargs: subprocess.CompletedProcess(
+            argv, 0 if argv[1] != "exec" else 1,
+            json.dumps([self.managed_console()]) if argv[1] == "inspect" else "", ""))
+        with patch.object(control_plane, "console_api_status", return_value="502"), \
+             patch.object(control_plane, "_listener_status", return_value="401"), \
+             patch.object(control_plane, "_protected_api_socket", return_value=True), \
+             patch.object(control_plane, "_wait_console_api", side_effect=RuntimeError("route remains 502")):
+            with self.assertRaisesRegex(RuntimeError, "route remains 502"):
+                control_plane._recover_console_socket_bind(runner)
+        self.assertEqual(sum(call.args[0][1] == "restart" for call in runner.call_args_list), 1)
+
+    def test_diagnostics_are_read_only_and_do_not_echo_journal_or_environment(self):
+        secret = 'private-diagnostic-fixture-never-print'
+        calls = []
+
+        def runner(argv, **kwargs):
+            calls.append(argv)
+            if argv[0] == 'systemctl':
+                return subprocess.CompletedProcess(argv, 0, '\n'.join([
+                    'LoadState=loaded', 'ActiveState=active', 'SubState=running',
+                    'UnitFileState=enabled', 'Result=success', 'ExecMainStatus=0', 'NRestarts=0',
+                    'Environment=' + secret]), '')
+            if argv[0] == 'curl':
+                return subprocess.CompletedProcess(argv, 0, '401', '')
+            if argv[0] == 'docker':
+                return subprocess.CompletedProcess(argv, 1, '', 'HTTP/1.1 401 Unauthorized')
+            if argv[0] == 'journalctl':
+                return subprocess.CompletedProcess(argv, 0, f'PermissionError: {secret}\n', '')
+            self.fail('unexpected mutating command')
+
+        socket_path = Mock()
+        socket_path.lstat.return_value = Mock(st_mode=stat.S_IFSOCK | 0o660, st_uid=0, st_gid=101)
+        result = control_plane.diagnose_control_plane(runner=runner, socket_path=socket_path, include_journal=True)
+        self.assertTrue(result['ready'])
+        self.assertEqual(result['journal_categories'], ['permission-denied'])
+        self.assertNotIn(secret, json.dumps(result))
+        self.assertTrue(all(command[1] == 'show' for command in calls if command[0] == 'systemctl'))
+        socket_path.lstat.return_value.st_mode = stat.S_IFREG | 0o660
+        self.assertFalse(control_plane.diagnose_control_plane(runner=runner, socket_path=socket_path)['ready'])
+
+    def test_failure_categories_are_fixed_and_never_contain_command_output(self):
+        self.assertEqual(control_plane.failure_categories('password=secret-token\nModuleNotFoundError: gunicorn'),
+                         ['dependency-missing'])
+        self.assertEqual(control_plane.failure_categories(
+            "[ERROR] Control server error: [Errno 30] Read-only file system: '/root/.gunicorn'"),
+            ['filesystem-read-only', 'gunicorn-control-path'])
+        self.assertEqual(control_plane.failure_categories('another web executor is still active'),
+                         ['queue-already-owned'])
 
 
 if __name__ == "__main__":

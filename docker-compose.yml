@@ -32,7 +32,8 @@ services:
     tmpfs:
       - /tmp
       - /var/cache/nginx
-      - /var/run
+      # Alpine /var/run -> /run: a tmpfs there hides the API bind below.
+      # nginx-unprivileged already stores its PID and temp files under /tmp.
     volumes:
       # Only the authenticated, allowlisted host API is reachable here.
       # The directory bind survives atomic socket replacement after restart.
@@ -225,11 +226,15 @@ services:
         chown 472:0 /private/admin-password.next;
         chmod 0400 /private/admin-password.next;
         mv -f /private/admin-password.next /private/admin-password;
+        cp /run/secrets/grafana-admin-user /private/admin-user.next;
+        chown 472:0 /private/admin-user.next;
+        chmod 0400 /private/admin-user.next;
+        mv -f /private/admin-user.next /private/admin-user;
         chown -R 472:0 /grafana-data
     volumes:
       - grafana-secrets:/private
       - grafana-data:/grafana-data
-    secrets: [grafana-admin-password]
+    secrets: [grafana-admin-password, grafana-admin-user]
     mem_limit: 32m
     cpus: 0.1
     pids_limit: 32
@@ -247,7 +252,7 @@ services:
     cap_drop: [ALL]
     security_opt: [no-new-privileges:true]
     environment:
-      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_USER__FILE: /run/grafana-private/admin-user
       GF_SECURITY_ADMIN_PASSWORD__FILE: /run/grafana-private/admin-password
       GF_USERS_ALLOW_SIGN_UP: "false"
       GF_AUTH_ANONYMOUS_ENABLED: "false"
@@ -298,3 +303,5 @@ secrets:
     file: ${FARM_HTTP_AUTH_FILE:-/data/coolify/proxy/dynamic/farm-users.htpasswd}
   grafana-admin-password:
     file: ${GRAFANA_PASSWORD_FILE:-/etc/android-farm/monitoring/grafana-admin-password}
+  grafana-admin-user:
+    file: ${GRAFANA_USER_FILE:-/etc/android-farm/monitoring/grafana-admin-user}

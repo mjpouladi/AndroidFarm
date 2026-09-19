@@ -24,6 +24,7 @@ import threading
 import time
 import unittest
 import uuid
+import yaml
 
 from ops.secureio import atomic_json
 from services.api.jobs import JobQueue
@@ -174,10 +175,15 @@ class GunicornRuntimeTests(unittest.TestCase):
     def test_readonly_console_proxies_authenticated_api_over_unix_socket(self):
         name = 'farm-api-console-test-' + uuid.uuid4().hex
         image = os.environ['FARM_CONSOLE_TEST_IMAGE']
+        # Exercise the actual deployment tmpfs list. An independent list missed
+        # a /var/run -> /run alias that hid the socket bind on Alpine images.
+        core = yaml.safe_load((ROOT / 'docker-compose.yml').read_text(encoding='utf-8'))
+        temporary_mounts = [value for mount in core['services']['console']['tmpfs']
+                            for value in ('--tmpfs', mount)]
         result = subprocess.run(
             ['docker', 'run', '--detach', '--rm', '--name', name, '--network', 'none',
              '--read-only', '--user', '101:101', '--cap-drop', 'ALL', '--security-opt', 'no-new-privileges:true',
-             '--tmpfs', '/tmp', '--tmpfs', '/var/cache/nginx', '--tmpfs', '/var/run',
+             *temporary_mounts,
              '--mount', f'type=bind,source={self.socket_directory},target=/run/farm-api,readonly', image],
             capture_output=True, text=True, timeout=45)
         self.assertEqual(result.returncode, 0, 'isolated console container could not start')

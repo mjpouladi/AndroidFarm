@@ -184,7 +184,7 @@ class QuickstartTests(unittest.TestCase):
             state = {}
             user, path = quickstart.prepare_auth(paths, state)
             original = path.read_bytes()
-            self.assertEqual(user, "operator")
+            self.assertEqual(user, "mjpouladi")
             self.assertEqual(quickstart.prepare_auth(paths, state)[1].read_bytes(), original)
             path.unlink()
             paths.traefik_dynamic_dir.mkdir()
@@ -323,6 +323,90 @@ class QuickstartTests(unittest.TestCase):
         self.assertTrue(result["farm-anchor"])
         self.assertFalse(result["farm-console"])
         self.assertFalse(result["android-farm-prometheus"])
+
+    def test_admin_password_validation_is_bounded_and_never_echoes_input(self):
+        for value in ('too-short', 'x' * 73, 'p' * 12 + '\n', ' p' * 12, 'رمز' * 13):
+            with self.subTest(length=len(value)), self.assertRaises(ValueError) as raised:
+                quickstart.validate_admin_password(value)
+            self.assertNotIn(value, str(raised.exception))
+        quickstart.validate_admin_password('safe-fixture-password-123')
+        with patch.object(quickstart.getpass, 'getpass', side_effect=['safe-fixture-password-123', 'different-fixture']):
+            with self.assertRaisesRegex(ValueError, 'یکسان'):
+                quickstart.ask_admin_password()
+
+    def test_admin_password_prompt_rejects_echoing_fallback(self):
+        def unavailable_terminal(*args):
+            quickstart.warnings.warn('Password input may be echoed.', quickstart.getpass.GetPassWarning)
+            self.fail('echoed password input must not run')
+        with patch.object(quickstart.getpass, 'getpass', side_effect=unavailable_terminal):
+            with self.assertRaisesRegex(RuntimeError, 'ترمینال تعاملی SSH'):
+                quickstart.ask_admin_password()
+
+    def test_explicit_admin_setup_preserves_old_defaults_and_resumes_pending_rename(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = install.Paths(config_dir=root / 'config', traefik_dynamic_dir=root / 'dynamic')
+            paths.config_dir.mkdir(mode=0o700)
+            with self.assertRaises(RuntimeError):
+                quickstart.prepare_auth(paths, {}, username='-invalid', password='safe-fixture-password')
+            self.assertFalse((paths.config_dir / 'web-login-password').exists())
+            password_path = paths.config_dir / 'web-login-password'
+            password_path.write_text('old-safe-fixture-password\n')
+            password_path.chmod(0o600)
+            user, _ = quickstart.prepare_auth(paths, {})
+            self.assertEqual(user, 'operator')  # existing installs never silently rename
+            paths.traefik_dynamic_dir.mkdir()
+            auth = paths.traefik_dynamic_dir / 'farm-users.htpasswd'
+            auth.write_text('operator:$2y$fixture\n')
+            auth.chmod(0o600)
+            state = {'auth_user': 'operator'}
+            user, _ = quickstart.prepare_auth(paths, state, username='qa.owner', password='new-safe-fixture-password')
+            self.assertEqual(user, 'qa.owner')
+            self.assertEqual(password_path.read_text(), 'new-safe-fixture-password\n')
+            self.assertEqual(auth.read_text(), 'operator:$2y$fixture\n')  # host apply changes the hash
+            state['credentials_sync_pending'] = True
+            self.assertEqual(quickstart.prepare_auth(paths, state, username='qa.owner')[0], 'qa.owner')
+
+    def test_diagnose_and_repair_do_not_request_coolify_credentials(self):
+        for argument, function in (('--diagnose', 'diagnose'), ('--repair-control-plane', 'repair_control_plane')):
+            with self.subTest(argument=argument), patch.object(quickstart, 'require_host'), \
+                 patch.object(quickstart, 'setup_lock', return_value=nullcontext()), \
+                 patch.object(quickstart, function, return_value={'ready': True}), \
+                 patch.object(quickstart, 'say'), patch.object(quickstart.getpass, 'getpass') as prompt:
+                self.assertEqual(quickstart.main([argument]), 0)
+                prompt.assert_not_called()
+
+    def test_repair_requires_finalized_release_parity_without_changing_devices(self):
+        with tempfile.TemporaryDirectory() as folder:
+            state_file = Path(folder) / 'install-state.json'
+            state_file.write_text(json.dumps({'status': 'ready', 'release_id': 'a' * 16,
+                                             'release_dir': '/opt/android-farm/releases/' + 'a' * 16}))
+            state_file.chmod(0o600)
+            control = Mock()
+            with patch.object(install, 'anchor_labels', return_value={'farm.release': 'b' * 16}):
+                with self.assertRaisesRegex(RuntimeError, 'همسان'):
+                    quickstart.repair_control_plane(state_path=state_file, control_installer=control)
+                control.assert_not_called()
+            with patch.object(install, 'anchor_labels', return_value={'farm.release': 'a' * 16}), \
+                 patch.object(quickstart, 'diagnose', return_value={'ready': True}):
+                self.assertTrue(quickstart.repair_control_plane(state_path=state_file, control_installer=control)['ready'])
+                control.assert_called_once_with(Path('/opt/android-farm/releases/' + 'a' * 16))
+
+    def test_authenticated_api_probe_rejects_outer_auth_only_and_never_follows_redirect(self):
+        response = Mock(status=200)
+        response.read.return_value = b'{"status":"ok"}'
+        response.__enter__ = Mock(return_value=response)
+        response.__exit__ = Mock(return_value=False)
+        opener = Mock()
+        opener.open.return_value = response
+        with patch.object(install, '_private_password', return_value='fixture-private-password'), \
+             patch.object(quickstart.urllib.request, 'build_opener', return_value=opener) as build:
+            self.assertTrue(quickstart.authenticated_api_ready('https://farm.example.com/', 'operator', Path('/private')))
+            self.assertIn(quickstart.NoRedirect, build.call_args.args)
+            self.assertEqual(opener.open.call_args.args[0].full_url, 'https://farm.example.com/api/v1/health')
+            response.read.return_value = b'<html>SPA</html>'
+            self.assertFalse(quickstart.authenticated_api_ready('https://farm.example.com/', 'operator', Path('/private')))
+            self.assertFalse(quickstart.authenticated_api_ready('http://203.0.113.8:18080', 'operator', Path('/private')))
 
     def test_host_handoff_coolify_and_control_plane_resume_in_order(self):
         with tempfile.TemporaryDirectory() as folder:

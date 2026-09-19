@@ -22,6 +22,20 @@ COMPOSE = (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
 
 
 class GatewayTests(unittest.TestCase):
+    def test_console_tmpfs_cannot_hide_the_authenticated_socket_bind(self):
+        console = yaml.safe_load(COMPOSE)['services']['console']
+        socket_directory = '/run/farm-api'
+        self.assertIn('/run/android-farm-api:' + socket_directory + ':ro', console['volumes'])
+        # Alpine's /var/run symlink means distinct strings may mount the same
+        # parent. This reproduces the production ENOENT configuration failure.
+        for mount in console.get('tmpfs', []):
+            destination = mount.split(':', 1)[0].rstrip('/') or '/'
+            if destination == '/var/run' or destination.startswith('/var/run/'):
+                destination = '/run' + destination[len('/var/run'):]
+            self.assertFalse(destination == '/' or destination == socket_directory or
+                             socket_directory.startswith(destination + '/') or
+                             destination.startswith(socket_directory + '/'), mount)
+
     def test_all_nginx_runtime_paths_use_writable_tmpfs(self):
         gateway = yaml.safe_load(COMPOSE)['services']['gateway']
         self.assertTrue(gateway['read_only'])

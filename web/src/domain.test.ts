@@ -20,6 +20,15 @@ describe('وضعیت واقعی و مرز اعتماد API', () => {
     expect(result.devices[0].phone).toBeNull();
     expect(result.settings).toEqual({});
   });
+  it('قابلیت مدیریت رمز و وضعیت سرویس را فقط از پاسخ معتبر میزبان می‌پذیرد', () => {
+    const security = { web_username: 'operator', grafana_username: null, credential_rotation_available: true, proxy_credentials_available: false };
+    const payload = { ...snapshotData(), settings: { security, central_activation_available: true },
+      components: [{ id: 'worker', label: 'عامل اجرا', state: 'inactive', detail: 'not running' }] };
+    expect(parseSnapshot(payload).settings.security?.credential_rotation_available).toBe(true);
+    expect(parseSnapshot(payload).components?.[0].state).toBe('inactive');
+    expect(() => parseSnapshot({ ...payload, settings: { security: { ...security, credential_rotation_available: 'yes' } } })).toThrow();
+    expect(() => parseSnapshot({ ...payload, components: [{ id: 'worker', label: 'عامل', state: 'guessed' }] })).toThrow();
+  });
   it('پاسخ خراب یا نسخهٔ ناشناخته را به موفقیت تبدیل نمی‌کند', () => {
     for (const override of [{ schema_version: 9 }, { devices: {} }, { csrf_token: '' }, { devices: [{ ...device, containers: null }] }, { jobs: [{ ...job, state: 'magic' }] }]) {
       expect(() => parseSnapshot({ ...snapshotData(), ...override })).toThrow();

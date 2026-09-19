@@ -32,6 +32,11 @@ REDIS_CONFIG_FILE = Path("/etc/redis/redis.conf")
 RUNTIME_DIR = Path("/run/android-farm")
 _RELEASE_ID = re.compile(r"[0-9a-f]{16}\Z")
 _REDIS_PASSWORD = re.compile(r"[A-Za-z0-9_-]{32,128}\Z")
+CONTROL_UNITS = (
+    "redis-server.service", "android-farm-api.service",
+    "android-farm-worker.service", "android-farm-health.timer",
+)
+API_SOCKET = Path("/run/android-farm-api/control.sock")
 Runner = Callable[..., subprocess.CompletedProcess[str]]
 Verifier = Callable[[Path], tuple[bool, str]]
 
@@ -137,7 +142,105 @@ def _run_quiet(
         timeout=timeout,
     )
     if completed.returncode != 0:
-        raise RuntimeError(f"{stage} failed (exit {completed.returncode})")
+        hints = failure_categories((completed.stdout or "") + "\n" + (completed.stderr or ""))
+        suffix = f"; diagnostic categories: {', '.join(hints)}" if hints else ""
+        raise RuntimeError(f"{stage} failed (exit {completed.returncode}){suffix}")
+
+
+def failure_categories(output: str) -> list[str]:
+    """Return fixed labels only: service logs may contain private input."""
+    lowered = output[-65536:].lower()
+    signatures = {
+        "dependency-missing": ("modulenotfounderror", "no module named", "no matching distribution found"),
+        "permission-denied": ("permission denied", "permissionerror"),
+        "filesystem-read-only": ("read-only file system",),
+        "gunicorn-control-path": ("control server error:", "/root/.gunicorn"),
+        "storage-full": ("no space left on device", "disk quota exceeded"),
+        "systemd-namespace": ("226/namespace", "failed to set up mount namespacing"),
+        "configuration-rejected": ("invalid api configuration", "api configuration paths", "must be root-owned",
+                                   "must be a protected root-owned", "must be root-owned and chmod"),
+        "socket-conflict": ("address already in use", "refusing to replace non-socket"),
+        "api-worker-boot-failed": ("worker failed to boot",),
+        "queue-already-owned": ("another api executor", "queue already has an executor",
+                                "another web executor is still active"),
+        "dependency-unreachable": ("connection refused", "temporary failure in name resolution"),
+    }
+    return [name for name, patterns in signatures.items() if any(value in lowered for value in patterns)]
+
+
+def _listener_status(runner: Runner, socket_path: Path = API_SOCKET) -> str:
+    try:
+        response = runner(
+            ["curl", "--disable", "--noproxy", "*", "--silent", "--show-error", "--max-time", "3",
+             "--output", "/dev/null", "--write-out", "%{http_code}",
+             "--unix-socket", str(socket_path), "http://localhost/api/v1/health"],
+            check=False, text=True, capture_output=True, timeout=5,
+        )
+        value = response.stdout.strip()
+        return value if response.returncode == 0 and re.fullmatch(r"[1-5][0-9]{2}", value) else "unreachable"
+    except (OSError, subprocess.SubprocessError):
+        return "unreachable"
+
+
+def console_api_status(runner: Runner = subprocess.run) -> str:
+    """Probe inside the console, before outer auth can hide an upstream 502."""
+    try:
+        result = runner(
+            ["docker", "exec", "farm-console", "wget", "-T", "5", "-S", "-O", "/dev/null",
+             "http://127.0.0.1:8080/api/v1/health"],
+            text=True, capture_output=True, check=False, timeout=10,
+        )
+        statuses = re.findall(r"HTTP/\d(?:\.\d)?\s+([1-5][0-9]{2})\b",
+                              (result.stderr or "")[-4096:])
+        return statuses[-1] if statuses else "unreachable"
+    except (OSError, subprocess.SubprocessError):
+        return "unreachable"
+
+
+def diagnose_control_plane(*, runner: Runner = subprocess.run,
+                           socket_path: Path = API_SOCKET,
+                           include_journal: bool = False) -> dict[str, object]:
+    """Read-only report; no environment, process argv, credentials or raw logs."""
+    units = {}
+    properties = ("LoadState", "ActiveState", "SubState", "UnitFileState", "Result", "ExecMainStatus", "NRestarts")
+    for unit in CONTROL_UNITS:
+        state = {key: "unknown" for key in properties}
+        try:
+            result = runner(["systemctl", "show", unit, "--no-pager",
+                             "--property=" + ",".join(properties)],
+                            text=True, capture_output=True, check=False, timeout=10)
+            for line in result.stdout.splitlines():
+                key, separator, value = line.partition("=")
+                if separator and key in state and re.fullmatch(r"[a-zA-Z0-9_-]{0,40}", value):
+                    state[key] = value or "none"
+        except (OSError, subprocess.SubprocessError):
+            pass
+        state["ready"] = (state["LoadState"] == "loaded" and state["ActiveState"] == "active"
+                          and state["UnitFileState"] == "enabled")
+        units[unit] = state
+    socket_info = {"ready": False, "status": "missing"}
+    try:
+        info = socket_path.lstat()
+        valid = (stat.S_ISSOCK(info.st_mode) and info.st_uid == 0 and info.st_gid == 101
+                 and stat.S_IMODE(info.st_mode) == 0o660)
+        socket_info = {"ready": valid, "status": "ready" if valid else "invalid-type-owner-or-mode"}
+    except OSError:
+        pass
+    listener = _listener_status(runner, socket_path)
+    console = console_api_status(runner)
+    categories = []
+    if include_journal:
+        try:
+            journal = runner(["journalctl", "--unit=android-farm-api.service", "--no-pager",
+                              "--lines=60", "--since=-15min", "--output=cat"],
+                             text=True, capture_output=True, check=False, timeout=10)
+            categories = failure_categories(journal.stdout or "")
+        except (OSError, subprocess.SubprocessError):
+            categories = ["journal-unavailable"]
+    return {"ready": all(item["ready"] for item in units.values()) and socket_info["ready"]
+                     and listener == "401" and console == "401",
+            "units": units, "api_socket": socket_info,
+            "api_listener": listener, "console_api": console, "journal_categories": categories}
 
 
 def _ensure_ansible(*, runner: Runner = subprocess.run) -> str:
@@ -305,21 +408,102 @@ def _wait_api_listener(runner: Runner, *, timeout: float = 30) -> None:
     """Wait for the authenticated Unix listener without reading any password."""
     deadline = time.monotonic() + timeout
     while True:
-        try:
-            response = runner(
-                ["curl", "--disable", "--noproxy", "*", "--silent", "--show-error", "--max-time", "3",
-                 "--output", "/dev/null", "--write-out", "%{http_code}",
-                 "--unix-socket", "/run/android-farm-api/control.sock",
-                 "http://localhost/api/v1/health"],
-                check=False, text=True, capture_output=True, timeout=5,
-            )
-            if response.returncode == 0 and response.stdout.strip() == "401":
-                return
-        except (OSError, subprocess.SubprocessError):
-            pass
+        if _listener_status(runner) == "401":
+            return
         if time.monotonic() >= deadline:
             raise RuntimeError("web API Unix listener is not ready with authentication required")
         time.sleep(1)
+
+
+def _wait_console_api(runner: Runner, *, timeout: float = 30) -> None:
+    deadline = time.monotonic() + timeout
+    while True:
+        status = console_api_status(runner)
+        if status == "401":
+            return
+        if time.monotonic() >= deadline:
+            raise RuntimeError(f"console cannot reach the authenticated host API ({status}); "
+                               "check the console socket bind and API service")
+        time.sleep(1)
+
+
+def _protected_api_socket() -> bool:
+    """A rebind is allowed only for the protected, fixed host API endpoint."""
+    try:
+        for directory in (API_SOCKET.parent, *API_SOCKET.parent.parents):
+            info = directory.lstat()
+            if (not stat.S_ISDIR(info.st_mode) or info.st_uid != 0 or
+                    stat.S_IMODE(info.st_mode) & 0o022):
+                return False
+        info = API_SOCKET.lstat()
+        return (stat.S_ISSOCK(info.st_mode) and info.st_uid == 0 and info.st_gid == 101 and
+                stat.S_IMODE(info.st_mode) == 0o660)
+    except OSError:
+        return False
+
+
+def _recover_console_socket_bind(runner: Runner) -> bool:
+    """Rebind only a verified stale console mount, once during installation.
+
+    Older systemd units replaced the runtime directory while Docker retained
+    its old bind mount. A healthy host socket and an absent socket inside the
+    exact managed read-only bind distinguish that case from an API failure.
+    This helper is deliberately absent from diagnostics and normal polling.
+    """
+    if console_api_status(runner) != "502" or _listener_status(runner) != "401":
+        return False
+    if not _protected_api_socket():
+        raise RuntimeError("console socket recovery refused: host API socket is not protected")
+    try:
+        result = runner(["docker", "inspect", "farm-console"],
+                        check=False, text=True, capture_output=True, timeout=15)
+        if result.returncode:
+            raise ValueError()
+        rows = json.loads(result.stdout)
+        if not isinstance(rows, list) or len(rows) != 1:
+            raise ValueError()
+        item = rows[0]
+        labels = item["Config"].get("Labels") or {}
+        container_id = item.get("Id", "")
+        if (item.get("Name") != "/farm-console" or
+                not re.fullmatch(r"[0-9a-f]{64}", container_id) or
+                labels.get("farm.stack") != "core" or labels.get("farm.role") != "console" or
+                labels.get("com.docker.compose.project") != "android-farm-core" or
+                labels.get("com.docker.compose.service") != "console" or
+                item.get("State", {}).get("Running") is not True or item["State"].get("Paused")):
+            raise ValueError()
+        mounts = [mount for mount in item.get("Mounts", [])
+                  if mount.get("Destination") == "/run/farm-api" or
+                  str(mount.get("Destination", "")).startswith("/run/farm-api/")]
+        if (len(mounts) != 1 or mounts[0].get("Destination") != "/run/farm-api" or
+                mounts[0].get("Type") != "bind" or mounts[0].get("Source") != str(API_SOCKET.parent) or
+                mounts[0].get("RW") is not False):
+            raise ValueError()
+        tmpfs = (item.get("HostConfig") or {}).get("Tmpfs") or {}
+        if not isinstance(tmpfs, dict):
+            raise ValueError()
+    except (ValueError, KeyError, IndexError, TypeError, AttributeError):
+        raise RuntimeError("console socket recovery refused: managed identity or exact read-only socket bind differs; redeploy the reviewed Compose configuration") from None
+    # Alpine links /var/run to /run. A tmpfs on either parent can hide this
+    # child bind on every start; restarting cannot repair the configuration.
+    if any(path in {"/", "/run", "/var/run", "/run/farm-api", "/var/run/farm-api"} or
+           path.startswith(("/run/farm-api/", "/var/run/farm-api/")) for path in tmpfs):
+        raise RuntimeError("console socket recovery refused: tmpfs masks the API socket bind; upgrade and redeploy the reviewed Compose configuration")
+
+    # Require true absence, not an existing wrong-type file or an exec error.
+    for flag in ("-S", "-e", "-L"):
+        probe = runner(["docker", "exec", container_id, "test", flag, "/run/farm-api/control.sock"],
+                       check=False, text=True, capture_output=True, timeout=10)
+        if probe.returncode == 0:
+            return False
+        if probe.returncode != 1:
+            raise RuntimeError("console socket recovery refused: socket absence could not be verified")
+    _announce("  اتصال قدیمی سوکت کنسول شناسایی شد؛ بازسازی اتصال با یک راه‌اندازی مجدد کنسول…",
+              "  Stale console socket bind detected; restarting the console once to rebind...")
+    _run_quiet(runner, ["docker", "restart", "--time", "10", container_id], timeout=45,
+               stage="managed console socket rebind")
+    _wait_console_api(runner)
+    return True
 
 
 def install_control_plane(
@@ -403,17 +587,11 @@ def install_control_plane(
             env=environment,
             stage="Ansible control-plane role application",
         )
-        units = (
-            "redis-server.service",
-            "android-farm-api.service",
-            "android-farm-worker.service",
-            "android-farm-health.timer",
-        )
         _announce(
             "  بررسی سرویس‌های کنترل‌پلین…",
             "  Validating control-plane services...",
         )
-        for unit in units:
+        for unit in CONTROL_UNITS:
             _run_quiet(runner, ["systemctl", "is-active", "--quiet", unit],
                        env=environment, timeout=30,
                        stage=f"active-state validation for {unit}")
@@ -421,6 +599,14 @@ def install_control_plane(
                        env=environment, timeout=30,
                        stage=f"enabled-state validation for {unit}")
         _wait_api_listener(runner)
+        _recover_console_socket_bind(runner)
+        _wait_console_api(runner)
+    except (OSError, RuntimeError, subprocess.SubprocessError):
+        # Journal contents never reach the terminal. Only fixed categories and
+        # selected public systemd state are emitted for an actionable report.
+        diagnostic = diagnose_control_plane(runner=runner, include_journal=True)
+        _announce(json.dumps(diagnostic, ensure_ascii=True, sort_keys=True), "Control-plane diagnostics unavailable")
+        raise
     finally:
         for temporary in (variables_file, inventory_file, ansible_config):
             if temporary is None:

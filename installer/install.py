@@ -76,6 +76,7 @@ ENV_KEYS = {
     "GRAFANA_DOMAIN",
     "GRAFANA_ADMIN_USER",
     "GRAFANA_PASSWORD_FILE",
+    "GRAFANA_USER_FILE",
     "PROMETHEUS_RETENTION",
     "PROMETHEUS_RETENTION_SIZE",
     "FARM_HTTP_BIND",
@@ -340,6 +341,7 @@ def build_env(existing: Mapping[str, str], *, farm_domain: str, console_domain: 
                                   f"https://{result['GRAFANA_DOMAIN']}/")
     result["GRAFANA_SERVE_FROM_SUB_PATH"] = "true" if access_mode == "ip" else "false"
     result.setdefault("GRAFANA_ADMIN_USER", "admin")
+    result.setdefault("GRAFANA_USER_FILE", str(secret_dir.parent / "monitoring" / "grafana-admin-user"))
     result.setdefault("GRAFANA_PASSWORD_FILE", str(secret_dir.parent / "monitoring" /
                                                     "grafana-admin-password"))
     result.setdefault("PROMETHEUS_RETENTION", "30d")
@@ -704,8 +706,6 @@ def configure_traefik_auth(settings: Settings) -> dict[str, object]:
     middleware_source = settings.source / "traefik" / "farm-auth.yml"
     if middleware_source.is_symlink() or not middleware_source.is_file():
         raise RuntimeError("reviewed Traefik middleware source is missing")
-    _atomic_write(dynamic / "farm-auth.yml", middleware_source.read_bytes(), 0o644,
-                  parent_owner_uids=COOLIFY_OWNER_UIDS)
     users = dynamic / "farm-users.htpasswd"
     if settings.auth_password_file is not None:
         if not settings.auth_user or not AUTH_USER_RE.fullmatch(settings.auth_user):
@@ -738,8 +738,12 @@ def configure_traefik_auth(settings: Settings) -> dict[str, object]:
     valid, detail = traefik_users_status(users)
     if not valid:
         raise RuntimeError(f"Traefik Basic Auth user file is unsafe: {detail}")
+    from services.api.credentials import render_middleware
+    revision = auth_file_revision(users)
+    _atomic_write(dynamic / "farm-auth.yml", render_middleware(middleware_source.read_bytes(), revision), 0o644,
+                  parent_owner_uids=COOLIFY_OWNER_UIDS)
     return {"middleware": str(dynamic / "farm-auth.yml"), "users_file": str(users),
-            "revision": auth_file_revision(users)}
+            "revision": revision}
 
 
 def private_path_status(path: Path, *, directory: bool = False,
@@ -1406,6 +1410,16 @@ def install_managed_files(settings: Settings, discovered: Mapping[str, object]) 
     elif os.name == "posix" and (grafana_password.stat().st_uid != 0 or
                                   grafana_password.stat().st_mode & 0o077):
         raise RuntimeError(f"Grafana password must be root-owned and chmod 0600: {grafana_password}")
+    grafana_user = paths.config_dir / "monitoring" / "grafana-admin-user"
+    if not grafana_user.exists() and not grafana_user.is_symlink():
+        existing_admin = _existing_env(paths.config_dir / "compose.env").get("GRAFANA_ADMIN_USER", "admin")
+        if not AUTH_USER_RE.fullmatch(existing_admin):
+            raise RuntimeError("existing Grafana administrator name is invalid")
+        _atomic_write(grafana_user, (existing_admin + "\n").encode("utf-8"), 0o600)
+    else:
+        valid, detail = private_path_status(grafana_user)
+        if not valid or not AUTH_USER_RE.fullmatch(_private_password(grafana_user)):
+            raise RuntimeError("Grafana administrator name file is unsafe or invalid")
     sizing = discovered.get("sizing") if isinstance(discovered.get("sizing"), dict) else {}
     catalog_count = choose_catalog_count(settings, sizing)
     release_dir, release_id, created = install_release(settings.source, paths.release_root, catalog_count)
@@ -1669,10 +1683,11 @@ def doctor_checks(settings: Settings, discovered: Mapping[str, object]) -> list[
     middleware = dynamic / "farm-auth.yml"
     users = dynamic / "farm-users.htpasswd"
     try:
+        from services.api.credentials import middleware_matches
         middleware_ok = (traefik_dynamic_status(dynamic)[0] and
                          not middleware.is_symlink() and middleware.is_file() and
-                         middleware.read_bytes() ==
-                         (settings.source / "traefik" / "farm-auth.yml").read_bytes())
+                         middleware_matches(middleware.read_bytes(),
+                                            (settings.source / "traefik" / "farm-auth.yml").read_bytes()))
     except OSError:
         middleware_ok = False
     checks.append(Check("traefik-auth-middleware", "pass" if middleware_ok else "block",
@@ -1788,10 +1803,24 @@ def apply(settings: Settings) -> dict[str, object]:
 def doctor(settings: Settings) -> dict[str, object]:
     discovered = discover(settings)
     checks = doctor_checks(settings, discovered)
+    from installer.control_plane import diagnose_control_plane
+    control = diagnose_control_plane(socket_path=settings.paths.api_runtime_dir / "control.sock")
+    for unit, state in control["units"].items():
+        checks.append(Check("service:" + unit, "pass" if state["ready"] else "block",
+                            f"load={state['LoadState']} active={state['ActiveState']} enabled={state['UnitFileState']}",
+                            None if state["ready"] else
+                            "Run install.sh --repair-control-plane for the existing release, or rerun install.sh to finish an upgrade."))
+    for name, passed, detail in (
+        ("api-socket", control["api_socket"]["ready"], control["api_socket"]["status"]),
+        ("api-listener", control["api_listener"] == "401", control["api_listener"]),
+        ("console-api-route", control["console_api"] == "401", control["console_api"]),
+    ):
+        checks.append(Check(name, "pass" if passed else "block", str(detail),
+                            None if passed else "Run quickstart.py --diagnose; check API service and console socket mount."))
     status = "blocked" if any(item.status == "block" for item in checks) else (
         "action_required" if any(item.status == "warn" for item in checks) else "ready")
     return {"mode": "doctor", "status": status, "checks": [asdict(item) for item in checks],
-            "detected": discovered}
+            "detected": discovered, "control_plane": control}
 
 
 def _common_parser() -> argparse.ArgumentParser:

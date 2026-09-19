@@ -14,6 +14,7 @@ from ops import inventory
 from ops.secureio import atomic_json
 from provisioner import Config
 from services.api.operations import Operations, OperationError, bounded_process
+from services.api.authstate import auth_revision
 
 
 class ApiOperationsTests(unittest.TestCase):
@@ -27,6 +28,14 @@ class ApiOperationsTests(unittest.TestCase):
                              proxy_registry=self.root / 'proxies.json', proxy_store_dir=self.root / 'proxies')
         self.runner = Mock(return_value=subprocess.CompletedProcess([], 0, '', ''))
         self.ops = Operations(self.root / 'config.json', catalog_path=self.root / 'apps.json', runner=self.runner)
+        self.ops.components = Mock()
+        self.ops.components.snapshot.return_value = []
+        self.ops.credential_manager = Mock()
+        self.ops.credential_manager.summary.return_value = {'web_username': 'operator', 'grafana_username': 'admin',
+                                                           'credential_rotation_available': True}
+        self.ops.auth_file = self.root / 'users.htpasswd'
+        self.ops.auth_file.write_text('fixture-generation')
+        self.ops.auth_file.chmod(0o600)
         self.config_patch = patch.object(self.ops, '_config', return_value=self.config)
         self.config_patch.start()
         self.addCleanup(self.config_patch.stop)
@@ -85,6 +94,46 @@ class ApiOperationsTests(unittest.TestCase):
             self.ops.execute({'action': 'up', 'device': 'num01'})
         self.assertNotIn('never-show-this', str(failure.exception))
 
+    def test_only_explicit_credential_scope_is_accepted(self):
+        good = {'action': 'credential-rotate', 'params': {'target': 'platform', 'username': 'qa-admin',
+                'password': 'new-private-password', 'current_password': 'current-test-password'}}
+        self.assertEqual(self.ops.validate_job(good), good)
+        for changed in ({'target': 'ssh'}, {'username': '-unsafe'}, {'password': 'short'},
+                        {'password': 'a' * 73}, {'password': '\nsecret-long-password'}, {'extra': 'field'}):
+            with self.subTest(changed=changed), self.assertRaises(ValueError):
+                self.ops.validate_job(dict(good, params=dict(good['params'], **changed)))
+        self.runner.assert_not_called()
+
+    def test_proxy_rotation_private_file_is_removed_and_cannot_change_username(self):
+        job = {'action': 'proxy-credentials', 'params': {'id': 'qa-proxy', 'password': 'proxy-canary',
+                                                       'current_password': 'current-canary'},
+               'auth_revision': auth_revision(self.ops.auth_file)}
+        store = Mock()
+        paths = []
+
+        def rotate(actual_store, proxy_id, path, config):
+            self.assertIs(actual_store, store)
+            self.assertEqual(proxy_id, 'qa-proxy')
+            self.assertEqual(path.read_text(), 'proxy-canary\n')
+            paths.append(path)
+            return {'id': proxy_id, 'assigned_device_stopped': True}
+
+        with patch.object(self.ops, '_store', return_value=store), \
+                patch('services.api.operations.provisioner.rotate_managed_proxy_password', side_effect=rotate):
+            result = self.ops.execute(job)
+            self.assertTrue(result['completed'])
+            self.assertNotIn('canary', json.dumps(result))
+            self.assertFalse(paths[0].exists())
+            job['params']['username'] = 'other-sticky-session'
+            with self.assertRaises(ValueError):
+                self.ops.validate_job(job, trusted=True)
+
+    def test_rotation_with_stale_auth_generation_cannot_run(self):
+        job = {'action': 'credential-rotate', 'params': {'target': 'platform', 'username': 'qa-admin',
+                'password': 'new-private-password'}, 'auth_revision': 'obsolete-generation'}
+        with self.assertRaises(OperationError):
+            self.ops.execute(job)
+        self.ops.credential_manager.rotate.assert_not_called()
     def test_ip_check_returns_only_validated_evidence(self):
         self.runner.return_value.stdout = json.dumps({'proxy_namespace': '8.8.8.8',
                                                       'android_shell': '8.8.8.8', 'expected': '8.8.8.8',

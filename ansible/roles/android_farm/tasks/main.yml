@@ -267,6 +267,29 @@
   when: farm_api_enabled | bool and not ansible_check_mode
   notify: Restart farm API
 
+- name: Validate the exact writable authentication directory
+  ansible.builtin.command:
+    argv:
+      - /usr/bin/python3
+      - -c
+      - |
+        import json, os, pathlib, re, sys
+        path = pathlib.Path(json.load(open(sys.argv[1], encoding='utf-8'))['auth_file'])
+        assert path.name == 'farm-users.htpasswd' and path.is_absolute()
+        parent = path.parent
+        assert re.fullmatch(r'/[A-Za-z0-9_./-]+', str(parent))
+        assert parent.resolve(strict=True) == parent
+        for item in (parent, *parent.parents):
+            info = item.lstat()
+            assert item.is_dir() and not item.is_symlink()
+            assert info.st_uid in (0, 9999) and not info.st_mode & 0o022
+        print(parent)
+      - "{{ farm_api_config }}"
+  register: farm_api_auth_directory
+  changed_when: false
+  check_mode: false
+  when: farm_api_enabled | bool
+
 - name: Preserve the API socket directory across boot and service restarts
   ansible.builtin.copy:
     dest: /etc/tmpfiles.d/android-farm-api.conf

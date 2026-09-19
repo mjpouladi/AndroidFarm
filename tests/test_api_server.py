@@ -25,6 +25,7 @@ class APITests(unittest.TestCase):
         self.operations.execute.return_value = {'completed': True}
         self.queue = JobQueue(self.directory, self.operations.execute, start=False)
         self.auth = Mock()
+        self.auth.revision.return_value = 'test-generation'
         self.auth.verify.side_effect = lambda header: 'operator' if header == 'valid' else None
         self.app = Application(self.operations, self.queue, self.auth, ['https://farm.example.com'])
 
@@ -77,6 +78,29 @@ class APITests(unittest.TestCase):
             self.assertEqual(self.request('/api/v1/jobs', 'POST', {}, **override)[0], expected)
         for path in ['/api/v1/shell', '/api/v1/jobs/../snapshot', '/api/v1/docker/containers']:
             self.assertEqual(self.request(path)[0], 404)
+        self.assertEqual(self.queue.list(), [])
+
+    def test_credential_changes_require_current_password_before_queueing(self):
+        payload = {'action': 'credential-rotate', 'params': {'target': 'web', 'username': 'qa-admin',
+                   'password': 'new-private-canary', 'current_password': 'wrong'}}
+        self.assertEqual(self.request('/api/v1/jobs', 'POST', payload)[0], 403)
+        self.operations.validate_job.assert_not_called()
+        self.assertEqual(self.queue.list(), [])
+        supplied = 'Basic ' + base64.b64encode(b'operator:existing-test-password').decode()
+        self.auth.verify.side_effect = lambda value: 'operator' if value in {'valid', supplied} else None
+        payload['params']['current_password'] = 'existing-test-password'
+        status, _, result = self.request('/api/v1/jobs', 'POST', payload)
+        self.assertEqual(status, 202)
+        self.assertNotIn('new-private-canary', json.dumps(result))
+        self.assertNotIn('existing-test-password', json.dumps(result))
+        self.assertEqual(len(self.queue.list()), 1)
+        with self.queue.connection() as db:
+            payload = json.loads(db.execute('SELECT payload FROM jobs').fetchone()[0])
+        self.assertNotIn('current_password', payload['params'])
+
+    def test_proxy_password_rotation_reauthentication_cannot_be_skipped(self):
+        self.assertEqual(self.request('/api/v1/jobs', 'POST', {
+            'action': 'proxy-credentials', 'params': {'id': 'qa-proxy', 'password': 'private-canary'}})[0], 403)
         self.assertEqual(self.queue.list(), [])
 
     def test_submit_is_durable_idempotent_and_only_worker_reports_success(self):

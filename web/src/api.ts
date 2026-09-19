@@ -11,7 +11,8 @@ async function jsonResponse(response: Response): Promise<unknown> {
   if (!response.ok) {
     let message = response.status === 401 ? 'احراز هویت منقضی شده است؛ صفحه را دوباره باز کنید.' :
       response.status === 403 ? 'درخواست رد شد؛ اتصال و مجوز دسترسی را بررسی کنید.' :
-      response.status === 502 || response.status === 503 ? 'سرویس کنترل میزبان در دسترس نیست؛ سرویس android-farm-api را بررسی کنید.' : `درخواست API ناموفق بود (HTTP ${response.status}).`;
+      response.status === 404 ? 'مسیر API نصب نشده یا نسخهٔ سرویس قدیمی است؛ نصب‌کنندهٔ میزبان را دوباره اجرا کنید.' :
+      response.status === 502 || response.status === 503 ? 'کنسول باز شده اما سرویس کنترل میزبان در دسترس نیست؛ وضعیت android-farm-api باید بررسی شود.' : `درخواست API ناموفق بود (HTTP ${response.status}).`;
     if (response.headers.get('content-type')?.includes('application/json')) {
       try {
         const body = await response.json();

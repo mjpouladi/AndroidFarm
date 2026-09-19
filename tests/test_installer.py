@@ -320,7 +320,8 @@ class InstallerFilesystemTests(unittest.TestCase):
             root = Path(folder)
             source = self.make_source(root)
             traefik = source / 'traefik'
-            (traefik / 'farm-auth.yml').write_text('http: {}\n', encoding='utf-8')
+            reference_middleware = (Path('traefik') / 'farm-auth.yml').read_bytes()
+            (traefik / 'farm-auth.yml').write_bytes(reference_middleware)
             base = self.settings(root, source)
             dynamic = root / 'dynamic'
             dynamic.mkdir(exist_ok=True)
@@ -335,7 +336,9 @@ class InstallerFilesystemTests(unittest.TestCase):
                 result = install.configure_traefik_auth(settings)
             self.assertEqual(command.call_args.args[0], ['htpasswd', '-niB', 'operator'])
             self.assertNotIn('strong secret', repr(command.call_args.args))
-            self.assertEqual((dynamic / 'farm-auth.yml').read_text(), 'http: {}\n')
+            from services.api.credentials import middleware_matches
+            self.assertTrue(middleware_matches((dynamic / 'farm-auth.yml').read_bytes(), reference_middleware))
+            self.assertIn('realm: "Android Farm ', (dynamic / 'farm-auth.yml').read_text())
             self.assertEqual((dynamic / 'farm-users.htpasswd').read_text(), completed.stdout)
             self.assertEqual(Path(result['users_file']).resolve(),
                              (dynamic / 'farm-users.htpasswd').resolve())
@@ -435,12 +438,33 @@ class InstallerFilesystemTests(unittest.TestCase):
             grafana_secret = settings.paths.config_dir / "monitoring" / "grafana-admin-password"
             self.assertTrue(grafana_secret.is_file())
             self.assertGreaterEqual(len(grafana_secret.read_text().strip()), 40)
+            grafana_user = settings.paths.config_dir / "monitoring" / "grafana-admin-user"
+            self.assertEqual(grafana_user.read_text(), "admin\n")
+            grafana_user.write_text("renamed.owner\n")
+            install.install_managed_files(settings, detected)
+            self.assertEqual(grafana_user.read_text(), "renamed.owner\n")
             config = json.loads((settings.paths.config_dir / "provisioner.json").read_text())
             self.assertEqual(config["compose_project"], install.RUNTIME_COMPOSE_PROJECT)
             self.assertEqual(config["proxy_store_dir"], str(settings.paths.config_dir / "proxies"))
             wrapper = settings.paths.wrapper.read_text()
             self.assertIn(first["release_dir"], wrapper)
             self.assertNotIn("/current/", wrapper)
+
+    def test_doctor_cannot_report_ready_when_host_api_or_console_route_fails(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            settings = self.settings(root, self.make_source(root))
+            report = {'units': {'android-farm-api.service': {'ready': False, 'LoadState': 'not-found',
+                       'ActiveState': 'inactive', 'UnitFileState': 'unknown'}},
+                      'api_socket': {'ready': False, 'status': 'missing'},
+                      'api_listener': 'unreachable', 'console_api': '502'}
+            with patch.object(install, 'discover', return_value={}), \
+                 patch.object(install, 'doctor_checks', return_value=[]), \
+                 patch('installer.control_plane.diagnose_control_plane', return_value=report):
+                result = install.doctor(settings)
+            self.assertEqual(result['status'], 'blocked')
+            self.assertEqual({check['name'] for check in result['checks']},
+                             {'service:android-farm-api.service', 'api-socket', 'api-listener', 'console-api-route'})
 
     def test_ip_install_persists_mode_port_and_browser_origin(self):
         with tempfile.TemporaryDirectory() as folder:

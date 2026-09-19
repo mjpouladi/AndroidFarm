@@ -24,6 +24,7 @@ from urllib.parse import urlsplit
 
 from ops.secureio import read_private_json
 from .jobs import JobQueue, QueueConflict
+from .authstate import auth_revision
 
 MAX_BODY = 32768
 USER_RE = re.compile(r'[A-Za-z0-9._][A-Za-z0-9._-]{0,63}\Z')
@@ -38,6 +39,9 @@ class BasicAuth:
         self.cache = {}
         self.salt = secrets.token_bytes(32)
         self.verifiers = threading.BoundedSemaphore(4)
+
+    def revision(self):
+        return auth_revision(self.path)
 
     def verify(self, header):
         if not isinstance(header, str) or len(header) > 8192 or not header.startswith('Basic '):
@@ -164,7 +168,19 @@ class Application:
                 if value:
                     return error(400, 'invalid_request', 'لغو درخواست دادهٔ اضافه نمی‌پذیرد.')
                 return send(200, {'job': self.jobs.cancel(route.group(1))})
+            if value.get('action') in ('credential-rotate', 'proxy-credentials'):
+                params = value.get('params')
+                current = params.get('current_password') if isinstance(params, dict) else None
+                if not isinstance(current, str) or not current or len(current) > 4096:
+                    return error(403, 'reauthentication_required', 'برای تغییر رمز، رمز فعلی ورود به فارم را وارد کنید.')
+                supplied = 'Basic ' + base64.b64encode(f'{user}:{current}'.encode('utf-8')).decode('ascii')
+                revision = self.auth.revision()
+                if self.auth.verify(supplied) != user or revision != self.auth.revision():
+                    return error(403, 'reauthentication_failed', 'رمز فعلی ورود به فارم صحیح نیست.')
             normalized = self.operations.validate_job(value)
+            if value.get('action') in ('credential-rotate', 'proxy-credentials'):
+                normalized = dict(normalized, params={k: v for k, v in normalized['params'].items()
+                                                      if k != 'current_password'}, auth_revision=revision)
             job, created = self.jobs.submit(env.get('HTTP_IDEMPOTENCY_KEY'), normalized, user)
             return send(202 if created else 200, {'job': job})
         except QueueConflict as exc:
@@ -218,6 +234,11 @@ def main(argv=None):
             options = {'bind': f'unix:{socket_path}', 'workers': 1, 'worker_class': 'gthread',
                        'threads': 8, 'timeout': 120, 'graceful_timeout': 30,
                        'umask': 0o077, 'accesslog': None, 'errorlog': '-',
+                       # Gunicorn 25.1+ otherwise creates a separate gunicornc
+                       # management socket under $HOME/.gunicorn. Lifecycle is
+                       # managed by systemd, and ProtectHome stays enabled.
+                       # This does not disable the authenticated API listener.
+                       'control_socket_disable': True,
                        'limit_request_line': 4094, 'limit_request_fields': 40,
                        'when_ready': self.socket_ready}
             for key, value in options.items():
@@ -231,7 +252,8 @@ def main(argv=None):
         def load(self):
             # Loaded after fork. Exactly one worker owns the durable job queue.
             from .operations import Operations
-            operations = Operations(config_path=Path(settings['provisioner_config']))
+            operations = Operations(config_path=Path(settings['provisioner_config']),
+                                    auth_file=Path(settings['auth_file']))
             jobs = JobQueue(Path(settings['state_dir']), operations.execute)
             return Application(operations, jobs, BasicAuth(Path(settings['auth_file'])), settings['allowed_origins'])
 

@@ -27,6 +27,8 @@ PrivateTmp=true
 ProtectHome=true
 ProtectSystem=strict
 ReadWritePaths=/etc/android-farm /var/lib/android-farm /var/backups/android-farm /opt/farm/data/instances /run /var/run
+# Credential changes may update only this validated farm authentication folder.
+ReadWritePaths={{ farm_api_auth_directory.stdout | default('/data/coolify/proxy/dynamic') }}
 UMask=0077
 
 [Install]
