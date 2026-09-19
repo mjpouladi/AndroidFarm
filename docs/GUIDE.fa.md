@@ -1364,6 +1364,7 @@ ss -ltnp | grep ':5551'
 
 | نشانه | بررسی |
 |---|---|
+| `existing release failed verification (release contains files outside its manifest)` | فایل اضافه در release؛ بخش «کش پایتون در release» را ببینید؛ بررسی manifest را غیرفعال نکنید |
 | `Module binder_linux not found` | مراحل «نبودن Binder پس از به‌روزرسانی کرنل» در ادامهٔ همین بخش؛ ابتدا نصب‌کنندهٔ به‌روز را دوباره اجرا کنید |
 | Binder بارگذاری شده ولی `/dev/binder`، `/dev/hwbinder` و `/dev/vndbinder` آماده نیستند | خطای تشخیص نسخهٔ قبلی نصب‌کننده؛ بخش «Binder بارگذاری شده ولی دستگاه‌های میزبان وجود ندارند» را ببینید و همان فرمان نصب را تکرار کنید |
 | `managed file parent must be root-owned and protected: /data/coolify/proxy/dynamic` | ناسازگاری نسخهٔ قبلی با مالک استاندارد Coolify؛ بخش «مالکیت مسیر dynamic در Coolify» را ببینید |
@@ -1393,6 +1394,22 @@ ss -ltnp | grep ':5551'
 | metricهای سلامت stale هستند | `android-farm-health.timer`، permission مسیر textfile و mount node-exporter را بررسی کنید |
 | worker retry می‌کند | journal، result task، lock device و DLQ را بررسی کنید؛ task دلخواه shell به صف نفرستید |
 | profile drift | device را stop، فایل profile و digest را بازبینی و start کنترل‌شده اجرا کنید |
+
+### کش پایتون در release
+
+اگر نصب با `existing release failed verification (release contains files outside its manifest)` متوقف شد، فایل اضافه‌ای در نسخهٔ نصب‌شده وجود دارد. این پیام به‌تنهایی نوع فایل را مشخص نمی‌کند. در رخداد بررسی‌شده، مقایسهٔ فقط‌خواندنی با `.install-manifest.json` نشان داد هر ۱۲ فایل اضافه، کش‌های `__pycache__/*.pyc` مربوط به `generate_farm` و ماژول‌های `ops` بودند.
+
+علت این رخداد در نسخهٔ قبلی، اجرای دستی `device-provisioner` بدون جلوگیری از تولید bytecode بود. کاربر root می‌تواند حتی در پوشهٔ `0555` فایل کش بسازد؛ بنابراین read-only بودن mode پوشه کافی نبود. سرویس‌های systemd از قبل این تنظیم را داشتند، اما مسیر CLI نداشت. نسخهٔ اصلاح‌شده پیش از import ماژول‌های پروژه، نوشتن bytecode را برای همان فرایند و فرزندانش غیرفعال می‌کند؛ wrapper نصب‌شده و مولد کاتالوگ نیز با این محدودیت اجرا می‌شوند.
+
+برای دریافت اصلاح و ساخت release تازه اجرا کنید:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com
+```
+
+تغییر entrypoint باعث تغییر شناسهٔ release می‌شود؛ نصب‌کننده نسخهٔ تازه را از source می‌سازد و فایل‌های اضافهٔ نسخهٔ قبلی را خودکار حذف یا تأیید نمی‌کند. manifest و کنترل hash همچنان سخت‌گیرانه‌اند. برای این خطا، release فعال، volume، inventory، APK یا secretها را حذف نکنید و فایل manifest را بازنویسی نکنید. پس از ارتقای موفق، اجرای فرمان‌های CLI نباید release تازه را تغییر دهد.
+
+اگر خطای یکپارچگی برای release تازه هم تکرار شد، ابتدا فقط نام فایل‌های خارج از manifest را بررسی کنید. فایل اضافهٔ ناشناخته، symlink یا فایل منبع با hash متفاوت را صرفاً «کش» فرض نکنید؛ این اصلاح اجازهٔ نادیده‌گرفتن هیچ‌کدام را نمی‌دهد.
 
 ### توقف هماهنگ‌سازی حساب‌ها
 

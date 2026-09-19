@@ -507,7 +507,7 @@ def _release_content(relative: str, path: Path, catalog_count: int | None = None
             "print(json.dumps(generate(int(sys.argv[2])), indent=2))"
         )
         result = subprocess.run(
-            [sys.executable, "-c", program, str(path.parent), str(catalog_count)],
+            [sys.executable, "-B", "-c", program, str(path.parent), str(catalog_count)],
             text=True, capture_output=True, timeout=120,
         )
         if result.returncode:
@@ -1493,7 +1493,7 @@ def install_managed_files(settings: Settings, discovered: Mapping[str, object]) 
         _atomic_write(paths.config_dir / "api.json",
                       (json.dumps(build_api_config(settings), indent=2, sort_keys=True) + "\n").encode(),
                       0o600)
-        wrapper = ("#!/bin/sh\nset -eu\nexec /usr/bin/python3 " +
+        wrapper = ("#!/bin/sh\nset -eu\nexport PYTHONDONTWRITEBYTECODE=1\nexec /usr/bin/python3 -B " +
                    shlex.quote(str(release_dir / "provisioner.py")) + ' "$@"\n')
         _atomic_write(paths.wrapper, wrapper.encode(), 0o755)
         configured = True
