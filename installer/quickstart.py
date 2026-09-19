@@ -116,22 +116,51 @@ def save_state(state: dict, path: Path = STATE_FILE) -> None:
                        "updated_at": int(time.time())})
 
 
-def prepare_auth(paths: install.Paths, state: dict) -> tuple[str | None, Path | None]:
+def prepare_auth(paths: install.Paths, state: dict, *,
+                 rotate: bool = False) -> tuple[str | None, Path | None]:
+    """Preserve existing credentials unless rotation was explicitly requested.
+
+    Validate existing files before replacing the private plaintext password.
+    A manual multi-user file cannot be reduced to one account by this wizard.
+    The host installer applies the resulting password to Traefik before deploy.
+    """
     require_private_directory(paths.config_dir, "farm config directory", create=True)
     password_path = paths.config_dir / "web-login-password"
-    if password_path.exists():
+    managed_password = password_path.exists() or password_path.is_symlink()
+    user = state.get("auth_user", "operator")
+    if managed_password:
         install._private_password(password_path)
-        return str(state.get("auth_user", "operator")), password_path
+        if not rotate:
+            return str(user), password_path
     # Preserve credentials installed by the advanced/manual path.
     users = paths.traefik_dynamic_dir / "farm-users.htpasswd"
-    if users.exists():
+    if users.exists() or users.is_symlink():
         valid, _ = install.traefik_users_status(users)
         if not valid:
             raise RuntimeError("فایل ورود قبلی مجوز امن ندارد؛ نصب متوقف شد.")
-        return None, None
+        if not rotate:
+            return None, None
+        # Never print record contents: they contain a reusable password hash.
+        if users.stat().st_size > 4096:
+            raise RuntimeError("تغییر خودکار رمز فقط برای فایل ورود تک‌کاربره مجاز است.")
+        try:
+            records = users.read_text(encoding="utf-8").splitlines()
+        except UnicodeDecodeError as exc:
+            raise RuntimeError("فایل ورود قبلی معتبر نیست؛ رمز تغییر نکرد.") from exc
+        if len(records) != 1:
+            raise RuntimeError("تغییر خودکار رمز فقط برای فایل ورود تک‌کاربره مجاز است.")
+        existing_user, separator, hashed_password = records[0].partition(":")
+        if (not separator or not install.AUTH_USER_RE.fullmatch(existing_user) or
+                not hashed_password.startswith(("$2a$", "$2b$", "$2y$"))):
+            raise RuntimeError("فایل ورود تک‌کاربرهٔ bcrypt معتبر نیست؛ رمز تغییر نکرد.")
+        if managed_password and user != existing_user:
+            raise RuntimeError("نام کاربری ذخیره‌شده با فایل ورود یکسان نیست؛ رمز تغییر نکرد.")
+        user = existing_user
+    if not isinstance(user, str) or not install.AUTH_USER_RE.fullmatch(user):
+        raise RuntimeError("نام کاربری ذخیره‌شده معتبر نیست؛ رمز تغییر نکرد.")
     install._atomic_write(password_path, (secrets.token_urlsafe(30) + "\n").encode(), 0o600)
-    state["auth_user"] = "operator"
-    return "operator", password_path
+    state["auth_user"] = user
+    return user, password_path
 
 
 def local_addresses(runner: Callable = subprocess.run) -> tuple[set[str], set[str]]:
@@ -378,6 +407,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--app-uuid", help="UUID برنامهٔ موجود همین نصب")
     parser.add_argument("--retry-deploy", action="store_true",
                         help="پس از بررسی دستی نبود Deploy در Coolify، درخواست نامعلوم قبلی را دوباره ارسال کن")
+    parser.add_argument("--rotate-web-password", action="store_true",
+                        help="رمز تصادفی تازه برای همان کاربر وب بساز و هنگام استقرار اعمال کن")
     return parser
 
 
@@ -439,7 +470,7 @@ def main(argv=None) -> int:
             state.update(**access, coolify_url=url, server_uuid=server)
             save_state(state)
             paths = install.Paths()
-            user, password = prepare_auth(paths, state)
+            user, password = prepare_auth(paths, state, rotate=args.rotate_web_password)
             save_state(state)
             settings = install.Settings(ROOT, access["farm_domain"], access["console_domain"],
                                         "auto", "auto", paths, auth_user=user, auth_password_file=password,
@@ -472,8 +503,7 @@ def main(argv=None) -> int:
             say(f"برنامهٔ Coolify: {outcome['app_uuid']}")
             if password:
                 say(f"نام کاربری وب: {user}؛ فایل خصوصی رمز: {password}")
-                if sys.stdout.isatty():
-                    say("رمز ورود وب (در password manager نگه دارید): " + install._private_password(password))
+                say("رمز را فقط روی سرور از فایل خصوصی بخوانید و در password manager نگه دارید؛ آن را در چت یا لاگ نفرستید.")
             else:
                 say("ورود وب از همان حساب Basic Auth قبلی استفاده می‌کند.")
             say("عملیات واقعی: sudo device-provisioner status")

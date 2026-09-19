@@ -1,4 +1,7 @@
+from contextlib import nullcontext
+import io
 import json
+import os
 from pathlib import Path
 import subprocess
 import tempfile
@@ -190,6 +193,125 @@ class QuickstartTests(unittest.TestCase):
             manual.chmod(0o600)
             self.assertEqual(quickstart.prepare_auth(paths, {}), (None, None))
             self.assertEqual(manual.read_text(), "old-account:$2y$not-a-real-hash\n")
+
+    def test_explicit_password_rotation_preserves_managed_username_and_private_file(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = install.Paths(config_dir=root / "config", traefik_dynamic_dir=root / "dynamic")
+            state = {"auth_user": "qa.operator"}
+            user, password = quickstart.prepare_auth(paths, state)
+            original = password.read_bytes()
+            paths.traefik_dynamic_dir.mkdir()
+            users = paths.traefik_dynamic_dir / "farm-users.htpasswd"
+            users.write_text("qa.operator:$2y$12$" + "a" * 53 + "\n")
+            users.chmod(0o600)
+            original_hash = users.read_bytes()
+            with patch.object(install, "_atomic_write", wraps=install._atomic_write) as write:
+                rotated_user, rotated_path = quickstart.prepare_auth(paths, state, rotate=True)
+                self.assertEqual(write.call_args.args[2], 0o600)
+            self.assertEqual((user, rotated_user, state["auth_user"]), ("qa.operator",) * 3)
+            self.assertEqual(rotated_path, password)
+            self.assertNotEqual(password.read_bytes(), original)
+            self.assertGreaterEqual(len(install._private_password(password)), 40)
+            if os.name == "posix":
+                self.assertEqual(password.stat().st_uid, 0)
+                self.assertEqual(password.stat().st_mode & 0o777, 0o600)
+            # Applying bcrypt to both web routes remains the host installer's job.
+            self.assertEqual(users.read_bytes(), original_hash)
+            rotated = password.read_bytes()
+            self.assertEqual(quickstart.prepare_auth(paths, state), (user, password))
+            self.assertEqual(password.read_bytes(), rotated)
+
+    def test_rotation_adopts_only_a_single_safe_manual_username(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = install.Paths(config_dir=root / "config", traefik_dynamic_dir=root / "dynamic")
+            paths.traefik_dynamic_dir.mkdir()
+            users = paths.traefik_dynamic_dir / "farm-users.htpasswd"
+            for invalid in ("one:$2b$hash\ntwo:$2b$hash\n", "bad user:$2b$hash\n",
+                            "operator:plaintext\n", "\n", "x" * 4097):
+                with self.subTest(record=invalid[:30]):
+                    users.write_text(invalid)
+                    users.chmod(0o600)
+                    with self.assertRaises(RuntimeError):
+                        quickstart.prepare_auth(paths, {}, rotate=True)
+                    self.assertFalse((paths.config_dir / "web-login-password").exists())
+                    self.assertEqual(users.read_text(), invalid)
+            users.write_text("manual.owner:$2b$12$" + "b" * 53 + "\n")
+            users.chmod(0o600)
+            state = {}
+            user, password = quickstart.prepare_auth(paths, state, rotate=True)
+            self.assertEqual(user, "manual.owner")
+            self.assertEqual(state["auth_user"], user)
+            self.assertEqual(len(install._private_password(password)), 40)
+
+    def test_rotation_refuses_unsafe_existing_files_before_writing(self):
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            paths = install.Paths(config_dir=root / "config", traefik_dynamic_dir=root / "dynamic")
+            state = {"auth_user": "operator"}
+            _, password = quickstart.prepare_auth(paths, state)
+            original = password.read_bytes()
+            with patch.object(install, "_private_password", side_effect=RuntimeError("unsafe password")), \
+                 patch.object(install, "_atomic_write") as write:
+                with self.assertRaisesRegex(RuntimeError, "unsafe password"):
+                    quickstart.prepare_auth(paths, state, rotate=True)
+                write.assert_not_called()
+            paths.traefik_dynamic_dir.mkdir()
+            users = paths.traefik_dynamic_dir / "farm-users.htpasswd"
+            users.write_text("operator:$2b$hash\n")
+            users.chmod(0o600)
+            with patch.object(install, "traefik_users_status", return_value=(False, "unsafe owner")), \
+                 patch.object(install, "_atomic_write") as write:
+                with self.assertRaises(RuntimeError):
+                    quickstart.prepare_auth(paths, state, rotate=True)
+                write.assert_not_called()
+            users.write_text("different-user:$2b$hash\n")
+            with self.assertRaisesRegex(RuntimeError, "نام کاربری"):
+                quickstart.prepare_auth(paths, state, rotate=True)
+            self.assertEqual(password.read_bytes(), original)
+            self.assertEqual(state["auth_user"], "operator")
+
+    def test_main_never_prints_password_even_to_tty_and_wires_explicit_rotation(self):
+        class Output(io.StringIO):
+            def __init__(self, tty):
+                super().__init__()
+                self.tty = tty
+
+            def isatty(self):
+                return self.tty
+
+        private_path = Path("/etc/android-farm/web-login-password")
+        outcome = {"ready": True, "doctor": {"checks": []}, "web": {}, "core": {},
+                   "urls": {"console": "https://farm.example.com/",
+                            "monitoring": "https://metrics.farm.example.com/"}, "app_uuid": "app"}
+        for tty in (False, True):
+            for rotate in (False, True):
+                with self.subTest(tty=tty, rotate=rotate):
+                    output = Output(tty)
+                    with patch.object(quickstart.sys, "stdout", output), \
+                         patch.object(quickstart, "require_host"), \
+                         patch.object(quickstart, "setup_lock", return_value=nullcontext()), \
+                         patch.object(quickstart, "load_state", return_value={}), \
+                         patch.object(quickstart, "save_state"), \
+                         patch.object(quickstart, "source_commit", return_value="a" * 40), \
+                         patch.object(quickstart, "select_server", return_value="server"), \
+                         patch.object(quickstart, "prepare_auth", return_value=("operator", private_path)) as auth, \
+                         patch.object(quickstart, "run_setup", return_value=outcome), \
+                         patch.object(quickstart.getpass, "getpass", return_value="test-api-token"), \
+                         patch("installer.coolify_api.CoolifyClient"), \
+                         patch.object(install, "_read_json_if_regular", return_value={}), \
+                         patch.object(install, "_private_password", return_value="never-print-this") as read:
+                        arguments = ["--domain", "farm.example.com", "--coolify-url", "http://127.0.0.1:8000"]
+                        if rotate:
+                            arguments.append("--rotate-web-password")
+                        self.assertEqual(quickstart.main(arguments), 0)
+                        self.assertEqual(auth.call_args.kwargs, {"rotate": rotate})
+                        read.assert_not_called()
+                    self.assertNotIn("never-print-this", output.getvalue())
+                    self.assertNotIn("test-api-token", output.getvalue())
+                    self.assertIn(str(private_path), output.getvalue())
+                    self.assertIn("operator", output.getvalue())
 
     def test_core_health_rejects_stopped_or_unhealthy_containers(self):
         containers = [{"Name": "/" + name, "State": {"Running": True}}

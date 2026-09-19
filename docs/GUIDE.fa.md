@@ -13,7 +13,7 @@ curl -fsSL https://raw.githubusercontent.com/mjpouladi/AndroidFarm/main/install.
 sudo bash install-android-farm.sh --domain commex-box.com
 ```
 
-4. پس از پایان پنج مرحله، **[پلتفرم](https://commex-box.com)** و **[مانیتورینگ](https://metrics.commex-box.com)** را با اطلاعات ورود چاپ‌شده باز کنید؛ `sudo device-provisioner status` وضعیت واقعی را نشان می‌دهد. صفحهٔ دستگاه پس از تخصیص/روشن‌شدن در `https://commex-box.com/d/num01/` است.
+4. پس از پایان پنج مرحله، **[پلتفرم](https://commex-box.com)** و **[مانیتورینگ](https://metrics.commex-box.com)** را باز کنید. کاربر وب `operator` است؛ رمز را فقط در ترمینال خصوصی با `sudo cat /etc/android-farm/web-login-password` ببینید و به گفتگو یا لاگ اشتراکی نفرستید. `sudo device-provisioner status` وضعیت واقعی را نشان می‌دهد. صفحهٔ دستگاه پس از تخصیص/روشن‌شدن در `https://commex-box.com/d/num01/` است.
 
 نصب تازه کنسول را روی خود دامنه و API Coolify را روی `http://127.0.0.1:8000` تنظیم می‌کند. اگر هر مرحله مبهم بود، **بخش ۵ همین سند** تمام مراحل DNS، توکن، نصب، آزمون و نخستین دستگاه را با جزئیات دارد. کنسول فعلی دموی UX است؛ عملیات واقعی از CLI انجام می‌شود.
 
@@ -238,7 +238,7 @@ source موجود با تغییر محلی بازنویسی نمی‌شود؛ ر
 
 ### گام ۶ — ورود و آزمون اولیهٔ HTTPS
 
-خروجی راه‌انداز لینک‌ها و کاربر `operator` را نشان می‌دهد. رمز وب در terminal تعاملی یک‌بار نمایش داده و در `/etc/android-farm/web-login-password` با دسترسی خصوصی نگه داشته می‌شود. رمز اولیهٔ داخلی Grafana جداست و در `/etc/android-farm/monitoring/grafana-admin-password` قرار دارد. فقط روی terminal خصوصی خود، در صورت نیاز آن‌ها را بخوانید؛ محتوا را در تیکت یا log اشتراکی قرار ندهید:
+خروجی راه‌انداز لینک‌ها و کاربر `operator` را نشان می‌دهد و **رمز را خودکار چاپ نمی‌کند**. رمز وب در `/etc/android-farm/web-login-password` با دسترسی خصوصی نگه داشته می‌شود. رمز اولیهٔ داخلی Grafana جداست و در `/etc/android-farm/monitoring/grafana-admin-password` قرار دارد. فقط روی terminal خصوصی خود، در صورت نیاز آن‌ها را بخوانید؛ محتوا را در گفتگو، تیکت یا log اشتراکی قرار ندهید:
 
 ```bash
 sudo cat /etc/android-farm/web-login-password
@@ -260,6 +260,8 @@ curl -u operator -sS -o /dev/null -w '%{http_code}\n' https://commex-box.com/
 ```
 
 دو فرمان اول باید `401` بدهند؛ فرمان سوم رمز وب را تعاملی می‌پرسد و باید `200` بدهد. از `-k` برای نادیده‌گرفتن خطای گواهی استفاده نکنید؛ خطای TLS را با DNS، 80/443 و log proxy رفع کنید. در مرورگر گواهی معتبر، بازشدن کنسول و login داخلی Grafana را هم تأیید کنید.
+
+اگر پاسخ عمومی `403` و متن `error code: 1010` بود، بخش «خطای 1010 در Cloudflare» را ببینید؛ این پاسخ با `401` موردانتظار احراز هویت فرق دارد.
 
 **کنسول فعلی دموی UX است:** دکمه‌های آن به سرور وصل نیستند. مدیریت واقعی با `sudo device-provisioner ...` انجام می‌شود. ریشهٔ `https://commex-box.com/` کنسول را نشان می‌دهد و گواهی همین دامنه همراه Deploy هسته ایجاد می‌شود. مسیر `/d/num01/` تا پیش از ایجاد و روشن‌شدن دستگاه می‌تواند 404 بدهد؛ صفحه و WebSocket دستگاه را پس از گام بعد آزمایش کنید.
 
@@ -469,6 +471,8 @@ GRAFANA_SERVE_FROM_SUB_PATH=true
 تنظیم `root_url` همراه `serve_from_sub_path=true` مطابق [راهنمای رسمی Grafana برای مسیر فرعی](https://grafana.com/tutorials/run-grafana-behind-a-proxy/#alternative-for-serving-grafana-under-a-sub-path) است. هدرهای Upgrade و Connection در درگاه مطابق [مستندات WebSocket در Nginx](https://nginx.org/en/docs/http/websocket.html) ارسال می‌شوند.
 
 فایل bcrypt میزبان با مالک root و مجوز `0600` ساخته می‌شود؛ اگر Coolify بعداً مالک آن را به UID `9999` تغییر دهد، فقط همین فایل با حفظ مجوز خصوصی پذیرفته می‌شود. آماده‌ساز یک‌باره آن را در volume خصوصی با UID `101` و mode `0400` کپی می‌کند. Nginx بدون root، بدون capability و بدون Docker socket اجرا می‌شود. پس از تغییر فایل خصوصی رمز، راه‌انداز را دوباره اجرا کنید: اثرانگشت غیرمحرمانهٔ `FARM_HTTP_AUTH_REVISION` به‌روزرسانی و درگاه برای دریافت رمز جدید redeploy می‌شود. در مسیر دستی، پس از apply باید ENV جدید را به Coolify منتقل و redeploy کنید. برای تغییر دسترسی/ارتقا نیز از راه‌انداز استفاده کنید تا ENV هسته و runtime دستگاه‌ها هماهنگ بمانند.
+
+برای تعویض رمز وب تولیدشده توسط راه‌انداز، گزینهٔ `--rotate-web-password` را به همان فرمان نصب اضافه کنید؛ به‌ویژه اگر رمز قبلی در گفتگو یا log اشتراکی قرار گرفته است. رمز جدید را پس از پایان نصب فقط از فایل خصوصی بالا بخوانید. این گزینه رمز Basic Auth را تغییر می‌دهد؛ رمز داخلی Grafana جداگانه مدیریت می‌شود.
 
 ## ۷. انتخاب و مدیریت پراکسی
 
@@ -997,6 +1001,8 @@ ss -ltnp | grep ':5551'
 | `managed file parent must be root-owned and protected: /data/coolify/proxy/dynamic` | ناسازگاری نسخهٔ قبلی با مالک استاندارد Coolify؛ بخش «مالکیت مسیر dynamic در Coolify» را ببینید |
 | `non-string key in services.farm-anchor.labels: 0` | ناسازگاری قالب label با Raw Compose؛ بخش «خطای label هنگام Deploy» را ببینید |
 | `unable to prepare context: path "/data/coolify/applications/.../web" not found` | نام ضمنی image بین build و start فرق کرده است؛ بخش «پیدا نشدن مسیر web هنگام start» را ببینید |
+| gateway: `mkdir() "/var/cache/nginx/fastcgi_temp" failed (30: Read-only file system)` | مسیر موقت Nginx در نسخهٔ قبلی خارج از tmpfs است؛ بخش «توقف درگاه به‌دلیل مسیر موقت Nginx» را ببینید |
+| پاسخ دامنه `403` با `error code: 1010` | سیاست Browser Integrity Check لبهٔ Cloudflare؛ بخش «خطای 1010 در Cloudflare» را ببینید |
 | `doctor: blocked` | remediation همان check را اجرا کنید؛ معمولاً Binder، release mismatch، auth file یا local Docker context است |
 | راه‌انداز: نتیجهٔ Deploy نامعلوم | راه‌انداز ابتدا تاریخچهٔ API را بررسی می‌کند. فقط اگر در Coolify مطمئن شدید هیچ Deploy ساخته نشده، همان فرمان را با `--retry-deploy` تکرار کنید؛ درخواست نامعلوم خودکار تکرار نمی‌شود |
 | apply در `waiting_for_coolify` | `coolify.env` را در همان یک App وارد، همان release را deploy و apply یکسان را دوباره اجرا کنید |
@@ -1007,6 +1013,49 @@ ss -ltnp | grep ':5551'
 | metricهای سلامت stale هستند | `android-farm-health.timer`، permission مسیر textfile و mount node-exporter را بررسی کنید |
 | worker retry می‌کند | journal، result task، lock device و DLQ را بررسی کنید؛ task دلخواه shell به صف نفرستید |
 | profile drift | device را stop، فایل profile و digest را بازبینی و start کنترل‌شده اجرا کنید |
+
+### توقف درگاه به‌دلیل مسیر موقت Nginx
+
+خطای زیر در `android-farm-gateway` یعنی Nginx می‌خواهد پوشهٔ موقت FastCGI را روی ریشهٔ فقط‌خواندنی کانتینر بسازد:
+
+```text
+mkdir() "/var/cache/nginx/fastcgi_temp" failed (30: Read-only file system)
+```
+
+نسخهٔ اصلاح‌شده همهٔ مسیرهای موقت Nginx، از جمله FastCGI، uWSGI و SCGI، را زیر `/tmp` قرار می‌دهد که از قبل tmpfs قابل‌نوشتن است. `read_only: true` و اجرای بدون root حفظ می‌شوند. حتی در حالت دامنه نیز gateway باید سالم بالا بیاید؛ HTTPS دامنه از Traefik عبور می‌کند و سلامت آن مسیر باید جداگانه بررسی شود.
+
+اگر رمز قبلی را در خروجی اشتراکی فرستاده‌اید، دریافت اصلاح، استقرار مجدد و تعویض رمز وب را با یک فرمان انجام دهید:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com --rotate-web-password
+```
+
+پس از پایان نصب، رمز جدید را فقط در ترمینال خصوصی خود ببینید و در گفتگو ارسال نکنید:
+
+```bash
+sudo cat /etc/android-farm/web-login-password
+```
+
+### خطای 1010 در Cloudflare
+
+`403` همراه `error code: 1010` نشان‌دهندهٔ مسدودشدن درخواست توسط Browser Integrity Check در Cloudflare است. تغییر رمز وب یا خاموش‌کردن بررسی TLS این سیاست لبه را برطرف نمی‌کند. [راهنمای رسمی خطای 1010](https://developers.cloudflare.com/support/troubleshooting/http-status-codes/cloudflare-1xxx-errors/error-1010/)
+
+برای تفکیک مبدأ از لبه، روی دامنه‌های متعلق به خودتان، درخواست بدون رمز را مستقیماً به IP مبدأ بفرستید؛ این فرمان‌ها نام دامنه و اعتبارسنجی TLS را حفظ می‌کنند:
+
+```bash
+curl --resolve commex-box.com:443:185.208.172.141 -sS -D - -o /dev/null https://commex-box.com/
+curl --resolve metrics.commex-box.com:443:185.208.172.141 -sS -D - -o /dev/null https://metrics.commex-box.com/
+```
+
+در بررسی استقرار ۱۹ سپتامبر ۲۰۲۶، هر دو مبدأ با TLS معتبر `401` و `WWW-Authenticate: Basic realm="traefik"` دادند، درحالی‌که بررسی عمومی از لبه `403/1010` بود؛ بنابراین مشکل مشاهده‌شدهٔ آن درخواست‌ها در لبه بود. `401` فقط فعال‌بودن احراز هویت را ثابت می‌کند؛ پس از اصلاح لبه، ورود واقعی و پاسخ برنامه را هم بررسی کنید.
+
+راه سادهٔ این راهنما، تنظیم رکوردهای **`@` و `metrics` روی DNS only** در حساب Cloudflare خودتان است؛ تنظیم رکورد `coolify` مستقل می‌ماند. اگر می‌خواهید Proxied حفظ شود، در zone همین دامنه یک **Custom Rule با action برابر Skip** بسازید. شرط را فقط به این دو hostname و IP ثابتِ مورداعتمادِ فرستندهٔ آزمون محدود کنید؛ برای آزمونی که از همین سرور با IPv4 ثبت‌شده در Security Events فرستاده می‌شود، نمونهٔ شرط این است:
+
+```text
+(http.host in {"commex-box.com" "metrics.commex-box.com"} and ip.src eq 185.208.172.141)
+```
+
+در گزینه‌های Skip فقط **Browser Integrity Check** را انتخاب کنید؛ بقیهٔ WAF، rate limiting و بررسی‌ها را فعال نگه دارید. اگر آزمون از مانیتور خارجی انجام می‌شود، فقط IP ثابت و تأییدشدهٔ همان مانیتور در Security Events را جایگزین کنید؛ IP مبدأ وب‌سرور الزاماً IP فرستندهٔ هر آزمون نیست. این استثنا برای مدیریت دامنهٔ خودتان است و برای دیگر hostnameها اعمال نمی‌شود. [BIC و استثنای انتخابی](https://developers.cloudflare.com/waf/tools/browser-integrity-check/)، [گزینهٔ Skip مخصوص محصول BIC](https://developers.cloudflare.com/waf/custom-rules/skip/options/)
 
 ### پیدا نشدن مسیر web هنگام start
 

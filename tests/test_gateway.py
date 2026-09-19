@@ -1,11 +1,16 @@
 """Regression checks for the public gateway's routing/security contract.
 
-The end-to-end Nginx/WebSocket test still belongs on the Ubuntu Docker host;
-these checks validate the actual shipped route expression against the allocator.
+Set FARM_GATEWAY_TEST_IMAGE to a locally built gateway image to also run the
+read-only startup/health smoke test on a Linux Docker host. WebSocket routing
+still requires a running device; route expressions are tested offline here.
 """
+import os
 from pathlib import Path
 import re
+import subprocess
 import unittest
+
+import yaml
 
 from generate_farm import generate_one
 from ops.device_ids import ADB_PORT_BASE, DEVICE_LIMIT, device_id
@@ -17,6 +22,22 @@ COMPOSE = (ROOT / 'docker-compose.yml').read_text(encoding='utf-8')
 
 
 class GatewayTests(unittest.TestCase):
+    def test_all_nginx_runtime_paths_use_writable_tmpfs(self):
+        gateway = yaml.safe_load(COMPOSE)['services']['gateway']
+        self.assertTrue(gateway['read_only'])
+        self.assertEqual(gateway['user'], '101:101')
+        self.assertEqual(gateway['tmpfs'], ['/tmp'])
+        # Nginx initializes even unused upstream module paths at startup.
+        # Omitting any directive silently restores an unwritable image path.
+        for directive in ('pid', 'client_body_temp_path', 'proxy_temp_path',
+                          'fastcgi_temp_path', 'uwsgi_temp_path', 'scgi_temp_path'):
+            with self.subTest(directive=directive):
+                values = re.findall(r'^\s*' + directive + r'\s+([^;]+);', CONFIG, re.MULTILINE)
+                self.assertEqual(len(values), 1)
+                path = values[0].split()[0]
+                self.assertTrue(path.startswith('/tmp/'), path)
+                self.assertNotIn('..', path.split('/'))
+
     def screen_route(self):
         expression = re.search(r'location ~ "([^"]+)"', CONFIG).group(1)
         return re.compile(re.sub(r'\(\?<([a-z_]+)>', r'(?P<\1>', expression))
@@ -97,6 +118,22 @@ class GatewayTests(unittest.TestCase):
         for service in (secret_init, gateway):
             self.assertIn('farm.auth.revision=${FARM_HTTP_AUTH_REVISION:-manual}', service)
         self.assertIn('gateway-secret-init:\n        condition: service_completed_successfully', gateway)
+
+    @unittest.skipUnless(os.environ.get('FARM_GATEWAY_TEST_IMAGE'),
+                         'requires a locally built image and Linux Docker engine')
+    def test_read_only_container_starts_and_serves_health(self):
+        # No published ports, host mounts, credentials or external networking.
+        # Exercise actual startup: nginx -t alone does not exercise every mkdir.
+        result = subprocess.run([
+            'docker', 'run', '--rm', '--pull=never', '--network=none',
+            '--read-only', '--tmpfs', '/tmp', '--user', '101:101',
+            '--cap-drop=ALL', '--security-opt', 'no-new-privileges:true',
+            '--entrypoint', 'sh', os.environ['FARM_GATEWAY_TEST_IMAGE'], '-ec',
+            'nginx; trap "nginx -s quit" EXIT; '
+            'wget -q -O- http://127.0.0.1:8081/healthz',
+        ], capture_output=True, text=True, timeout=60, check=False)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(result.stdout.strip(), 'ok')
 
 
 if __name__ == '__main__':
