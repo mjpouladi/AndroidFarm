@@ -266,10 +266,17 @@ def main():
         secret_path = args.secret_dir / f'{device}.json'
         if secret_path.exists():
             installed_secret = read_private_json(secret_path, 'installed proxy secret')
-            installed_identity = json.dumps([installed_secret.get('type'), installed_secret.get('server'),
-                                             installed_secret.get('server_port'), installed_secret.get('username')])
-            if installed_identity != proxy_identity:
-                raise RuntimeError('existing device proxy endpoint/session differs; refusing to rotate identity')
+            if direct:
+                # The allocation already binds this request to its phone and
+                # direct egress. The installed direct secret has no endpoint
+                # fields: compare its exact schema, never a proxy identity.
+                if installed_secret != {'type': 'direct'}:
+                    raise RuntimeError('existing device direct egress configuration differs; refusing to change it')
+            else:
+                installed_identity = json.dumps([installed_secret.get('type'), installed_secret.get('server'),
+                                                 installed_secret.get('server_port'), installed_secret.get('username')])
+                if installed_identity != proxy_identity:
+                    raise RuntimeError('existing device proxy endpoint/session differs; refusing to rotate identity')
         if existing.returncode != 0:
             farmctl.run('docker', 'volume', 'create', '--label', f'farm.device={device}',
                         '--label', f'farm.request={record["request_hash"]}', '--driver', 'local',

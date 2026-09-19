@@ -4,9 +4,28 @@ import ConnectionHelp from './ConnectionHelp';
 import Diagnostics from './Diagnostics';
 import SecurityPanel from './SecurityPanel';
 import CatalogSetup from './CatalogSetup';
+import { PreparationDiagnostics } from './App';
 import { parseSnapshot } from './domain';
 
 describe('پنل‌های عملیات و امنیت', () => {
+  it('توقف قدیمی را با زمان ثبت و فرمان فقط‌خواندنی نشان می‌دهد، بدون نسبت‌دادن آن به تلاش جدید', () => {
+    const html = renderToStaticMarkup(<PreparationDiagnostics device={{ id: 'num03', last_error: 'guarded start failed', failed_at: 1789849223 }} />);
+    expect(html).toContain('آخرین توقف ثبت‌شده');
+    expect(html).toContain('درخواست‌های ردشده پیش از اجرا');
+    expect(html).toContain('dateTime="2026-09-19T20:20:23.000Z"');
+    expect(html).toContain('sudo device-provisioner diagnose --id num03');
+    expect(html).toContain('user-select:all');
+    expect(html).not.toContain('آخرین علت توقف آماده‌سازی');
+    expect(html).not.toContain('<button');
+  });
+  it('برای وضعیت قدیمیِ بدون زمان، تاریخ یا علت تازه نمی‌سازد و شناسهٔ ناامن را وارد فرمان نمی‌کند', () => {
+    const html = renderToStaticMarkup(<PreparationDiagnostics device={{ id: 'num03', last_error: 'guarded start failed' }} />);
+    expect(html).not.toContain('<time');
+    expect(html).toContain('guarded start failed');
+    const unsafe = renderToStaticMarkup(<PreparationDiagnostics device={{ id: 'num03; reboot', last_error: '<script>error</script>', failed_at: null }} />);
+    expect(unsafe).not.toContain('sudo device-provisioner');
+    expect(unsafe).not.toContain('<script>');
+  });
   it('برای خطای احراز هویت نصب مجدد پیشنهاد نمی‌دهد', () => {
     const html = renderToStaticMarkup(<ConnectionHelp status={401} retry={() => {}} />);
     expect(html).toContain('احراز هویت');

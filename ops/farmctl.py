@@ -346,15 +346,50 @@ def ensure_android_image(resolved, device):
     return True
 
 
-def wait_proxy(device, timeout=120):
+def network_failure_evidence(device):
+    """Read namespace/host routing before cleanup destroys the failed namespace.
+
+    This output belongs in the private host job log, never the web error. No
+    secrets, environment dumps, firewall changes or recovery actions are used.
+    """
+    container = f'proxy-{device}'
+    chain = network_plan(device_index(device, aliases=False))['iptables_chain']
+    checks = (
+        ('IPv4 addresses', ['docker', 'exec', container, 'ip', '-4', '-brief', 'address', 'show']),
+        ('IPv4 policy rules', ['docker', 'exec', container, 'ip', '-4', 'rule', 'show']),
+        ('IPv4 routes', ['docker', 'exec', container, 'ip', '-4', 'route', 'show', 'table', 'all']),
+        ('namespace firewall', ['docker', 'exec', container, 'iptables', '-S']),
+        ('host egress guard', ['iptables', '-w', '2', '-S', chain]),
+    )
+    for label, argv in checks:
+        print(f'{device}: {label} at network failure:', file=sys.stderr, flush=True)
+        try:
+            result = subprocess.run(argv, text=True, errors='replace', capture_output=True, timeout=3)
+            # Limit retained evidence while preserving the original failure.
+            output = ((result.stdout or '') + (result.stderr or ''))[:4096]
+            print(output.strip() or f'no output (exit {result.returncode})', file=sys.stderr, flush=True)
+        except (OSError, subprocess.SubprocessError):
+            print('diagnostic command unavailable or timed out', file=sys.stderr, flush=True)
+
+
+def wait_proxy(device, timeout=120, *, phase='network-start'):
     deadline = time.monotonic() + timeout
+    last = 'no completed healthcheck'
     while time.monotonic() < deadline:
-        result = subprocess.run(['docker', 'exec', f'proxy-{device}', '/healthcheck.sh'],
-                                text=True, capture_output=True, timeout=15)
+        try:
+            result = subprocess.run(['docker', 'exec', f'proxy-{device}', '/healthcheck.sh'],
+                                    text=True, errors='replace', capture_output=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            last = 'healthcheck execution timed out'
+            time.sleep(3)
+            continue
         if result.returncode == 0:
             return
+        last = f'healthcheck exit {result.returncode}: ' + ((result.stderr or '') + (result.stdout or ''))[:2048].strip()
         time.sleep(3)
-    raise RuntimeError('proxy did not become healthy before timeout')
+    print(f'{device}: {phase}: {last}', file=sys.stderr, flush=True)
+    network_failure_evidence(device)
+    raise RuntimeError(f'proxy did not become healthy before timeout ({phase}); see private host network evidence')
 
 
 def validate_compose(config, device, secret_dir, expected_profile=None, access_mode='domain'):
@@ -767,7 +802,7 @@ def main():
             android_paused = False
             try:
                 run(*compose, 'up', '-d', '--no-deps', '--force-recreate', f'proxy-{d}')
-                wait_proxy(d)
+                wait_proxy(d, phase='before-android-boot')
                 first_ip = proxy_egress_ip(d)
                 if expected_ip is not None and first_ip != expected_ip:
                     raise RuntimeError('approved sticky egress IP mismatch; device returned to stopped state')
@@ -783,7 +818,7 @@ def main():
                 run('docker', 'pause', f'android-{d}', timeout=30)
                 android_paused = True
                 guard(d, args.secret_dir, allow_upstream=True)
-                wait_proxy(d)
+                wait_proxy(d, phase='after-android-boot')
                 proxy_ip = proxy_egress_ip(d)
                 if proxy_ip != (expected_ip or first_ip):
                     raise RuntimeError('approved sticky egress IP mismatch; device returned to stopped state')
