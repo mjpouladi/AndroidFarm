@@ -1103,7 +1103,7 @@ def discover(settings: Settings) -> dict[str, object]:
 
 def _bootstrap_required() -> bool:
     commands = ("curl", "git", "rsync", "docker", "iptables", "iptables-restore",
-                "htpasswd", "apksigner", "aapt", "restic")
+                "htpasswd", "apksigner", "aapt", "restic", "modprobe", "modinfo", "depmod")
     if any(not shutil.which(command) for command in commands):
         return True
     try:
@@ -1123,6 +1123,78 @@ def _compose_ready() -> bool:
         return False
 
 
+def _binder_module_available(kernel: str) -> bool:
+    return _command(["modinfo", "-k", kernel, "binder_linux"]).returncode == 0
+
+
+def _binder_recovery_hint(kernel: str, *, modules_root: Path = Path("/lib/modules"),
+                          boot_root: Path = Path("/boot")) -> str:
+    """Suggest a different installed kernel only when its Binder module exists."""
+    alternatives = []
+    if modules_root.is_dir():
+        for candidate in sorted(modules_root.iterdir()):
+            name = candidate.name
+            if (name != kernel and re.fullmatch(r"[0-9][A-Za-z0-9._+-]{0,127}", name) and
+                    candidate.is_dir() and (boot_root / f"vmlinuz-{name}").is_file() and
+                    _binder_module_available(name)):
+                alternatives.append(name)
+    hint = (
+        f"کرنل فعال: {kernel}. بستهٔ linux-modules-extra-{kernel} و مخازن Ubuntu را بررسی کنید. "
+        "هشدار needrestart به‌تنهایی به معنی آماده‌بودن Binder در کرنل جدید نیست. "
+    )
+    if alternatives:
+        hint += (
+            "کرنل نصب‌شده با ماژول Binder: " + ", ".join(alternatives) + ". "
+            "اگر قرار است از آن استفاده کنید، انتخاب کرنل بوت را بررسی کنید و در زمان مناسب "
+            "sudo reboot بزنید؛ این کار موقتاً سرویس‌های سرور را قطع می‌کند. "
+            "پس از اتصال مجدد، uname -r و modinfo binder_linux را بررسی کنید. "
+        )
+    hint += "پس از رفع مشکل: sudo bash /opt/android-farm/source/install.sh"
+    return hint
+
+
+def prepare_binder() -> None:
+    """Load Binder, repairing the matching Ubuntu module package when missing.
+
+    Never replace the kernel, unload a live Binder module, or reboot the host.
+    https://github.com/remote-android/redroid-doc/blob/master/deploy/ubuntu.md
+    """
+    # Some kernels compile Binder in. Already-created devices are sufficient;
+    # such hosts need neither a loadable module nor an extra package.
+    if binder_devices_ready():
+        return
+    kernel = platform.release()
+    if not re.fullmatch(r"[0-9][A-Za-z0-9._+-]{0,127}", kernel):
+        raise RuntimeError("نام کرنل فعال معتبر نیست؛ نصب خودکار ماژول متوقف شد.")
+    if not _binder_module_available(kernel):
+        if not re.search(r"-generic(?:-64k)?$", kernel):
+            raise RuntimeError("کرنل فعلی Binder قابل بارگذاری ندارد؛ " + _binder_recovery_hint(kernel))
+        package = f"linux-modules-extra-{kernel}"
+        print(f"  نصب بستهٔ Binder برای کرنل فعال: {package}", flush=True)
+        environment = {**os.environ, "DEBIAN_FRONTEND": "noninteractive"}
+        try:
+            subprocess.run(["apt-get", "update"], check=True, env=environment, timeout=900)
+            subprocess.run(["apt-get", "install", "-y", "--no-install-recommends", package],
+                           check=True, env=environment, timeout=900)
+            _command(["depmod", "-a", kernel], check=True, timeout=120)
+        except (OSError, subprocess.SubprocessError) as exc:
+            raise RuntimeError("آماده‌سازی بستهٔ Binder کامل نشد. " + _binder_recovery_hint(kernel)) from exc
+        if not _binder_module_available(kernel):
+            raise RuntimeError("بسته نصب شد اما Binder برای کرنل فعال پیدا نشد. " +
+                               _binder_recovery_hint(kernel))
+    loaded = _command(["modprobe", "binder_linux", "devices=binder,hwbinder,vndbinder"])
+    if loaded.returncode:
+        detail = (loaded.stderr or loaded.stdout or "unknown module loading error").strip()[:1500]
+        raise RuntimeError(f"بارگذاری Binder در کرنل {kernel} ناموفق بود: {detail}. "
+                           "ماژول موجود را حذف یا unload نکنید؛ وضعیت کرنل و محدودیت میزبان را بررسی کنید.")
+    if not binder_devices_ready():
+        raise RuntimeError(
+            "Binder بارگذاری شد ولی /dev/binder، /dev/hwbinder و /dev/vndbinder آماده نیستند. "
+            "ممکن است ماژول از قبل با تنظیمات دیگری بارگذاری شده باشد؛ آن را خودکار unload نمی‌کنم. "
+            "تنظیم devices و سرویس استفاده‌کننده از Binder را بررسی کنید."
+        )
+
+
 def prepare_host(source: Path, skip: bool = False) -> None:
     del source
     if not skip:
@@ -1130,7 +1202,7 @@ def prepare_host(source: Path, skip: bool = False) -> None:
             os.environ["DEBIAN_FRONTEND"] = "noninteractive"
             subprocess.run(["apt-get", "update"], check=True)
             subprocess.run(["apt-get", "install", "-y", "ca-certificates", "curl", "git", "python3",
-                            "iptables", "apache2-utils", "apksigner", "aapt", "rsync", "restic"], check=True)
+                            "iptables", "apache2-utils", "apksigner", "aapt", "rsync", "restic", "kmod"], check=True)
             if not shutil.which("docker"):
                 conflicts = []
                 for package in ("docker.io", "docker-compose", "containerd", "runc", "podman-docker"):
@@ -1168,7 +1240,7 @@ def prepare_host(source: Path, skip: bool = False) -> None:
         compose = subprocess.check_output(["docker", "compose", "version", "--short"], text=True)
         if parse_version(compose) < MINIMUM_COMPOSE:
             raise RuntimeError("Docker Compose >= 2.33.1 is required")
-        subprocess.run(["modprobe", "binder_linux", "devices=binder,hwbinder,vndbinder"], check=True)
+        prepare_binder()
         _atomic_write(Path("/etc/modules-load.d/android-farm.conf"), b"binder_linux\n", 0o644)
         _atomic_write(Path("/etc/modprobe.d/android-farm.conf"),
                       b"options binder_linux devices=binder,hwbinder,vndbinder\n", 0o644)
@@ -1340,7 +1412,7 @@ def doctor_checks(settings: Settings, discovered: Mapping[str, object]) -> list[
     checks.append(Check("binder", "pass" if binder else "block",
                         "binder, hwbinder and vndbinder available" if binder else
                         "one or more Redroid binder devices are missing",
-                        None if binder else "Load binder_linux with binder,hwbinder,vndbinder."))
+                        None if binder else "Rerun install.sh to install the matching Ubuntu kernel modules and load Binder."))
     guard_ready = bool(discovered.get("docker_user_chain")) and bool(shutil.which("iptables-restore"))
     checks.append(Check("egress-guard", "pass" if guard_ready else "block",
                         ("DOCKER-USER and iptables-restore available" if guard_ready

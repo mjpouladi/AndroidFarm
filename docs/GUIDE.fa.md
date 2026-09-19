@@ -129,7 +129,7 @@ sudo device-provisioner status --json
 - `DOCKER_HOST` و `DOCKER_CONTEXT` نباید به daemon راه‌دور اشاره کنند.
 - دسترسی root فقط برای تیم زیرساخت؛ Docker socket هرگز در UI، worker یا شبکه publish نمی‌شود.
 
-installer در صورت نیاز Docker CE، Compose plugin و ابزارهای `iptables`، `htpasswd`، `apksigner`، `aapt`، `rsync` و `restic` را نصب می‌کند، `binder_linux` را load و persistent می‌کند و Compose نسخهٔ 2.33.1 یا بالاتر را الزام می‌کند. نصب/پارتیشن‌بندی خود Ubuntu و نصب خود Coolify خارج از installer است.
+installer در صورت نیاز Docker CE، Compose plugin و ابزارهای `iptables`، `htpasswd`، `apksigner`، `aapt`، `rsync` و `restic` را نصب می‌کند، `binder_linux` را load و persistent می‌کند و Compose نسخهٔ 2.33.1 یا بالاتر را الزام می‌کند. اگر Binder برای کرنل در حال اجرا موجود نباشد، نصب بستهٔ رسمی `linux-modules-extra-$(uname -r)` همان کرنل را امتحان می‌کند؛ در صورت نیاز به بوت کرنل دیگری، با راهنمای مشخص متوقف می‌شود و **سرور را خودکار reboot نمی‌کند**. نصب/پارتیشن‌بندی خود Ubuntu و نصب خود Coolify خارج از installer است.
 
 ## ۵. نصب قدم‌به‌قدم با دامنه و HTTPS
 
@@ -982,6 +982,7 @@ ss -ltnp | grep ':5551'
 
 | نشانه | بررسی |
 |---|---|
+| `Module binder_linux not found` | مراحل «نبودن Binder پس از به‌روزرسانی کرنل» در ادامهٔ همین بخش؛ ابتدا نصب‌کنندهٔ به‌روز را دوباره اجرا کنید |
 | `doctor: blocked` | remediation همان check را اجرا کنید؛ معمولاً Binder، release mismatch، auth file یا local Docker context است |
 | راه‌انداز: نتیجهٔ Deploy نامعلوم | راه‌انداز ابتدا تاریخچهٔ API را بررسی می‌کند. فقط اگر در Coolify مطمئن شدید هیچ Deploy ساخته نشده، همان فرمان را با `--retry-deploy` تکرار کنید؛ درخواست نامعلوم خودکار تکرار نمی‌شود |
 | apply در `waiting_for_coolify` | `coolify.env` را در همان یک App وارد، همان release را deploy و apply یکسان را دوباره اجرا کنید |
@@ -992,6 +993,59 @@ ss -ltnp | grep ':5551'
 | metricهای سلامت stale هستند | `android-farm-health.timer`، permission مسیر textfile و mount node-exporter را بررسی کنید |
 | worker retry می‌کند | journal، result task، lock device و DLQ را بررسی کنید؛ task دلخواه shell به صف نفرستید |
 | profile drift | device را stop، فایل profile و digest را بازبینی و start کنترل‌شده اجرا کنید |
+
+### نبودن Binder پس از به‌روزرسانی کرنل
+
+خطایی مانند `Module binder_linux not found in directory /lib/modules/6.8.0-111-generic` یعنی ماژول Binder برای **کرنل در حال اجرا** پیدا نشده است. پیام قبلیِ `needrestart` دربارهٔ کرنل جدید به‌تنهایی ثابت نمی‌کند که reboot تنها راه‌حل است؛ ممکن است فقط بستهٔ ماژول‌های اضافی همان کرنل نصب نباشد. `modprobe` ماژول‌ها را برای نسخهٔ جاری کرنل جست‌وجو می‌کند ([راهنمای رسمی Ubuntu](https://manpages.ubuntu.com/manpages/noble/man8/modprobe.8.html)).
+
+**۱. ابتدا همین فرمان را روی سرور اجرا کنید:**
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com
+```
+
+راه‌انداز checkout مدیریت‌شده را از `main` به‌روز می‌کند و از وضعیت ثبت‌شده ادامه می‌دهد. نسخهٔ اصلاح‌شده ابتدا وجود Binder را بررسی می‌کند؛ در صورت نبودن آن، بستهٔ رسمی `linux-modules-extra` دقیقاً مطابق `uname -r` را امتحان می‌کند، فهرست ماژول‌ها را با `depmod` بازسازی و بارگذاری را دوباره بررسی می‌کند. نصب این بسته روش مستند Redroid برای Ubuntu است، اما موجودبودن بسته و پشتیبانی Binder برای هر نسخهٔ کرنل باید روی همان میزبان تأیید شود ([راهنمای رسمی Redroid برای Ubuntu](https://github.com/remote-android/redroid-doc/blob/master/deploy/ubuntu.md)).
+
+**۲. راه مستقیم جایگزین برای رفع همین خطا:**
+
+در Ubuntu، فهرست رسمی بستهٔ `linux-modules-extra-6.8.0-111-generic` برای `amd64` شامل `binder_linux.ko.zst` است ([فهرست فایل‌های بسته](https://packages.ubuntu.com/en/noble-updates/amd64/linux-modules-extra-6.8.0-111-generic/filelist)). فرمان‌ها را به‌ترتیب اجرا کنید؛ اگر یکی ناموفق بود، ابتدا همان خطا را رفع کنید و به مرحلهٔ بعد نروید:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y "linux-modules-extra-$(uname -r)"
+sudo depmod -a "$(uname -r)"
+sudo modprobe binder_linux devices=binder,hwbinder,vndbinder
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com
+```
+
+اگر Binder با این روش بارگذاری شد، برای ادامهٔ نصب فارم نیازی به reboot ندارید؛ رسیدگی به هشدار کرنل جدید می‌تواند جداگانه انجام شود.
+
+**۳. فقط اگر راه‌انداز نیاز به reboot برای استفاده از کرنل نصب‌شدهٔ دارای Binder را گزارش کرد، زمان مناسب انتخاب کنید:**
+
+reboot اتصال SSH و سرویس‌های همین سرور، از جمله Coolify، را موقتاً قطع می‌کند. ابتدا انتخاب کرنل بوت را بررسی کنید تا همان نسخهٔ دارای Binder که راه‌انداز نام برده اجرا شود؛ صرف وجود آن در `/lib/modules` کافی نیست. کارهای در حال اجرا را متوقف و دسترسی کنسول ارائه‌دهندهٔ سرور را آماده کنید؛ سپس:
+
+```bash
+sudo reboot
+```
+
+بعد از اتصال دوباره به SSH:
+
+```bash
+uname -r
+modinfo binder_linux
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com
+```
+
+اگر کرنل جاری تغییر نکرده باشد، یا `modinfo` همچنان خطا بدهد، reboot را تکرار نکنید. خروجی این فرمان‌ها را برای بررسی نگه دارید:
+
+```bash
+uname -r
+ls -1 /lib/modules
+apt-cache policy "linux-modules-extra-$(uname -r)"
+modinfo -k "$(uname -r)" binder_linux
+```
+
+بستهٔ ماژول یک نسخهٔ دیگر را به کرنل جاری تحمیل نکنید و ماژول را از مسیر کرنل دیگر کپی نکنید. اگر مخزن Ubuntu بستهٔ مطابق را ندارد یا کرنل میزبان Binder ارائه نمی‌کند، باید کرنل پشتیبانی‌شدهٔ میزبان با بسته‌های منطبق بررسی شود؛ نصب‌کننده مخزن شخص ثالث یا DKMS دلخواه اضافه نمی‌کند. این پروژه برای Redroid از `androidboot.use_memfd=true` استفاده می‌کند؛ خطای Binder با نصب اجباری `ashmem_linux` رفع نمی‌شود.
 
 ## ۲۱. فایل‌های مرجع
 
