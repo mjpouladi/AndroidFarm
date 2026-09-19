@@ -3,7 +3,8 @@
 
 The existing host installer remains the authority for release, network and
 capacity checks. This entry point coordinates its two phases, Coolify, and the
-host control-plane role without storing an API token.
+host control-plane role. API credentials may be remembered in an opt-in private
+file, separate from installation state and bound to the selected Coolify URL.
 """
 from __future__ import annotations
 
@@ -33,7 +34,7 @@ ROOT = Path(__file__).resolve().parents[1]
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
-from installer import install
+from installer import install, token_store
 from installer.coolify_api import CoolifyError
 from ops.secureio import atomic_json, read_private_json, require_private_directory
 
@@ -205,6 +206,27 @@ def ask_admin_password() -> str:
     if not secrets.compare_digest(value.encode("utf-8"), confirmation.encode("utf-8")):
         raise ValueError("تکرار رمز یکسان نیست؛ رمز تغییر نکرد.")
     return value
+
+
+def select_token(url: str, *, token_file: Path | None = None,
+                 remember: bool = False) -> tuple[str, str]:
+    """Explicit input overrides the remembered token; no credential is printed."""
+    if token_file is not None:
+        return token_store.validate_token(install._private_password(token_file)), 'file'
+    if not remember:
+        saved = token_store.load(url)
+        if saved is not None:
+            say('توکن خصوصی ذخیره‌شده برای همین آدرس Coolify استفاده می‌شود.')
+            return saved, 'saved'
+    label = ('توکن API (مخفی؛ پس از تأیید در فایل خصوصی ذخیره می‌شود): ' if remember else
+             'توکن API (مخفی؛ ذخیره نمی‌شود): ')
+    try:
+        with warnings.catch_warnings():
+            warnings.simplefilter('error', getpass.GetPassWarning)
+            value = getpass.getpass(label).strip()
+    except getpass.GetPassWarning:
+        raise RuntimeError('ورود مخفی توکن ممکن نیست؛ از ترمینال تعاملی SSH یا --token-file استفاده کنید.') from None
+    return token_store.validate_token(value), 'prompt'
 
 
 def local_addresses(runner: Callable = subprocess.run) -> tuple[set[str], set[str]]:
@@ -499,7 +521,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--console-domain", help="دامنهٔ جداگانهٔ اختیاری پنل؛ پیش‌فرض همان دامنهٔ اصلی")
     parser.add_argument("--port", type=int, help="پورت درگاه HTTP؛ پیش‌فرض 18080، در حالت دامنه فقط loopback")
     parser.add_argument("--coolify-url", help="آدرس پنل Coolify؛ HTTPS یا HTTP فقط روی loopback")
-    parser.add_argument("--token-file", type=Path, help="فایل خصوصی root:0600؛ در حالت عادی توکن مخفی پرسیده می‌شود")
+    parser.add_argument("--token-file", type=Path, help="خواندن توکن از فایل خصوصی؛ مقدم بر توکن ذخیره‌شده")
+    parser.add_argument("--remember-token", action="store_true",
+                        help="دریافت توکن تازه و ذخیرهٔ خصوصی آن پس از تأیید، برای نصب‌های بعدی")
     parser.add_argument("--server-uuid", help="برای میزبان‌های چندسروری یا NAT")
     parser.add_argument("--app-uuid", help="UUID برنامهٔ موجود همین نصب")
     parser.add_argument("--retry-deploy", action="store_true",
@@ -558,6 +582,8 @@ def main(argv=None) -> int:
         require_host()
         if (args.diagnose or args.repair_control_plane) and (args.admin_user or args.set_admin_password or args.rotate_web_password):
             raise ValueError("تغییر مشخصات ورود را با نصب عادی اجرا کنید؛ گزینه‌های تشخیص و تعمیر رمز را تغییر نمی‌دهند.")
+        if (args.diagnose or args.repair_control_plane) and args.remember_token:
+            raise ValueError('ذخیرهٔ توکن را با نصب عادی اجرا کنید؛ تشخیص و تعمیر به توکن Coolify نیاز ندارند.')
         if args.diagnose:
             result = diagnose()
             say(json.dumps(result, indent=2, ensure_ascii=False, sort_keys=True))
@@ -574,15 +600,20 @@ def main(argv=None) -> int:
             access = select_access(args, state, initial)
             url = args.coolify_url or state.get("coolify_url") or prompt(
                 "آدرس Coolify", "http://127.0.0.1:8000")
-            say("در Coolify، API Access را فعال کنید؛ سپس در Keys & Tokens → API Tokens یک توکن موقت root برای تیم این سرور بسازید.")
-            say("راه‌انداز هم تنظیمات می‌سازد و هم Deploy می‌کند؛ توکن deploy-only کافی نیست. پس از پایان نصب می‌توانید توکن موقت را لغو کنید.")
-            token = (install._private_password(args.token_file) if args.token_file else
-                     getpass.getpass("توکن API (نمایش و ذخیره نمی‌شود): ").strip())
-            if not token:
-                raise ValueError("توکن API خالی است.")
+            say("API Access در Coolify باید فعال باشد و توکن همین تیم مجوز root داشته باشد؛ deploy-only کافی نیست.")
+            token, token_source = select_token(url, token_file=args.token_file, remember=args.remember_token)
             client = CoolifyClient(url, token)
             commit = source_commit(ROOT)
-            server = select_server(client, args.server_uuid or state.get("server_uuid"))
+            try:
+                server = select_server(client, args.server_uuid or state.get("server_uuid"))
+            except CoolifyError as exc:
+                if token_source == 'saved' and exc.status in (401, 403):
+                    raise RuntimeError('Coolify دسترسی توکن ذخیره‌شده را نپذیرفت؛ API Access و مجوزها را بررسی کنید. '
+                                       'برای جایگزینی توکن همان فرمان را با --remember-token اجرا کنید.') from None
+                raise
+            if args.remember_token:
+                saved_path = token_store.save(url, token)
+                say(f'توکن تأییدشده در فایل خصوصی {saved_path} ذخیره شد؛ نصب بعدی آن را خودکار می‌خواند.')
             state.update(**access, coolify_url=url, server_uuid=server)
             save_state(state)
             paths = install.Paths()

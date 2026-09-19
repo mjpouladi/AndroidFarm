@@ -449,6 +449,8 @@ class InstallerFilesystemTests(unittest.TestCase):
             wrapper = settings.paths.wrapper.read_text()
             self.assertIn(first["release_dir"], wrapper)
             self.assertNotIn("/current/", wrapper)
+            self.assertIn("export PYTHONDONTWRITEBYTECODE=1\n", wrapper)
+            self.assertIn("exec /usr/bin/python3 -B ", wrapper)
 
     def test_doctor_cannot_report_ready_when_host_api_or_console_route_fails(self):
         with tempfile.TemporaryDirectory() as folder:

@@ -13,6 +13,11 @@ import sys
 import time
 from urllib.parse import urlparse
 
+# Releases are verified against an exact manifest. Root can write bytecode even
+# into mode-0555 directories, so protect both this process and its child tools.
+sys.dont_write_bytecode = True
+os.environ['PYTHONDONTWRITEBYTECODE'] = '1'
+
 from ops import inventory, resources
 from ops.compose_factory import PROFILES, canonical_device, single_instance
 from ops.device_profiles import apply_profile, load as load_device_profile
