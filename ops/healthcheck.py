@@ -180,7 +180,7 @@ def _crashed(item: dict | None) -> bool:
 
 
 def observe(device: str, runner: Callable = run, clock: Callable[[], float] = time.time,
-            boot_grace: int = 240, wants_running: Callable[[str], bool] | None = None) -> Observation:
+            boot_grace: int = 600, wants_running: Callable[[str], bool] | None = None) -> Observation:
     canonical_device(device)
     try:
         return _observe(device, runner, clock, boot_grace,
@@ -397,7 +397,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--device", action="append", default=[])
     parser.add_argument("--state-file", type=Path, default=DEFAULT_STATE)
     parser.add_argument("--metrics-file", type=Path, default=DEFAULT_METRICS)
-    parser.add_argument("--boot-grace", type=int, default=240)
+    # Matches the first-boot budget of the attested start; a boot inside it is never a stall.
+    parser.add_argument("--boot-grace", type=int, default=600)
     parser.add_argument("--cooldown-base", type=int, default=300)
     parser.add_argument("--cooldown-max", type=int, default=3600)
     parser.add_argument("--restart-limit", type=int, default=1)

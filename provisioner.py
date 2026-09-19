@@ -125,9 +125,27 @@ def host_lifecycle_lock(path=Path('/run/lock/android-farm.lock')):
 
 
 def invoke(script, *arguments, capture=False):
+    """Run an ops module; its stderr always streams through to this process.
+
+    Only stdout is captured on request. Swallowing stderr hid the deliberate
+    fail-closed messages that the console's failure mapping and the host job
+    log depend on, leaving operators with a generic failure.
+    """
     module = f'ops.{Path(script).stem}'
     command = [sys.executable, '-m', module, *map(str, arguments)]
-    return subprocess.run(command, check=True, text=True, capture_output=capture, timeout=3300, cwd=ROOT)
+    return subprocess.run(command, check=True, text=True, stdout=subprocess.PIPE if capture else None,
+                          timeout=3300, cwd=ROOT)
+
+
+def describe_failure(exc):
+    """One operator-facing line for a failed host step, never a command's full argv."""
+    if isinstance(exc, subprocess.TimeoutExpired):
+        return f'host step timed out after {int(exc.timeout or 0)} seconds; retry when the host is idle'
+    if isinstance(exc, subprocess.CalledProcessError):
+        argv = [str(part) for part in (exc.cmd if isinstance(exc.cmd, (list, tuple)) else [exc.cmd])]
+        name = argv[2] if len(argv) > 2 and argv[1] == '-m' else (Path(argv[0]).name if argv else 'command')
+        return f'host step {name} exited with status {exc.returncode}; its messages are printed above'
+    return str(exc)
 
 
 def farmctl(config, action, device, *extra, capture=False):
@@ -264,19 +282,21 @@ def collect_status(config):
             role_states[role] = ('missing' if not item else
                                  item['State'].get('Health', {}).get('Status') or
                                  ('running' if item['State'].get('Running') else 'stopped'))
-        proxy = inspections[f'proxy-{device}']
+        proxy = inspections.get(f'proxy-{device}')
         bindings = ((proxy or {}).get('NetworkSettings', {}).get('Ports', {}).get('5555/tcp') or [])
         adb_port = bindings[0].get('HostPort') if bindings else None
         rows.append({'id': device, 'phase': record.get('phase', 'unknown'), 'hold': holds.get(device),
                      'containers': role_states, 'adb': f'127.0.0.1:{adb_port}' if adb_port else None,
                      'screen': web_url(config, device), 'proxy': proxy_endpoint(config, device),
                      'expected_egress_ip': record.get('expected_egress_ip'),
-                     'phone': record.get('phone_masked', '-'), 'cpu': '-', 'memory': '-'})
+                     'phone': record.get('phone_masked', '-'), 'cpu': '-', 'memory': '-',
+                     'last_error': record.get('last_error'), 'failed_at': record.get('failed_at')})
     if running_names:
+        # A container that stops between ps and stats must not fail the whole report.
         stats = subprocess.run(['docker', 'stats', '--no-stream', '--format', '{{json .}}', *running_names],
-                               text=True, capture_output=True, check=True, timeout=45)
+                               text=True, capture_output=True, check=False, timeout=45)
         by_name = {}
-        for line in stats.stdout.splitlines():
+        for line in (stats.stdout or '').splitlines():
             if line.strip():
                 item = json.loads(line)
                 by_name[item['Name']] = item
@@ -301,6 +321,131 @@ def print_status(payload):
     print('  '.join(value.ljust(widths[index]) for index, value in enumerate(headers)))
     for row in values:
         print('  '.join(str(value).ljust(widths[index]) for index, value in enumerate(row)))
+    for row in payload['devices']:
+        if row.get('last_error'):
+            print(f"{row['id']}: incomplete preparation - {row['last_error']}")
+
+
+def _env_value(path, key, default):
+    if not path or not Path(path).exists():
+        return default
+    for line in Path(path).read_text(encoding='utf-8').splitlines():
+        if line.startswith(f'{key}='):
+            return line.split('=', 1)[1].strip().strip('"').strip("'") or default
+    return default
+
+
+def collect_diagnosis(config, device, *, log_dir=Path('/var/lib/android-farm/job-logs'), log_tail=25,
+                      container_tail=40):
+    """Read-only, bounded evidence for one device: record, containers, host prerequisites, logs.
+
+    Everything here already lives on the host for root; nothing is sent anywhere.
+    """
+    from ops import desired_state, events
+    import platform
+    state = inventory.load(config.state_dir / 'inventory.json')
+    record = inventory.find(state, device) or {}
+    hold_path = config.state_dir / 'holds.json'
+    holds = read_private_json(hold_path, 'safety holds') if hold_path.exists() else {}
+    try:
+        wants_running = desired_state.wants_running(device)
+    except (OSError, RuntimeError, ValueError):
+        wants_running = None
+    report = {'schema_version': 1, 'device': device, 'collected_at': int(time.time()), 'allocated': bool(record),
+              'record': {key: record.get(key) for key in (
+                  'phase', 'egress', 'proxy_id', 'last_error', 'failed_at', 'identity_baseline_created',
+                  'apk_package', 'prepared_at', 'expected_egress_ip')},
+              'hold': holds.get(device), 'wants_running': wants_running, 'containers': {}}
+    for role in ('proxy', 'android', 'screen'):
+        name = f'{role}-{device}'
+        item = docker_inspect(name)
+        if not item:
+            report['containers'][role] = {'exists': False}
+            continue
+        status = item.get('State') or {}
+        entry = {'exists': True, 'running': bool(status.get('Running')), 'paused': bool(status.get('Paused')),
+                 'exit_code': status.get('ExitCode'), 'oom_killed': bool(status.get('OOMKilled')),
+                 'health': (status.get('Health') or {}).get('Status'), 'started_at': status.get('StartedAt'),
+                 'finished_at': status.get('FinishedAt'), 'error': status.get('Error') or None,
+                 'image': (item.get('Config') or {}).get('Image')}
+        logs = subprocess.run(['docker', 'logs', '--tail', str(container_tail), name],
+                              text=True, capture_output=True, timeout=30)
+        entry['log_tail'] = ((logs.stdout or '') + (logs.stderr or '')).splitlines()[-container_tail:]
+        report['containers'][role] = entry
+    override = config.state_dir / 'device-overrides' / f'{device}.json'
+    image = _env_value(config.compose_env_file, 'REDROID_IMAGE', 'redroid/redroid:12.0.0-latest')
+    if override.exists():
+        try:
+            image = read_private_json(override, 'device override')['services'][f'android-{device}'].get('image', image)
+        except (RuntimeError, KeyError, TypeError):
+            pass
+    filesystems = Path('/proc/filesystems')
+    meminfo = {}
+    if Path('/proc/meminfo').exists():
+        for line in Path('/proc/meminfo').read_text().splitlines():
+            key, _, value = line.partition(':')
+            meminfo[key] = int(value.split()[0]) * 1024 if value.split() else 0
+    report['host'] = {
+        'kernel': platform.release(),
+        'binderfs': 'binder' in (filesystems.read_text() if filesystems.exists() else ''),
+        'binder_nodes': [node for node in ('/dev/binder', '/dev/binderfs') if Path(node).exists()],
+        'android_image': image,
+        'android_image_present': subprocess.run(['docker', 'image', 'inspect', image],
+                                                capture_output=True, timeout=20).returncode == 0,
+        'load_1m': round(os.getloadavg()[0], 2) if hasattr(os, 'getloadavg') else None,
+        'available_ram_gib': round(meminfo.get('MemAvailable', 0) / 1024 ** 3, 2),
+    }
+    report['files'] = {
+        'secret': (config.secret_dir / f'{device}.json').exists(),
+        'override': override.exists(),
+        'identity_baseline': (config.state_dir / 'identities' / f'{device}.json').exists(),
+        'profile': (Path('/etc/android-farm/device-profiles') / f'{device}.json').exists(),
+        'data_directory': (Path('/opt/farm/data/instances') / device).exists(),
+        'volume': subprocess.run(['docker', 'volume', 'inspect', f'redroid-data-{device}'],
+                                 capture_output=True, timeout=20).returncode == 0,
+    }
+    try:
+        report['events'] = events.recent(15, device=device)
+    except (OSError, RuntimeError, ValueError):
+        report['events'] = []
+    report['job_logs'] = []
+    if Path(log_dir).is_dir():
+        pattern = re.compile(rf'-(?:up|provision|restart|check|check-ip|remove)(?:-{device})?(?:-\d+)?\.log\Z')
+        names = sorted(path.name for path in Path(log_dir).glob('*.log') if pattern.search(path.name))
+        for name in names[-3:]:
+            lines = (Path(log_dir) / name).read_text(encoding='utf-8', errors='replace').splitlines()
+            report['job_logs'].append({'name': name, 'tail': lines[-log_tail:]})
+    return report
+
+
+def print_diagnosis(report):
+    record = report['record']
+    print(f"device={report['device']} allocated={report['allocated']} phase={record.get('phase')} "
+          f"egress={record.get('egress') or 'proxy'} hold={(report.get('hold') or {}).get('reason') or '-'} "
+          f"wants_running={report.get('wants_running')}")
+    if record.get('last_error'):
+        print(f"last_error: {record['last_error']}")
+    host = report['host']
+    print(f"host: kernel={host['kernel']} binderfs={host['binderfs']} binder_nodes={host['binder_nodes']} "
+          f"image={host['android_image']} image_present={host['android_image_present']} "
+          f"load_1m={host['load_1m']} available_ram_gib={host['available_ram_gib']}")
+    print('files: ' + ' '.join(f'{key}={value}' for key, value in report['files'].items()))
+    for role, entry in report['containers'].items():
+        if not entry.get('exists'):
+            print(f'{role}: missing')
+            continue
+        print(f"{role}: running={entry['running']} paused={entry['paused']} exit_code={entry['exit_code']} "
+              f"oom_killed={entry['oom_killed']} health={entry['health']} image={entry['image']} "
+              f"started={entry['started_at']} finished={entry['finished_at']} error={entry['error']}")
+        for line in entry.get('log_tail', []):
+            print(f'  | {line}')
+    print('events:')
+    for event in report['events']:
+        print(f"  {event['at']} {event['kind']} {event.get('detail') or ''}")
+    for log in report['job_logs']:
+        print(f"job log {log['name']}:")
+        for line in log['tail']:
+            print(f'  | {line}')
 
 
 def build_parser():
@@ -329,6 +474,9 @@ def build_parser():
     check_ip.add_argument('--json', action='store_true')
     status = sub.add_parser('status', help='show inventory, health, resources and ports')
     status.add_argument('--json', action='store_true')
+    diagnose = sub.add_parser('diagnose', help='read-only evidence for one device: record, containers, host, logs')
+    diagnose.add_argument('--id', dest='device', required=True)
+    diagnose.add_argument('--json', action='store_true')
     backup = sub.add_parser('backup', help='create a consistent offline data backup')
     backup.add_argument('--id', dest='device', required=True)
     remove = sub.add_parser('remove', help='decommission a device: stop it, release its proxy and drop it from the inventory')
@@ -596,6 +744,12 @@ def main(argv=None):
             print(json.dumps(payload, indent=2))
         else:
             print_status(payload)
+    elif args.command == 'diagnose':
+        report = collect_diagnosis(config, canonical_device(args.device))
+        if args.json:
+            print(json.dumps(report, indent=2))
+        else:
+            print_diagnosis(report)
     elif args.command == 'backup':
         farmctl(config, 'backup', canonical_device(args.device))
     elif args.command == 'remove':
@@ -610,5 +764,5 @@ if __name__ == '__main__':
     try:
         main()
     except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
-        print(str(exc), file=sys.stderr)
+        print(describe_failure(exc), file=sys.stderr)
         sys.exit(1)

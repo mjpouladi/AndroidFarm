@@ -10,7 +10,12 @@ except ImportError:
     from device_ids import device_index, network_plan
 
 
-def snapshot(device, timeout=300):
+# A first Redroid boot on a modest host (software GPU, dex2oat of the system
+# image) regularly needs more than five minutes; later boots are much faster.
+FIRST_BOOT_TIMEOUT = 600
+
+
+def snapshot(device, timeout=FIRST_BOOT_TIMEOUT):
     target = f"{network_plan(device_index(device, aliases=False))['proxy_control_ip']}:5555"
     base = ['docker', 'exec', f'screen-{device}', 'adb', '-s', target, 'shell']
     def read(*args):

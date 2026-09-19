@@ -5,7 +5,7 @@ export type Device = {
   containers: { android: string; proxy: string; screen: string };
   adb: string | null; screen_path: string; screen_ready: boolean;
   proxy: string | null; proxy_id?: string; expected_egress_ip: string | null;
-  egress?: 'proxy' | 'direct';
+  egress?: 'proxy' | 'direct'; last_error?: string | null;
   phone: string | null; cpu: string | null; memory: string | null;
   running?: boolean;
 };
@@ -126,7 +126,8 @@ export function parseSnapshot(value: unknown): Snapshot {
         !['android', 'proxy', 'screen'].every(key => text((item.containers as Record<string, unknown>)[key])) ||
         !nullableText(item.adb) || !text(item.screen_path) || typeof item.screen_ready !== 'boolean' || !nullableText(item.proxy) ||
         !nullableText(item.expected_egress_ip) || !nullableText(item.phone) || !nullableText(item.cpu) || !nullableText(item.memory) ||
-        !(item.egress === undefined || ['proxy', 'direct'].includes(String(item.egress)))) return invalid();
+        !(item.egress === undefined || ['proxy', 'direct'].includes(String(item.egress))) ||
+        !(item.last_error === undefined || nullableText(item.last_error))) return invalid();
   }
   for (const item of value.proxies as unknown[]) {
     if (!object(item) || !['id', 'label', 'server', 'expected_egress_ip'].every(key => text(item[key])) || !finite(item.server_port) ||

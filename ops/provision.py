@@ -27,6 +27,31 @@ except ImportError:
     from device_ids import DEVICE_LIMIT, device_id
 
 ROOT = Path(__file__).resolve().parents[1]
+FAILURE_STAGES = ('guarded start', 'egress verification', 'application installation')
+MAX_REASON = 200
+
+
+def failure_reason(stage, exc):
+    """Short, secret-free description of why preparation stopped at ``stage``.
+
+    Messages raised by this code base carry no credentials and are kept; an
+    external command already printed its own output to the operator (or the
+    host job log), so only the stage is recorded for it.
+    """
+    if stage not in FAILURE_STAGES:
+        raise ValueError('unknown preparation stage')
+    if isinstance(exc, subprocess.TimeoutExpired):
+        detail = f'{stage} timed out'
+    elif isinstance(exc, subprocess.SubprocessError):
+        detail = f'{stage} failed; the host job log of this request has the command output'
+    elif isinstance(exc, OSError):
+        detail = f'{stage} failed: {exc.strerror or "I/O error"}'
+    elif isinstance(exc, (RuntimeError, ValueError, KeyError, TypeError)):
+        text = str(exc).strip().splitlines()[0] if str(exc).strip() else ''
+        detail = f'{stage} failed: {text}' if text else f'{stage} failed'
+    else:
+        detail = f'{stage} interrupted'
+    return detail[:MAX_REASON]
 
 
 def private_json(path):
@@ -240,6 +265,7 @@ def main():
         inventory.save(registry, inventory_state)
         record['phase'] = 'identity_baselining' if not record.get('identity_baseline_created') else 'starting'
         inventory.save(registry, inventory_state)
+        stage = FAILURE_STAGES[0]
         try:
             farmctl.run(sys.executable, str(ROOT / 'ops/farmctl.py'), 'start', device,
                         '--compose', str(args.compose.resolve()), '--project', args.project,
@@ -255,6 +281,7 @@ def main():
             record = inventory.find(inventory_state, device)
             if not record or not record.get('identity_baseline_created'):
                 raise RuntimeError('identity baseline was not committed by the guarded start')
+            stage = FAILURE_STAGES[1]
             observed = farmctl.run('docker', 'exec', f'proxy-{device}', 'curl', '--noproxy', '*',
                                   '-4', '-fsS', '--max-time', '15', 'https://api.ipify.org', capture=True).strip()
             if expected_ip is not None and observed != expected_ip:
@@ -263,6 +290,7 @@ def main():
                 observed = farmctl._global_ipv4(observed)
             record['phase'] = 'installing_apk'
             inventory.save(registry, inventory_state)
+            stage = FAILURE_STAGES[2]
             app_installer.install(device, artifact, permissions, activity)
             record.update(phase='ready_for_operator', apk_sha256=artifact['sha256'],
                           apk_package=artifact['package'], prepared_at=int(time.time()), egress_ip=observed)
@@ -270,13 +298,18 @@ def main():
             inventory.save(registry, inventory_state)
             events.note('provisioning-completed', device, f"{artifact['package']} installed")
             print(f'{device}: approved QA application installed and opened. Any vendor sign-in stays manual.')
-        except BaseException:
+        except BaseException as exc:
+            reason = failure_reason(stage, exc)
             with contextlib.suppress(Exception):
                 farmctl.run(sys.executable, str(ROOT / 'ops/farmctl.py'), 'stop', device,
                             '--access-mode', args.access_mode)
-            record.update(phase='failed', last_error='Preparation failed; inspect local operator output and retry identical request')
+            # The stage and reason stay on the record so the console can show why the
+            # device is incomplete; the identical request resumes from this checkpoint.
+            record.update(phase='failed', last_error=reason, failed_at=int(time.time()))
             inventory.save(registry, inventory_state)
-            events.note('provisioning-failed', device, 'preparation stopped; retry the identical request')
+            events.note('provisioning-failed', device, reason)
+            print(f'{device}: preparation stopped during {stage}; resume the identical request or remove the device',
+                  file=sys.stderr)
             raise
 
 

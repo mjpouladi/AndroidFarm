@@ -118,6 +118,9 @@ describe('وضعیت واقعی و مرز اعتماد API', () => {
     expect(resumablePhases).toContain('failed');
     for (const phase of ['reserved', 'volume_created', 'secret_installed', 'installing_apk', 'failed']) expect(startablePhases).not.toContain(phase);
     expect(actionText.remove).toBe('حذف دستگاه از فارم');
+    const failed = { ...device, phase: 'failed', last_error: 'guarded start failed: identity drift detected' };
+    expect(parseSnapshot({ ...snapshotData(), devices: [failed] })?.devices[0].last_error).toBe(failed.last_error);
+    expect(() => parseSnapshot({ ...snapshotData(), devices: [{ ...device, last_error: 7 }] })).toThrow();
     expect(eventText['device-removed']).toBe('دستگاه از فارم حذف شد');
   });
 });

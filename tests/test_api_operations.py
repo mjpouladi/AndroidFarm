@@ -482,6 +482,42 @@ class ApiOperationsTests(unittest.TestCase):
         with self.assertRaisesRegex(OperationError, 'resume it through provisioning .* or remove the device'):
             self.ops.execute({'action': 'up', 'device': 'num01'})
 
+    def test_host_timeouts_and_step_failures_map_to_specific_messages(self):
+        for output, expected in (('Command timed out\nhost step timed out after 300 seconds', 'a host step timed out'),
+                                 ('num01: Android image pull timed out after 30 minutes', 'Android image pull timed out'),
+                                 ('num01: Android-shell egress probe failed: ADB did not answer after the unpause', 'did not answer ADB'),
+                                 ('identity drift detected\nnum01: preparation stopped during guarded start\nhost step ops.provision exited with status 1',
+                                  'identity drift detected'),
+                                 ('num01: preparation stopped during application installation\nhost step ops.provision exited with status 1',
+                                  'device preparation stopped'),
+                                 ('host step ops.farmctl exited with status 1', 'a host step failed')):
+            with self.subTest(output=output):
+                self.runner.return_value = subprocess.CompletedProcess([], 1, output, '')
+                with self.assertRaisesRegex(OperationError, expected):
+                    self.ops.execute({'action': 'check', 'device': 'num01'})
+
+    def test_failed_host_output_is_kept_in_a_root_only_host_log(self):
+        self.ops.host_log_dir = self.root / 'job-logs'
+        self.runner.return_value = subprocess.CompletedProcess([], 1, 'docker: token=never-in-http\nunknown failure', '')
+        with self.assertRaises(OperationError) as failure:
+            self.ops.execute({'action': 'check', 'device': 'num01'})
+        self.assertNotIn('never-in-http', str(failure.exception))
+        logs = sorted((self.root / 'job-logs').glob('*.log'))
+        self.assertEqual(len(logs), 1)
+        self.assertRegex(logs[0].name, r'^\d{8}T\d{6}Z-check-num01\.log$')
+        self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
+        self.assertIn('token=never-in-http', logs[0].read_text())
+        self.assertIn(logs[0].name, str(failure.exception))
+        # A second failure in the same second gets its own file; the newest 40 are kept.
+        with self.assertRaises(OperationError):
+            self.ops.execute({'action': 'check', 'device': 'num01'})
+        self.assertEqual(len(list((self.root / 'job-logs').glob('*.log'))), 2)
+        for index in range(45):
+            (self.root / 'job-logs' / f'19700101T0000{index:02d}Z-up.log').write_text('old')
+        with self.assertRaises(OperationError):
+            self.ops.execute({'action': 'check', 'device': 'num01'})
+        self.assertEqual(len(list((self.root / 'job-logs').glob('*.log'))), 40)
+
     def test_subprocess_timeout_is_safe(self):
         with self.assertRaisesRegex(OperationError, 'timed out'):
             bounded_process([sys.executable, '-c', 'import time; time.sleep(30)'],

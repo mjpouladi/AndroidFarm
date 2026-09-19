@@ -919,6 +919,27 @@ sudo device-provisioner remove --id num01 --purge-data
 
 `restart` در کنسول (دکمهٔ «راه‌اندازی مجدد» در جزئیات دستگاه)، در API و در Worker با همان مسیر اجرا می‌شود. ترتیب start عمداً fail-closed است: proxy بدون Android بالا می‌آید و IP آن بررسی می‌شود؛ guard بسته می‌شود؛ Android و screen boot و baseline بررسی می‌شوند؛ Android موقت pause، proxy دوباره آزمون و سپس IP shell Android با IP مصوب مقایسه می‌شود. هر mismatch باعث stop می‌شود. `check-ip` هنگام تغییر IP یک hold پایدار ثبت و device را متوقف می‌کند.
 
+### بررسی عمیق یک دستگاه که روشن نمی‌شود
+
+```bash
+# مرحله، آخرین علت توقف آماده‌سازی، وضعیت سه کانتینر، پیش‌نیازهای میزبان، رویدادها و لاگ آخرین عملیات
+sudo device-provisioner diagnose --id num01
+sudo device-provisioner diagnose --id num01 --json
+# خروجی کامل هر عملیات ناموفقی که از کنسول اجرا شده (فقط root؛ هرگز در HTTP)
+sudo ls -t /var/lib/android-farm/job-logs | head
+sudo tail -n 60 /var/lib/android-farm/job-logs/<نام فایل>
+# رویدادهای پایدار دستگاه‌ها
+sudo tail -n 30 /var/lib/android-farm/events.jsonl
+```
+
+ترتیب خواندن: ۱) `phase` و `last_error` رکورد (مرحله‌ای که آماده‌سازی در آن متوقف شده: guarded start، egress verification یا application installation و علت کوتاه آن)؛ ۲) وضعیت کانتینرها (`exit_code`، `oom_killed`، `health`) و ۴۰ خط آخر لاگ هرکدام؛ ۳) پیش‌نیازهای میزبان (`binderfs`، حضور image ردرويد، RAM آزاد و load)؛ ۴) فایل لاگ آخرین عملیات که خروجی کامل `device-provisioner` را دارد. پیام کنسول همیشه خلاصهٔ امن همین لاگ است؛ علت دقیق در همین فایل‌ها روی میزبان است.
+
+**نکات اجرایی که در بررسی این خطاها به دست آمد:**
+
+- اولین start هر میزبان image ردرويد (حدود یک گیگابایت) را دانلود می‌کند و اولین boot اندروید ۱۲ بدون GPU سخت‌افزاری معمولاً ۳ تا ۸ دقیقه طول می‌کشد (dex2oat تصویر سیستم). start محافظت‌شده اکنون image غایب را پیش از boot با بودجهٔ ۳۰ دقیقه دانلود می‌کند و برای boot اول ۱۰ دقیقه صبر می‌کند؛ پیش از نخستین دستگاه می‌توانید image را دستی هم دانلود کنید: `sudo docker pull redroid/redroid:12.0.0-latest`.
+- تایمر سلامت، دستگاهی را که هنوز در آماده‌سازی است (مرحلهٔ ناکامل) بازیابی نمی‌کند و پیش از هر بازیابی ADB را دوباره می‌سنجد؛ در نسخهٔ قبلی، boot طولانی می‌توانست در میانهٔ نصب APK یک restart خودکار بیندازد و آماده‌سازی را `failed` کند.
+- پیام‌های خطای مرحلهٔ آماده‌سازی دیگر در میزبان بلعیده نمی‌شوند: به کنسول (نگاشت امن)، به `last_error` رکورد و به لاگ عملیات می‌رسند.
+
 پیش از هر start محافظت‌شده، imageهای محلی `proxy` و `screen` صریحاً از Dockerfileهای release immutable فعال build می‌شوند تا tag محلی قدیمی پس از upgrade بی‌صدا reuse نشود. در start اول یا پس از upgrade این مرحله می‌تواند تا چند دقیقه طول بکشد؛ failure در build پیش از روشن‌شدن Android عملیات را متوقف می‌کند.
 
 برای رخداد امنیتی یا نگهداری:
@@ -1358,6 +1379,9 @@ ss -ltnp | grep ':5551'
 | start با capacity رد می‌شود | `resources --json`، RAM آزاد، load، disk و inode؛ limitها را دور نزنید |
 | `the device preparation is incomplete; resume it through provisioning … or remove the device` | مرحلهٔ دستگاه در `status` ناتمام است (مثلاً `failed`)؛ در کنسول «ادامهٔ آماده‌سازی» را با همان شماره/پراکسی/برنامه بزنید یا با «حذف دستگاه از فارم» / `remove --id numXX` حذف کنید؛ بخش ۱۰ |
 | `resume or quarantine the incomplete device before adding another` | تا تکمیل یا حذف دستگاه ناتمام، دستگاه جدید ساخته نمی‌شود؛ همان دو راه بالا |
+| `host operation failed; the host log … has the details` | خروجی کامل در `/var/lib/android-farm/job-logs/` است؛ `diagnose --id numXX` را اجرا کنید؛ بخش ۱۰ |
+| `a host step timed out (image pull, build or boot)` | دانلود image، build یا boot اول طولانی بوده؛ `sudo docker pull redroid/redroid:12.0.0-latest` و سپس «ادامهٔ آماده‌سازی»؛ load میزبان را هم ببینید |
+| `device preparation stopped; the device details name the stage and reason` | `last_error` در جزئیات دستگاه کنسول یا `status`/`diagnose` مرحله و علت را می‌گوید؛ پس از رفع علت همان درخواست را ادامه دهید |
 | proxy test mismatch | expected IP، endpoint pin‌شده، sticky session و credential فروشنده؛ device را روشن نکنید |
 | ADB در booting است | تا پایان boot grace صبر کنید؛ سپس log Redroid، Binder و فشار CPU/RAM را بررسی کنید |
 | screen پاسخ نمی‌دهد | سلامت `screen-numXX`، route Traefik، middleware و WebSocket را بررسی کنید |

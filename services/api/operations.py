@@ -32,6 +32,8 @@ IDENTIFIER = re.compile(r'[a-z][a-z0-9-]{2,62}\Z')
 LIFECYCLE = frozenset({'up', 'down', 'restart', 'check', 'check-ip', 'backup', 'release'})
 PROXY_ACTIONS = frozenset({'proxy-test', 'proxy-enable', 'proxy-disable'})
 ROLES = ('proxy', 'android', 'screen')
+HOST_LOG_DIR = Path('/var/lib/android-farm/job-logs')
+HOST_LOG_KEEP = 40
 HOST_FAILURES = (
     ('calculated concurrent capacity reached', 'concurrent device capacity reached; stop a device before retrying'),
     ('insufficient available RAM', 'available RAM is below the reserved headroom; stop a device or retry later'),
@@ -72,7 +74,23 @@ HOST_FAILURES = (
     ('Android did not accept property', 'Android rejected a persisted property; check ADB root access inside Redroid'),
     ('framework did not return', 'the Android framework did not return after the environment change; inspect the device'),
     ('operation timed out', 'the host operation timed out; refresh device state before retrying'),
+    ('Android image pull timed out', 'the Android image pull timed out; check the host network and retry'),
+    ('ADB did not answer after the unpause', 'the Android shell did not answer ADB after the egress check; '
+                                            'retry the start and inspect the device if it repeats'),
+    ('host step timed out', 'a host step timed out (image pull, build or boot); the host job log names it; '
+                            'retry when the host is idle'),
+    ('preparation stopped during', 'device preparation stopped; the device details name the stage and reason; '
+                                   'resume the identical request or remove the device'),
+    ('host step', 'a host step failed; the host job log has its messages'),
 )
+
+
+def _safe_reason(value):
+    """The recorded preparation reason as one short printable line, or None."""
+    if not isinstance(value, str) or not value.strip():
+        return None
+    line = value.strip().splitlines()[0]
+    return ''.join(ch for ch in line if ch.isprintable())[:200]
 
 
 class OperationError(RuntimeError):
@@ -172,6 +190,7 @@ class Operations:
         self.auth_file = Path(auth_file)
         self.credential_manager = credential_manager
         self.components = components or Components()
+        self.host_log_dir = HOST_LOG_DIR
 
     def _credentials(self, config):
         if self.credential_manager is not None:
@@ -354,18 +373,52 @@ class Operations:
             self._store(config).show(_identifier(params['id']))
         return {'action': action, 'params': dict(params)}
 
+    def _keep_host_log(self, command, arguments, output):
+        """Keep the retained output of a failed host command in a root-only host file.
+
+        The output may carry environment values, so it never leaves the host;
+        the operator reads it there. Best effort: a logging failure never masks
+        the operation error. Only the newest ``HOST_LOG_KEEP`` files are kept.
+        """
+        try:
+            directory = require_private_directory(self.host_log_dir, 'host job log directory', create=True)
+            subject = next((arguments[i + 1] for i, flag in enumerate(arguments[:-1]) if flag == '--id'), None)
+            if subject is not None and not re.fullmatch(r'[a-z][a-z0-9-]{2,62}', str(subject)):
+                subject = None
+            stamp = time.strftime('%Y%m%dT%H%M%SZ', time.gmtime())
+            base = f"{stamp}-{command}{'-' + subject if subject else ''}"
+            for attempt in range(100):
+                name = f"{base}{'-' + str(attempt) if attempt else ''}.log"
+                try:
+                    descriptor = os.open(directory / name, os.O_WRONLY | os.O_CREAT | os.O_EXCL, 0o600)
+                    break
+                except FileExistsError:
+                    continue
+            else:
+                return None
+            with os.fdopen(descriptor, 'w') as stream:
+                stream.write(f"# {command}{' ' + subject if subject else ''} failed at {stamp}\n{output}")
+            for stale in sorted(directory.glob('*.log'))[:-HOST_LOG_KEEP]:
+                stale.unlink()
+            return name
+        except (OSError, RuntimeError):
+            return None
+
     def _command(self, command, *arguments):
         argv = [sys.executable, str(ROOT / 'provisioner.py'), '--config',
                 str(self.config_path), command, *arguments]
         result = self.runner(argv, cwd=str(ROOT), timeout=3600)
         if result.returncode:
             # Docker/ADB errors may contain credentials or environment values.
-            # Never copy their raw output into the job store or HTTP response.
+            # Never copy their raw output into the job store or HTTP response;
+            # the host keeps it in a root-only log for the operator.
             output = result.stdout or ''
+            log_name = self._keep_host_log(command, arguments, output)
             for marker, message in HOST_FAILURES:
                 if marker in output:
                     raise OperationError(message)
-            raise OperationError('host operation failed; check device-provisioner on the host for details')
+            where = f'{self.host_log_dir}/{log_name}' if log_name else 'device-provisioner'
+            raise OperationError(f'host operation failed; the host log {where} has the details')
         return result.stdout or ''
 
     def execute(self, job):
@@ -636,6 +689,8 @@ class Operations:
                    'expected_egress_ip': record.get('expected_egress_ip'),
                    'phone': record.get('phone_masked'), 'cpu': None, 'memory': None,
                    'running': active,
+                   # Written by ops/provision.py from its own messages only; never raw command output.
+                   'last_error': _safe_reason(record.get('last_error')),
                    'screen_ready': not has_hold and all(state in {'running', 'healthy'} for state in states.values())}
             result['devices'].append(row)
             if active:

@@ -2,6 +2,7 @@ import hashlib
 import json
 from pathlib import Path
 import subprocess
+import sys
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -510,6 +511,124 @@ class OperationsTests(unittest.TestCase):
                 patch('sys.argv', ['device-provisioner', '--config', 'config.json', 'remove', '--id', 'num01', '--purge-data']):
             provisioner.main()
         self.assertEqual(invoke.call_args.args[-1], '--purge-data')
+
+    def test_status_report_tolerates_a_device_without_containers_and_names_the_reason(self):
+        import io
+        from contextlib import redirect_stdout
+        import provisioner
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            state = inventory.empty_inventory()
+            record, _ = inventory.choose(state, 'phone-1', 'direct:phone-1', 'request-1')
+            record.update(phase='failed', egress='direct', last_error='guarded start failed: identity check: Android boot timed out',
+                          failed_at=1700000000)
+            inventory.save(root / 'inventory.json', state)
+            config = Config(root / 'compose.yml', None, 'farm', root / 'secrets', root / 'backups',
+                            'https://farm.example.com', state_dir=root)
+            with patch('provisioner.bulk_managed_inspections', return_value={}), \
+                    patch('provisioner.resources.probe', return_value={'capacity': 1}), \
+                    patch('provisioner.subprocess.run') as stats:
+                payload = provisioner.collect_status(config)
+            stats.assert_not_called()
+            row = payload['devices'][0]
+            self.assertEqual(row['containers'], {'proxy': 'missing', 'android': 'missing', 'screen': 'missing'})
+            self.assertIsNone(row['adb'])
+            self.assertEqual(row['last_error'], record['last_error'])
+            buffer = io.StringIO()
+            with redirect_stdout(buffer):
+                provisioner.print_status(payload)
+            self.assertIn('num01: incomplete preparation - guarded start failed', buffer.getvalue())
+
+    def test_host_step_failures_are_described_without_their_argv(self):
+        from provisioner import describe_failure
+        failed = subprocess.CalledProcessError(1, [sys.executable, '-m', 'ops.provision', '--request', '/secret/path.json'])
+        self.assertEqual(describe_failure(failed), 'host step ops.provision exited with status 1; its messages are printed above')
+        self.assertNotIn('/secret/path.json', describe_failure(failed))
+        docker = subprocess.CalledProcessError(2, ['docker', 'exec', 'screen-num01', 'adb'])
+        self.assertIn('host step docker exited with status 2', describe_failure(docker))
+        self.assertEqual(describe_failure(subprocess.TimeoutExpired(['docker', 'pull'], 300)),
+                         'host step timed out after 300 seconds; retry when the host is idle')
+        self.assertEqual(describe_failure(RuntimeError('plain')), 'plain')
+
+    def test_invoke_streams_stderr_and_captures_only_stdout(self):
+        import provisioner
+        with patch('provisioner.subprocess.run', return_value=subprocess.CompletedProcess([], 0, 'num01: ok\n', None)) as run:
+            provisioner.invoke('provision.py', '--request', 'r.json', capture=True)
+            self.assertEqual(run.call_args.kwargs['stdout'], subprocess.PIPE)
+            self.assertNotIn('stderr', run.call_args.kwargs)
+            self.assertNotIn('capture_output', run.call_args.kwargs)
+            provisioner.invoke('account_policy.py', 'hold', 'num01', '--reason', 'maintenance')
+            self.assertIsNone(run.call_args.kwargs['stdout'])
+
+    def test_android_egress_probe_retries_transient_adb_failures(self):
+        from ops import farmctl
+        offline = subprocess.CalledProcessError(1, ['adb'], 'error: device offline')
+        with patch('ops.farmctl.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', '')), \
+                patch('ops.farmctl.run', side_effect=[offline, '', '8.8.8.8\n']) as probe:
+            self.assertEqual(farmctl.android_egress_ip('num01', sleep=lambda _: None), '8.8.8.8')
+        self.assertEqual(probe.call_count, 3)
+        with patch('ops.farmctl.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', '')), \
+                patch('ops.farmctl.run', side_effect=offline), \
+                self.assertRaisesRegex(RuntimeError, 'ADB did not answer after the unpause'):
+            farmctl.android_egress_ip('num01', attempts=3, sleep=lambda _: None)
+        with patch('ops.farmctl.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', '')), \
+                patch('ops.farmctl.run', return_value='10.0.0.1'), \
+                self.assertRaisesRegex(RuntimeError, 'egress probe did not return'):
+            farmctl.android_egress_ip('num01', attempts=2, sleep=lambda _: None)
+
+    def test_recovery_leaves_a_device_alone_during_preparation(self):
+        from ops import farmctl
+        for phase in ('reserved', 'secret_installed', 'identity_baselining', 'starting', 'installing_apk', 'failed'):
+            for action in ('recover', 'recover-crashed', 'recover-screen'):
+                with self.subTest(phase=phase, action=action):
+                    self.assertEqual(farmctl.recovery_skip_reason(action, {'phase': phase}, 'num01'),
+                                     'preparation-in-progress')
+        self.assertEqual(farmctl.recovery_skip_reason('recover', None, 'num01'), 'not-allocated')
+        self.assertIsNone(farmctl.recovery_skip_reason('start', {'phase': 'reserved'}, 'num01'))
+        ready = {'phase': 'ready_for_operator'}
+        with patch('ops.farmctl.android_answers', return_value=True):
+            self.assertEqual(farmctl.recovery_skip_reason('recover', ready, 'num01'), 'healthy-now')
+            self.assertIsNone(farmctl.recovery_skip_reason('recover-crashed', ready, 'num01'))
+            self.assertIsNone(farmctl.recovery_skip_reason('recover-screen', ready, 'num01'))
+        with patch('ops.farmctl.android_answers', return_value=False):
+            self.assertIsNone(farmctl.recovery_skip_reason('recover', ready, 'num01'))
+        answered = subprocess.CompletedProcess([], 0, '1\n', '')
+        with patch('ops.farmctl.subprocess.run', return_value=answered):
+            self.assertTrue(farmctl.android_answers('num01'))
+        with patch('ops.farmctl.subprocess.run', side_effect=subprocess.TimeoutExpired(['adb'], 15)):
+            self.assertFalse(farmctl.android_answers('num01'))
+
+    def test_android_image_is_pulled_only_when_missing(self):
+        from ops import farmctl
+        resolved = {'services': {'android-num01': {'image': 'redroid/redroid:12.0.0-latest'}}}
+        with patch('ops.farmctl.subprocess.run', return_value=subprocess.CompletedProcess([], 0, '', '')), \
+                patch('ops.farmctl.run') as run:
+            self.assertFalse(farmctl.ensure_android_image(resolved, 'num01'))
+            run.assert_not_called()
+        with patch('ops.farmctl.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', '')), \
+                patch('ops.farmctl.run') as run:
+            self.assertTrue(farmctl.ensure_android_image(resolved, 'num01'))
+        self.assertEqual(run.call_args.args, ('docker', 'pull', '--quiet', 'redroid/redroid:12.0.0-latest'))
+        self.assertEqual(run.call_args.kwargs['timeout'], 1800)
+        with patch('ops.farmctl.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', '')), \
+                patch('ops.farmctl.run', side_effect=subprocess.TimeoutExpired(['docker'], 1800)), \
+                self.assertRaisesRegex(RuntimeError, 'Android image pull timed out'):
+            farmctl.ensure_android_image(resolved, 'num01')
+
+    def test_preparation_failure_reasons_are_short_and_secret_free(self):
+        from ops.provision import failure_reason
+        self.assertEqual(failure_reason('guarded start', RuntimeError('identity baseline was not committed by the guarded start')),
+                         'guarded start failed: identity baseline was not committed by the guarded start')
+        self.assertEqual(failure_reason('application installation', subprocess.CalledProcessError(1, ['adb', 'install', '/secret'])),
+                         'application installation failed; the host job log of this request has the command output')
+        self.assertEqual(failure_reason('egress verification', subprocess.TimeoutExpired(['curl', 'token=abc'], 25)),
+                         'egress verification timed out')
+        self.assertEqual(failure_reason('guarded start', KeyboardInterrupt()), 'guarded start interrupted')
+        self.assertEqual(failure_reason('guarded start', OSError(13, 'Permission denied', '/etc/secret')),
+                         'guarded start failed: Permission denied')
+        self.assertLessEqual(len(failure_reason('guarded start', RuntimeError('x' * 500))), 200)
+        with self.assertRaises(ValueError):
+            failure_reason('unknown', RuntimeError('x'))
 
 
 if __name__ == '__main__':

@@ -267,18 +267,83 @@ def proxy_egress_ip(device):
     return _global_ipv4(result)
 
 
-def android_egress_ip(device):
-    """Probe from an ADB shell UID, which traverses the transparent redirect rules."""
+def android_egress_ip(device, attempts=12, sleep=time.sleep):
+    """Probe from an ADB shell UID, which traverses the transparent redirect rules.
+
+    Right after an unpause ADB can report the guest offline for a few seconds
+    and the guest resolver may not answer yet; such transient failures are
+    retried for about a minute, a persistent one still fails the start.
+    """
     target = f"{network_plan(device_index(device, aliases=False))['proxy_control_ip']}:5555"
     adb = ['docker', 'exec', f'screen-{device}', 'adb', '-s', target, 'shell']
-    curl = subprocess.run([*adb, 'command', '-v', 'curl'], text=True, capture_output=True, timeout=15)
-    if curl.returncode == 0 and curl.stdout.strip():
-        result = run(*adb, 'curl', '-4', '-fsS', '--max-time', '15', 'https://api.ipify.org',
-                     capture=True, timeout=25)
-    else:
-        request = "printf 'GET / HTTP/1.0\\r\\nHost: api.ipify.org\\r\\nConnection: close\\r\\n\\r\\n' | toybox nc -w 15 api.ipify.org 80"
-        result = run(*adb, 'sh', '-c', request, capture=True, timeout=25)
-    return _global_ipv4(result)
+    last = None
+    for attempt in range(attempts):
+        try:
+            curl = subprocess.run([*adb, 'command', '-v', 'curl'], text=True, capture_output=True, timeout=15)
+            if curl.returncode == 0 and curl.stdout.strip():
+                result = run(*adb, 'curl', '-4', '-fsS', '--max-time', '15', 'https://api.ipify.org',
+                             capture=True, timeout=25)
+            else:
+                request = "printf 'GET / HTTP/1.0\\r\\nHost: api.ipify.org\\r\\nConnection: close\\r\\n\\r\\n' | toybox nc -w 15 api.ipify.org 80"
+                result = run(*adb, 'sh', '-c', request, capture=True, timeout=25)
+            return _global_ipv4(result)
+        except (subprocess.CalledProcessError, subprocess.TimeoutExpired, RuntimeError) as exc:
+            last = exc
+            if attempt + 1 < attempts:
+                sleep(5)
+    if isinstance(last, RuntimeError):
+        raise last
+    raise RuntimeError('Android-shell egress probe failed: ADB did not answer after the unpause') from last
+
+
+def android_answers(device, timeout=15):
+    """True when the guest's ADB shell answers and Android reports a completed boot."""
+    target = f"{network_plan(device_index(device, aliases=False))['proxy_control_ip']}:5555"
+    try:
+        probe = subprocess.run(['docker', 'exec', f'screen-{device}', 'adb', '-s', target, 'shell',
+                                'getprop', 'sys.boot_completed'], text=True, capture_output=True, timeout=timeout)
+    except (OSError, subprocess.SubprocessError):
+        return False
+    return probe.returncode == 0 and probe.stdout.strip() == '1'
+
+
+def recovery_skip_reason(action, record, device):
+    """Why an automatic recovery must leave this device alone right now, or None.
+
+    Preparation owns a device until its phase is complete: a health-timer
+    restart during a long first boot or the APK installation would break the
+    provisioning run and mark the device failed. A stall observed while the
+    lifecycle lock was busy is re-checked here; a guest that answers now is
+    left running.
+    """
+    if action not in {'recover', 'recover-crashed', 'recover-screen'}:
+        return None
+    if not record:
+        return 'not-allocated'
+    if record.get('phase') not in inventory.COMPLETE_PHASES:
+        return 'preparation-in-progress'
+    if action == 'recover' and android_answers(device):
+        return 'healthy-now'
+    return None
+
+
+def ensure_android_image(resolved, device):
+    """Pull a missing Android image before the timed compose up.
+
+    The first pull of a Redroid image is large and used to run inside the
+    five-minute `compose up` budget, where a slow registry turned the first
+    start into an opaque timeout. An image that is already present is kept
+    as is: a moving tag is never refreshed behind an attested start.
+    """
+    image = resolved['services'][f'android-{device}']['image']
+    if subprocess.run(['docker', 'image', 'inspect', image], capture_output=True, timeout=30).returncode == 0:
+        return False
+    print(f'{device}: pulling Android image {image}; the first pull can take several minutes', flush=True)
+    try:
+        run('docker', 'pull', '--quiet', image, timeout=1800)
+    except subprocess.TimeoutExpired:
+        raise RuntimeError('Android image pull timed out after 30 minutes; check the host network and retry') from None
+    return True
 
 
 def wait_proxy(device, timeout=120):
@@ -608,6 +673,10 @@ def main():
             # Health recovery must never recreate a missing container or start
             # a screen after an operator intentionally stopped Android.  This
             # decision and the start happen under the same lifecycle lock.
+            skipped = recovery_skip_reason(args.action, inventory.find(inventory.load(), d), d)
+            if skipped:
+                print(f'ANDROID_FARM_RECOVERY_SKIPPED {d} {skipped}')
+                return
             recover_existing_screen(d)
         elif args.action in {'start', 'recover', 'recover-crashed'}:
             if args.action == 'recover' and not recovery_android_is_active(d):
@@ -623,6 +692,10 @@ def main():
             record = inventory.find(state, d)
             if not record:
                 raise RuntimeError('device is not allocated in the managed inventory')
+            skipped = recovery_skip_reason(args.action, record, d)
+            if skipped:
+                print(f'ANDROID_FARM_RECOVERY_SKIPPED {d} {skipped}')
+                return
             if record.get('phase') not in {*inventory.COMPLETE_PHASES, 'starting', 'identity_baselining'}:
                 raise RuntimeError('device is not in a startable managed phase; resume it only through device-provisioner')
             # Direct host egress is unpinned unless the request named an IP;
@@ -699,7 +772,8 @@ def main():
                 if expected_ip is not None and first_ip != expected_ip:
                     raise RuntimeError('approved sticky egress IP mismatch; device returned to stopped state')
                 guard(d, args.secret_dir, allow_upstream=False)
-                run(*compose, 'up', '-d', '--no-deps', '--force-recreate', f'android-{d}')
+                ensure_android_image(resolved, d)
+                run(*compose, 'up', '-d', '--no-deps', '--force-recreate', f'android-{d}', timeout=600)
                 run(*compose, 'up', '-d', '--no-deps', '--force-recreate', f'screen-{d}')
                 verify_identity(d)
                 assert_not_held(d)
@@ -748,6 +822,6 @@ def main():
 if __name__ == '__main__':
     try:
         main()
-    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+    except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
         print(str(exc), file=sys.stderr)
         sys.exit(1)
