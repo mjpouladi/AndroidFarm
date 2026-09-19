@@ -99,6 +99,15 @@ class ApiOperationsTests(unittest.TestCase):
         with self.assertRaisesRegex(OperationError, 'stop a device') as failure:
             self.ops.execute({'action': 'up', 'device': 'num01'})
         self.assertNotIn('never-show-this', str(failure.exception))
+        # farmctl's own start failures map to specific, secret-free explanations.
+        for marker, expected in (('device identity drift detected; stopped for manual review', 'identity drift'),
+                                 ('Compose drift: proxy capability policy differs', 'audited topology'),
+                                 ('proxy did not become healthy before timeout', 'did not become healthy'),
+                                 ('Android did not accept property persist.sys.timezone', 'rejected a persisted property')):
+            self.runner.return_value.stdout = f'secret=never-show-this\n{marker}\n'
+            with self.subTest(marker=marker), self.assertRaisesRegex(OperationError, expected) as failure:
+                self.ops.execute({'action': 'up', 'device': 'num01'})
+            self.assertNotIn('never-show-this', str(failure.exception))
 
     def test_only_explicit_credential_scope_is_accepted(self):
         good = {'action': 'credential-rotate', 'params': {'target': 'platform', 'username': 'qa-admin',

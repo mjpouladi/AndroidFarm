@@ -30,6 +30,7 @@ export const eventText: Record<string, string> = { 'device-started': 'دستگا
   'recovery-started': 'بازیابی خودکار آغاز شد', 'recovery-succeeded': 'بازیابی موفق', 'recovery-failed': 'بازیابی ناموفق',
   'recovery-skipped': 'بازیابی لازم نبود', 'device-held': 'توقف حفاظتی ثبت شد', 'device-released': 'توقف حفاظتی رفع شد',
   'provisioning-completed': 'آماده‌سازی کامل شد', 'provisioning-failed': 'آماده‌سازی ناموفق', 'environment-applied': 'منطقهٔ زمانی/زبان اعمال شد',
+  'environment-failed': 'منطقهٔ زمانی اعمال نشد',
   'artifact-imported': 'APK در مخزن ثبت شد', 'artifact-removed': 'APK از مخزن حذف شد' };
 export type Snapshot = { schema_version: 1; collected_at: number; csrf_token: string; resources: ResourceReport | null;
   devices: Device[]; proxies: ProxyRecord[]; backups: Backup[]; artifacts: Artifact[];

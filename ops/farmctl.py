@@ -631,13 +631,21 @@ def main():
                 android_ip = android_egress_ip(d)
                 if android_ip != proxy_ip:
                     raise RuntimeError('Android-shell egress IP mismatch; device returned to stopped state')
-                if expected_profile is not None and (expected_profile.timezone or expected_profile.locale):
-                    # Timezone/locale are persisted guest properties; unchanged
-                    # values are only verified, a change restarts the framework.
-                    environment = adb_helper.apply_environment(d, expected_profile)
-                    if environment['applied']:
-                        print(f"{d} environment applied: {', '.join(sorted(environment['applied']))}")
-                        events.note('environment-applied', d, ', '.join(sorted(environment['applied'])))
+                if expected_profile is not None and expected_profile.timezone:
+                    # The timezone is a persisted guest property; an unchanged
+                    # value is only verified, a change restarts the framework.
+                    # A guest that refuses the property does not undo a start
+                    # whose identity and egress checks already passed: the
+                    # failure is printed and logged as an event instead.
+                    try:
+                        environment = adb_helper.apply_environment(d, expected_profile)
+                    except (RuntimeError, OSError, subprocess.SubprocessError) as exc:
+                        print(f'{d} timezone {expected_profile.timezone} was not applied: {exc}', file=sys.stderr)
+                        events.note('environment-failed', d, f'timezone {expected_profile.timezone} not applied')
+                    else:
+                        if environment['applied']:
+                            print(f"{d} environment applied: {', '.join(sorted(environment['applied']))}")
+                            events.note('environment-applied', d, ', '.join(sorted(environment['applied'])))
                 _record_intent(d, True)
                 events.note('device-started', d, 'attested start' if args.action == 'start' else f'{args.action} recovery')
                 print(f'{d} started; identity and egress verified. Use check and browser acceptance tests.')

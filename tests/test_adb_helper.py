@@ -89,11 +89,16 @@ class AdbHelperTests(unittest.TestCase):
         guest = FakeGuest(framework_after=1)
         clock = iter(range(0, 1000, 5))
         result = adb_helper.apply_environment('num01', PROFILE, runner=guest, clock=lambda: next(clock), sleep=lambda _: None)
-        self.assertEqual(result['applied'], {'persist.sys.timezone': 'Asia/Tehran', 'persist.sys.locale': 'fa-IR'})
+        # The locale already reaches Android at boot; only the timezone is a persisted write by default.
+        self.assertEqual(result['applied'], {'persist.sys.timezone': 'Asia/Tehran'})
         self.assertEqual(guest.props['persist.sys.timezone'], 'Asia/Tehran')
-        self.assertEqual(guest.props['persist.sys.locale'], 'fa-IR')
+        self.assertNotIn('persist.sys.locale', guest.props)
         self.assertEqual(guest.props['auto_time_zone'], '0')
         self.assertEqual(guest.props['restarted'], 'zygote')
+        with_locale = FakeGuest(props={'persist.sys.timezone': 'Asia/Tehran'}, framework_after=0)
+        explicit = adb_helper.apply_environment('num01', PROFILE, runner=with_locale, include_locale=True,
+                                                clock=lambda: next(clock), sleep=lambda _: None)
+        self.assertEqual(explicit['applied'], {'persist.sys.locale': 'fa-IR'})
         # Second start: values already persisted, nothing is written and no restart happens.
         settled = FakeGuest(props={'persist.sys.timezone': 'Asia/Tehran', 'persist.sys.locale': 'fa-IR'})
         again = adb_helper.apply_environment('num01', PROFILE, runner=settled)
@@ -109,7 +114,7 @@ class AdbHelperTests(unittest.TestCase):
         self.assertNotIn('persist.sys.timezone', neutral.props)
 
     def test_framework_restart_wait_is_bounded(self):
-        guest = FakeGuest(props={'persist.sys.locale': 'fa-IR'}, framework_after=10 ** 6)
+        guest = FakeGuest(props={'persist.sys.locale': 'fa-IR', 'persist.sys.timezone': 'UTC'}, framework_after=10 ** 6)
         ticks = iter([0, 0, 50, 100, 150, 181, 200, 250])
         with self.assertRaisesRegex(RuntimeError, 'framework did not return'):
             adb_helper.apply_environment('num01', PROFILE, runner=guest, clock=lambda: next(ticks), sleep=lambda _: None)

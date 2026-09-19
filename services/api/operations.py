@@ -50,6 +50,26 @@ HOST_FAILURES = (
     ('device absent from Coolify Compose catalog', 'device capacity catalog needs regeneration through the installer'),
     ('resume the incomplete device', 'finish the existing incomplete device request before adding another'),
     ('resume or quarantine the incomplete device', 'finish or review the existing incomplete device before adding another'),
+    # Messages printed by ops/farmctl.py and ops/identity.py during a guarded start.
+    ('identity drift detected', 'device identity drift detected; the device was stopped for manual review'),
+    ('identity baseline missing', 'identity baseline is missing; restore protected state or re-run the initial provisioning'),
+    ('identity check: Android boot timed out', 'Android did not finish booting before the identity check; inspect the container logs'),
+    ('Compose drift', 'the resolved Compose configuration differs from the audited topology; regenerate the catalog through the installer'),
+    ('proxy did not become healthy', 'the proxy sidecar did not become healthy before the timeout; check its upstream and credentials'),
+    ('egress probe did not return', 'the egress probe returned no public IPv4; check the proxy or the host network'),
+    ('approved sticky egress IP mismatch', 'proxy egress differs from the approved sticky IP; the device was returned to the stopped state'),
+    ('Android-shell egress IP mismatch', 'Android shell egress differs from the proxy namespace; the device was returned to the stopped state'),
+    ('device has no valid approved egress IP', 'the device record has no valid approved egress IP; review its allocation'),
+    ('not in a startable managed phase', 'the device preparation is incomplete; resume it through provisioning, not a plain start'),
+    ('device is not allocated in the managed inventory', 'the device is not allocated in the managed inventory'),
+    ('managed proxy is disabled or no longer assigned', 'the allocated proxy is disabled or no longer assigned to this device'),
+    ('installed proxy credential differs', 'the installed proxy credential differs from the registry; rotate or repair the proxy'),
+    ('direct egress device has an unexpected proxy configuration', 'the direct-egress device carries an unexpected proxy configuration; review its secret'),
+    ('managed data volume', 'the persistent data volume does not match the audited allocation; restore it before starting'),
+    ('failed to update host egress guard', 'the host iptables egress guard could not be updated; check iptables on the host'),
+    ('Android did not accept property', 'Android rejected a persisted property; check ADB root access inside Redroid'),
+    ('framework did not return', 'the Android framework did not return after the environment change; inspect the device'),
+    ('operation timed out', 'the host operation timed out; refresh device state before retrying'),
 )
 
 

@@ -89,18 +89,21 @@ def wait_for_framework(device, timeout=FRAMEWORK_RESTART_TIMEOUT, runner=output,
         sleep(3)
 
 
-def apply_environment(device, profile, runner=output, clock=time.monotonic, sleep=time.sleep):
-    """Apply the profile's timezone/locale once; report what actually changed.
+def apply_environment(device, profile, runner=output, clock=time.monotonic, sleep=time.sleep,
+                      include_locale=False):
+    """Apply the profile's timezone (and optionally locale); report what changed.
 
     The properties persist in /data, so an unchanged profile is a no-op.  A real
     change restarts only the Android framework (zygote), never the container.
+    The locale already reaches Android at boot through ``ro.product.locale``;
+    it is rewritten as a persisted property only when a caller asks for it.
     """
     wanted = {}
     timezone = getattr(profile, 'timezone', None)
     locale = getattr(profile, 'locale', None)
     if timezone:
         wanted['persist.sys.timezone'] = timezone
-    if locale:
+    if locale and include_locale:
         wanted['persist.sys.locale'] = locale
     changed = {}
     for name, value in wanted.items():
