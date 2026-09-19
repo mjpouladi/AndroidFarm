@@ -72,6 +72,7 @@ ENV_KEYS = {
     "COOLIFY_NETWORK",
     "FARM_SECRETS_DIR",
     "FARM_RELEASE_ID",
+    "FARM_MONITORING_DIR",
     "GRAFANA_DOMAIN",
     "GRAFANA_ADMIN_USER",
     "GRAFANA_PASSWORD_FILE",
@@ -287,7 +288,8 @@ def build_env(existing: Mapping[str, str], *, farm_domain: str, console_domain: 
               access_mode: str = "domain", public_ip: str | None = None,
               http_port: int = DEFAULT_HTTP_PORT,
               auth_file: Path | None = None,
-              auth_revision: str | None = None) -> dict[str, str]:
+              auth_revision: str | None = None,
+              monitoring_dir: Path | None = None) -> dict[str, str]:
     origin = access_origin(access_mode=access_mode, farm_domain=farm_domain,
                            public_ip=public_ip, http_port=http_port)
     if access_mode == "ip":
@@ -317,6 +319,10 @@ def build_env(existing: Mapping[str, str], *, farm_domain: str, console_domain: 
         "COOLIFY_NETWORK": network,
         "FARM_SECRETS_DIR": str(secret_dir),
         "FARM_RELEASE_ID": release_id,
+        # Coolify Raw Compose does not preserve relative repository bind files.
+        # Always replace a previous release's value when staging an upgrade.
+        "FARM_MONITORING_DIR": str(monitoring_dir or
+                                   (Paths.release_root / release_id / "monitoring")),
         "FARM_HTTP_BIND": "0.0.0.0" if access_mode == "ip" else "127.0.0.1",
         "FARM_HTTP_PORT": str(http_port),
         "FARM_HTTP_AUTH_FILE": str(auth_file or
@@ -1379,7 +1385,8 @@ def install_managed_files(settings: Settings, discovered: Mapping[str, object]) 
                     secret_dir=paths.config_dir / "secrets", release_id=release_id,
                     access_mode=settings.access_mode, public_ip=settings.public_ip,
                     http_port=settings.http_port,
-                    auth_file=auth_file, auth_revision=auth_revision)
+                    auth_file=auth_file, auth_revision=auth_revision,
+                    monitoring_dir=release_dir / "monitoring")
     rendered_env = render_env(env).encode()
     # This file is the handoff to Coolify. Keep it separate from the live CLI
     # environment so staging an upgrade cannot alter a still-active release.

@@ -145,11 +145,15 @@ class InstallerPureTests(unittest.TestCase):
 
     def test_environment_merge_preserves_image_pins_only(self):
         values = install.build_env(
-            {"REDROID_IMAGE": "redroid@sha256:abc", "UNSAFE": "ignored"},
+            {"REDROID_IMAGE": "redroid@sha256:abc", "UNSAFE": "ignored",
+             "FARM_MONITORING_DIR": "/old/release/monitoring"},
             farm_domain="farm.example.com", console_domain="console.example.com",
-            network="coolify-prod", secret_dir=Path("/secure/secrets"), release_id="abc123")
+            network="coolify-prod", secret_dir=Path("/secure/secrets"), release_id="abc123",
+            monitoring_dir=Path("/custom/releases/abc123/monitoring"))
         self.assertEqual(values["REDROID_IMAGE"], "redroid@sha256:abc")
         self.assertNotIn("UNSAFE", values)
+        self.assertEqual(values["FARM_MONITORING_DIR"],
+                         str(Path("/custom/releases/abc123/monitoring")))
         self.assertEqual(values["FARM_HTTP_BIND"], "127.0.0.1")
         self.assertEqual(values["FARM_HTTP_PORT"], "18080")
         self.assertEqual(values["FARM_TRAEFIK_ENABLED"], "true")
@@ -543,6 +547,8 @@ class InstallerFilesystemTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as folder:
             root = Path(folder)
             source = self.make_source(root)
+            monitoring_file = source / "monitoring" / "prometheus.yml"
+            monitoring_file.write_text("global: {}\n", encoding="utf-8")
             settings = self.settings(root, source)
             first = install.install_managed_files(
                 settings, {"coolify_network": "coolify", "compose_project": "project",
@@ -551,6 +557,7 @@ class InstallerFilesystemTests(unittest.TestCase):
             live_config = (settings.paths.config_dir / "provisioner.json").read_bytes()
             live_wrapper = settings.paths.wrapper.read_bytes()
             source.joinpath("provisioner.py").write_text("new release\n", encoding="utf-8")
+            monitoring_file.write_text("global: {scrape_interval: 30s}\n", encoding="utf-8")
             staged = install.install_managed_files(
                 settings, {"coolify_network": "coolify", "compose_project": "project",
                            "anchor_present": True,
@@ -562,6 +569,17 @@ class InstallerFilesystemTests(unittest.TestCase):
             self.assertEqual(settings.paths.wrapper.read_bytes(), live_wrapper)
             staged_env = install.parse_env((settings.paths.config_dir / "coolify.env").read_text())
             self.assertEqual(staged_env["FARM_RELEASE_ID"], staged["release_id"])
+            # The custom release root must be respected, and an upgrade must
+            # use staged monitoring files without modifying the live release.
+            staged_monitoring = Path(staged_env["FARM_MONITORING_DIR"])
+            live_monitoring = Path(install.parse_env(live_env.decode())["FARM_MONITORING_DIR"])
+            self.assertEqual(staged_monitoring, Path(staged["release_dir"]) / "monitoring")
+            self.assertEqual(live_monitoring, Path(first["release_dir"]) / "monitoring")
+            self.assertNotEqual(staged_monitoring, live_monitoring)
+            self.assertTrue(staged_monitoring.is_absolute())
+            self.assertEqual((staged_monitoring / "prometheus.yml").read_text(),
+                             "global: {scrape_interval: 30s}\n")
+            self.assertEqual((live_monitoring / "prometheus.yml").read_text(), "global: {}\n")
 
     def test_matching_upgrade_waits_until_active_devices_stop(self):
         with tempfile.TemporaryDirectory() as folder:

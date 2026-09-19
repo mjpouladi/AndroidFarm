@@ -393,6 +393,10 @@ PROMETHEUS_RETENTION=30d
 
 `farm-anchor` label مربوط به release را از `FARM_RELEASE_ID` می‌گیرد. installer تنها وقتی release میزبان و deploy Coolify یکسان باشند کنترل‌پلین را فعال می‌کند.
 
+متغیر `FARM_MONITORING_DIR` در `coolify.env` مسیر مطلق فایل‌های مانیتورینگ همان release روی میزبان است؛ معمولاً `/opt/android-farm/releases/<release-id>/monitoring`. راه‌انداز این مسیر را هنگام هر ارتقا به‌روز می‌کند. در مسیر دستی، مقدار تولیدشده را همراه `FARM_RELEASE_ID` وارد Coolify کنید؛ مقدار `./monitoring` در `env.example` فقط برای اجرای محلی توسعه است. این روش مانع وابستگی مانیتورینگ به نگهداری checkout موقت Coolify و ساخته‌شدن پوشه به‌جای فایل‌های YAML توسط Raw Compose می‌شود. mountها فقط‌خواندنی هستند و فایل رمز Grafana جداگانه در مسیر خصوصی خود می‌ماند.
+
+در `docker-compose.yml` هسته، labelها را به‌صورت فهرست رشته‌های `"key=value"` نگه دارید. پردازشگر Raw Compose در Coolify برچسب‌های مدیریتی خودش را به این فهرست اضافه می‌کند؛ قالب نگاشتی `key: value` در این مسیر می‌تواند به خطای `non-string key` منجر شود. Raw Compose باید فعال بماند تا شبکه‌ها و مسیرهای تعریف‌شده حفظ شوند.
+
 ### مسیر دستی ۵ — Apply دوم و doctor
 
 پس از deploy، **دقیقاً همان فرمان apply** را دوباره اجرا کنید:
@@ -987,6 +991,7 @@ ss -ltnp | grep ':5551'
 | `Module binder_linux not found` | مراحل «نبودن Binder پس از به‌روزرسانی کرنل» در ادامهٔ همین بخش؛ ابتدا نصب‌کنندهٔ به‌روز را دوباره اجرا کنید |
 | Binder بارگذاری شده ولی `/dev/binder`، `/dev/hwbinder` و `/dev/vndbinder` آماده نیستند | خطای تشخیص نسخهٔ قبلی نصب‌کننده؛ بخش «Binder بارگذاری شده ولی دستگاه‌های میزبان وجود ندارند» را ببینید و همان فرمان نصب را تکرار کنید |
 | `managed file parent must be root-owned and protected: /data/coolify/proxy/dynamic` | ناسازگاری نسخهٔ قبلی با مالک استاندارد Coolify؛ بخش «مالکیت مسیر dynamic در Coolify» را ببینید |
+| `non-string key in services.farm-anchor.labels: 0` | ناسازگاری قالب label با Raw Compose؛ بخش «خطای label هنگام Deploy» را ببینید |
 | `doctor: blocked` | remediation همان check را اجرا کنید؛ معمولاً Binder، release mismatch، auth file یا local Docker context است |
 | راه‌انداز: نتیجهٔ Deploy نامعلوم | راه‌انداز ابتدا تاریخچهٔ API را بررسی می‌کند. فقط اگر در Coolify مطمئن شدید هیچ Deploy ساخته نشده، همان فرمان را با `--retry-deploy` تکرار کنید؛ درخواست نامعلوم خودکار تکرار نمی‌شود |
 | apply در `waiting_for_coolify` | `coolify.env` را در همان یک App وارد، همان release را deploy و apply یکسان را دوباره اجرا کنید |
@@ -997,6 +1002,24 @@ ss -ltnp | grep ':5551'
 | metricهای سلامت stale هستند | `android-farm-health.timer`، permission مسیر textfile و mount node-exporter را بررسی کنید |
 | worker retry می‌کند | journal، result task، lock device و DLQ را بررسی کنید؛ task دلخواه shell به صف نفرستید |
 | profile drift | device را stop، فایل profile و digest را بازبینی و start کنترل‌شده اجرا کنید |
+
+### خطای label هنگام Deploy
+
+اگر مرحلهٔ سوم نصب هنگام `docker compose build --pull` با این پیام متوقف شد:
+
+```text
+Error: non-string key in services.farm-anchor.labels: 0
+```
+
+علت، ترکیب labelهای نگاشتی نسخهٔ قبلی با labelهای فهرستی افزوده‌شده توسط Coolify است. نسخهٔ اصلاح‌شده، labelهای تمام سرویس‌های هسته را به‌صورت رشته‌های `"key=value"` تعریف می‌کند؛ مقدار برچسب‌ها و تنظیمات شبکه و احراز هویت حفظ می‌شوند. [پردازشگر رسمی Raw Compose در Coolify، تابع oldRawParser](https://github.com/coollabsio/coolify/blob/v4.x/app/Models/Application.php)
+
+همان فرمان را اجرا کنید تا اصلاح از `main` دریافت و استقرار همان برنامه دوباره انجام شود:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com
+```
+
+Raw Compose را فعال نگه دارید. برای رفع این خطا، برنامه یا volumeها را حذف نکنید؛ نیازی به ایجاد دوبارهٔ پروژه، تغییر DNS یا reboot نیست.
 
 ### مالکیت مسیر dynamic در Coolify
 

@@ -3,6 +3,8 @@ name: android-farm-core
 # This is the only Compose file imported into Coolify. Device containers are
 # rendered into docker-compose.farm.yml and started on demand by the root-owned
 # host agent in a separate Compose project.
+# Keep labels as KEY=VALUE lists: Coolify's Raw Compose parser appends its
+# labels as list items, which makes mapping-style labels invalid.
 services:
   farm-anchor:
     image: alpine:3.21
@@ -13,9 +15,9 @@ services:
     mem_limit: 32m
     cpus: 0.1
     labels:
-      farm.stack: core
-      farm.release: ${FARM_RELEASE_ID:-development}
-      traefik.enable: "false"
+      - "farm.stack=core"
+      - "farm.release=${FARM_RELEASE_ID:-development}"
+      - "traefik.enable=false"
 
   console:
     build:
@@ -33,17 +35,17 @@ services:
     cpus: 0.5
     networks: [coolify]
     labels:
-      farm.stack: core
-      farm.role: console
-      traefik.enable: ${FARM_TRAEFIK_ENABLED:-true}
-      traefik.docker.network: ${COOLIFY_NETWORK:-coolify}
-      traefik.http.routers.farm-console.rule: Host(`${CONSOLE_DOMAIN:-console.farm.example.com}`)
-      traefik.http.routers.farm-console.priority: "10"
-      traefik.http.routers.farm-console.entrypoints: https
-      traefik.http.routers.farm-console.tls: "true"
-      traefik.http.routers.farm-console.tls.certresolver: letsencrypt
-      traefik.http.routers.farm-console.middlewares: farm-auth@file
-      traefik.http.services.farm-console.loadbalancer.server.port: "8080"
+      - "farm.stack=core"
+      - "farm.role=console"
+      - "traefik.enable=${FARM_TRAEFIK_ENABLED:-true}"
+      - "traefik.docker.network=${COOLIFY_NETWORK:-coolify}"
+      - "traefik.http.routers.farm-console.rule=Host(`${CONSOLE_DOMAIN:-console.farm.example.com}`)"
+      - "traefik.http.routers.farm-console.priority=10"
+      - "traefik.http.routers.farm-console.entrypoints=https"
+      - "traefik.http.routers.farm-console.tls=true"
+      - "traefik.http.routers.farm-console.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.farm-console.middlewares=farm-auth@file"
+      - "traefik.http.services.farm-console.loadbalancer.server.port=8080"
     healthcheck:
       test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
       interval: 30s
@@ -76,10 +78,10 @@ services:
     cpus: 0.1
     pids_limit: 32
     labels:
-      farm.stack: core
-      farm.role: secret-init
-      farm.auth.revision: ${FARM_HTTP_AUTH_REVISION:-manual}
-      traefik.enable: "false"
+      - "farm.stack=core"
+      - "farm.role=secret-init"
+      - "farm.auth.revision=${FARM_HTTP_AUTH_REVISION:-manual}"
+      - "traefik.enable=false"
 
   gateway:
     build:
@@ -114,10 +116,10 @@ services:
       timeout: 5s
       retries: 3
     labels:
-      farm.stack: core
-      farm.role: gateway
-      farm.auth.revision: ${FARM_HTTP_AUTH_REVISION:-manual}
-      traefik.enable: "false"
+      - "farm.stack=core"
+      - "farm.role=gateway"
+      - "farm.auth.revision=${FARM_HTTP_AUTH_REVISION:-manual}"
+      - "traefik.enable=false"
 
   prometheus:
     image: prom/prometheus:v3.13.3
@@ -133,8 +135,8 @@ services:
       - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
       - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-20GB}
     volumes:
-      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
-      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - ${FARM_MONITORING_DIR:-./monitoring}/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ${FARM_MONITORING_DIR:-./monitoring}/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus-data:/prometheus
     tmpfs: [/tmp]
     mem_limit: 2g
@@ -143,9 +145,9 @@ services:
     networks: [monitoring]
     depends_on: [node-exporter, cadvisor]
     labels:
-      farm.stack: core
-      farm.role: prometheus
-      traefik.enable: "false"
+      - "farm.stack=core"
+      - "farm.role=prometheus"
+      - "traefik.enable=false"
 
   node-exporter:
     image: prom/node-exporter:v1.12.0
@@ -166,9 +168,9 @@ services:
     cpus: 0.5
     pids_limit: 256
     labels:
-      farm.stack: core
-      farm.role: node-exporter
-      traefik.enable: "false"
+      - "farm.stack=core"
+      - "farm.role=node-exporter"
+      - "traefik.enable=false"
 
   cadvisor:
     image: ghcr.io/google/cadvisor:v0.60.5
@@ -190,9 +192,9 @@ services:
     pids_limit: 512
     networks: [monitoring]
     labels:
-      farm.stack: core
-      farm.role: cadvisor
-      traefik.enable: "false"
+      - "farm.stack=core"
+      - "farm.role=cadvisor"
+      - "traefik.enable=false"
 
   grafana-secret-init:
     image: alpine:3.21
@@ -222,9 +224,9 @@ services:
     cpus: 0.1
     pids_limit: 32
     labels:
-      farm.stack: core
-      farm.role: secret-init
-      traefik.enable: "false"
+      - "farm.stack=core"
+      - "farm.role=secret-init"
+      - "traefik.enable=false"
 
   grafana:
     image: grafana/grafana:13.2.2
@@ -244,8 +246,8 @@ services:
     volumes:
       - grafana-data:/var/lib/grafana
       - grafana-secrets:/run/grafana-private:ro
-      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
-      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+      - ${FARM_MONITORING_DIR:-./monitoring}/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ${FARM_MONITORING_DIR:-./monitoring}/grafana/dashboards:/var/lib/grafana/dashboards:ro
     tmpfs: [/tmp, /var/log/grafana]
     mem_limit: 1g
     cpus: 1.0
@@ -257,16 +259,16 @@ services:
       grafana-secret-init:
         condition: service_completed_successfully
     labels:
-      farm.stack: core
-      farm.role: grafana
-      traefik.enable: ${FARM_TRAEFIK_ENABLED:-true}
-      traefik.docker.network: ${COOLIFY_NETWORK:-coolify}
-      traefik.http.routers.android-farm-grafana.rule: Host(`${GRAFANA_DOMAIN:-metrics.farm.example.com}`)
-      traefik.http.routers.android-farm-grafana.entrypoints: https
-      traefik.http.routers.android-farm-grafana.tls: "true"
-      traefik.http.routers.android-farm-grafana.tls.certresolver: letsencrypt
-      traefik.http.routers.android-farm-grafana.middlewares: farm-auth@file
-      traefik.http.services.android-farm-grafana.loadbalancer.server.port: "3000"
+      - "farm.stack=core"
+      - "farm.role=grafana"
+      - "traefik.enable=${FARM_TRAEFIK_ENABLED:-true}"
+      - "traefik.docker.network=${COOLIFY_NETWORK:-coolify}"
+      - "traefik.http.routers.android-farm-grafana.rule=Host(`${GRAFANA_DOMAIN:-metrics.farm.example.com}`)"
+      - "traefik.http.routers.android-farm-grafana.entrypoints=https"
+      - "traefik.http.routers.android-farm-grafana.tls=true"
+      - "traefik.http.routers.android-farm-grafana.tls.certresolver=letsencrypt"
+      - "traefik.http.routers.android-farm-grafana.middlewares=farm-auth@file"
+      - "traefik.http.services.android-farm-grafana.loadbalancer.server.port=3000"
 
 networks:
   coolify:

@@ -95,7 +95,7 @@ class GatewayTests(unittest.TestCase):
         secret_init = COMPOSE.split('  gateway-secret-init:\n', 1)[1].split('\n  gateway:', 1)[0]
         gateway = COMPOSE.split('  gateway:\n', 1)[1].split('\n  prometheus:', 1)[0]
         for service in (secret_init, gateway):
-            self.assertIn('farm.auth.revision: ${FARM_HTTP_AUTH_REVISION:-manual}', service)
+            self.assertIn('farm.auth.revision=${FARM_HTTP_AUTH_REVISION:-manual}', service)
         self.assertIn('gateway-secret-init:\n        condition: service_completed_successfully', gateway)
 
 
