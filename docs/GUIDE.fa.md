@@ -460,7 +460,7 @@ GRAFANA_SERVE_FROM_SUB_PATH=true
 
 تنظیم `root_url` همراه `serve_from_sub_path=true` مطابق [راهنمای رسمی Grafana برای مسیر فرعی](https://grafana.com/tutorials/run-grafana-behind-a-proxy/#alternative-for-serving-grafana-under-a-sub-path) است. هدرهای Upgrade و Connection در درگاه مطابق [مستندات WebSocket در Nginx](https://nginx.org/en/docs/http/websocket.html) ارسال می‌شوند.
 
-فایل bcrypt میزبان همچنان root-owned و `0600` است؛ آماده‌ساز یک‌باره آن را در volume خصوصی با UID `101` و mode `0400` کپی می‌کند. Nginx بدون root، بدون capability و بدون Docker socket اجرا می‌شود. پس از تغییر فایل خصوصی رمز، راه‌انداز را دوباره اجرا کنید: اثرانگشت غیرمحرمانهٔ `FARM_HTTP_AUTH_REVISION` به‌روزرسانی و درگاه برای دریافت رمز جدید redeploy می‌شود. در مسیر دستی، پس از apply باید ENV جدید را به Coolify منتقل و redeploy کنید. برای تغییر دسترسی/ارتقا نیز از راه‌انداز استفاده کنید تا ENV هسته و runtime دستگاه‌ها هماهنگ بمانند.
+فایل bcrypt میزبان با مالک root و مجوز `0600` ساخته می‌شود؛ اگر Coolify بعداً مالک آن را به UID `9999` تغییر دهد، فقط همین فایل با حفظ مجوز خصوصی پذیرفته می‌شود. آماده‌ساز یک‌باره آن را در volume خصوصی با UID `101` و mode `0400` کپی می‌کند. Nginx بدون root، بدون capability و بدون Docker socket اجرا می‌شود. پس از تغییر فایل خصوصی رمز، راه‌انداز را دوباره اجرا کنید: اثرانگشت غیرمحرمانهٔ `FARM_HTTP_AUTH_REVISION` به‌روزرسانی و درگاه برای دریافت رمز جدید redeploy می‌شود. در مسیر دستی، پس از apply باید ENV جدید را به Coolify منتقل و redeploy کنید. برای تغییر دسترسی/ارتقا نیز از راه‌انداز استفاده کنید تا ENV هسته و runtime دستگاه‌ها هماهنگ بمانند.
 
 ## ۷. انتخاب و مدیریت پراکسی
 
@@ -972,7 +972,7 @@ ss -ltnp | grep ':5551'
 
 - Redroid privileged است و VM یا مرز multi-tenant امن محسوب نمی‌شود؛ فقط APK مورداعتماد QA اجرا کنید.
 - Docker group معادل root است. اپراتور روزمره نباید عضو آن باشد و socket نباید mount/publish شود.
-- secretها فقط در `/etc/android-farm`، state حساس در `/var/lib/android-farm` و هر دو root-owned با mode محدود هستند.
+- secretهای فارم در `/etc/android-farm` و state حساس در `/var/lib/android-farm` با مالک root و مجوز محدود نگهداری می‌شوند. استثنا، فایل bcrypt احراز هویت وب در dynamic directory خود Coolify است که فقط با مالک root یا UID `9999` و بدون دسترسی گروه/دیگران پذیرفته می‌شود.
 - شماره، password، token، APK و certificate خصوصی را در Git، Docker label، Coolify ENV یا log قرار ندهید.
 - `REDROID_IMAGE` در ENV فقط image کاتالوگ پایه را تعیین می‌کند. profile نسخهٔ Android را از نگاشت `REDROID_IMAGES` در `ops/device_profiles.py` انتخاب می‌کند؛ برای pin کردن profile، همان مقدار نسخه‌دار را در source بازبینی‌شده به `tag@sha256:...` تغییر دهید و release جدید بسازید. `PROXY_IMAGE` و `SCREEN_IMAGE` نام build محلی‌اند و باید tag قابل‌نوشتن باقی بمانند. imageهای upstream را پس از pilot با digest تأییدشده ثابت کنید.
 - shared Coolify network فقط برای workloadهای مورداعتماد است. Basic Auth فعلی per-device authorization ارائه نمی‌دهد.
@@ -986,6 +986,7 @@ ss -ltnp | grep ':5551'
 |---|---|
 | `Module binder_linux not found` | مراحل «نبودن Binder پس از به‌روزرسانی کرنل» در ادامهٔ همین بخش؛ ابتدا نصب‌کنندهٔ به‌روز را دوباره اجرا کنید |
 | Binder بارگذاری شده ولی `/dev/binder`، `/dev/hwbinder` و `/dev/vndbinder` آماده نیستند | خطای تشخیص نسخهٔ قبلی نصب‌کننده؛ بخش «Binder بارگذاری شده ولی دستگاه‌های میزبان وجود ندارند» را ببینید و همان فرمان نصب را تکرار کنید |
+| `managed file parent must be root-owned and protected: /data/coolify/proxy/dynamic` | ناسازگاری نسخهٔ قبلی با مالک استاندارد Coolify؛ بخش «مالکیت مسیر dynamic در Coolify» را ببینید |
 | `doctor: blocked` | remediation همان check را اجرا کنید؛ معمولاً Binder، release mismatch، auth file یا local Docker context است |
 | راه‌انداز: نتیجهٔ Deploy نامعلوم | راه‌انداز ابتدا تاریخچهٔ API را بررسی می‌کند. فقط اگر در Coolify مطمئن شدید هیچ Deploy ساخته نشده، همان فرمان را با `--retry-deploy` تکرار کنید؛ درخواست نامعلوم خودکار تکرار نمی‌شود |
 | apply در `waiting_for_coolify` | `coolify.env` را در همان یک App وارد، همان release را deploy و apply یکسان را دوباره اجرا کنید |
@@ -996,6 +997,24 @@ ss -ltnp | grep ':5551'
 | metricهای سلامت stale هستند | `android-farm-health.timer`، permission مسیر textfile و mount node-exporter را بررسی کنید |
 | worker retry می‌کند | journal، result task، lock device و DLQ را بررسی کنید؛ task دلخواه shell به صف نفرستید |
 | profile drift | device را stop، فایل profile و digest را بازبینی و start کنترل‌شده اجرا کنید |
+
+### مالکیت مسیر dynamic در Coolify
+
+اگر نصب پس از پیام آماده‌بودن BinderFS با خطای زیر متوقف شد:
+
+```text
+managed file parent must be root-owned and protected: /data/coolify/proxy/dynamic
+```
+
+این خطا از بررسی بیش از حد محدود نسخهٔ قبلی نصب‌کننده است. Coolify به‌صورت استاندارد مسیر `/data/coolify/proxy/dynamic` را با مالک `9999:root` و مجوز `0700` آماده می‌کند؛ این مالکیت طبیعی است. [نصب‌کنندهٔ رسمی Coolify](https://github.com/coollabsio/coolify/blob/v4.x/scripts/install.sh#L208)
+
+همان فرمان را اجرا کنید تا نسخهٔ اصلاح‌شده از `main` دریافت شود و نصب ادامه یابد:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com
+```
+
+اصلاح فقط نوشتن دو فایل احراز هویت فارم در مسیر dynamic با مالک root یا UID `9999` را مجاز می‌کند؛ مسیر symlink یا قابل‌نوشتن برای گروه/دیگران پذیرفته نمی‌شود. فایل‌های جدید `farm-auth.yml` و `farm-users.htpasswd` با مالک root و به‌ترتیب مجوزهای `0644` و `0600` ساخته می‌شوند. دیگر مسیرها و secretهای فارم همچنان مالک root می‌خواهند. **مجوز یا مالکیت پوشه‌های مشترک Coolify را با `chmod -R` یا `chown -R` تغییر ندهید**؛ برای این خطا نیازی به reboot هم نیست.
 
 ### Binder بارگذاری شده ولی دستگاه‌های میزبان وجود ندارند
 

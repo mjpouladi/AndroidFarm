@@ -125,7 +125,7 @@ def prepare_auth(paths: install.Paths, state: dict) -> tuple[str | None, Path | 
     # Preserve credentials installed by the advanced/manual path.
     users = paths.traefik_dynamic_dir / "farm-users.htpasswd"
     if users.exists():
-        valid, _ = install.private_path_status(users)
+        valid, _ = install.traefik_users_status(users)
         if not valid:
             raise RuntimeError("فایل ورود قبلی مجوز امن ندارد؛ نصب متوقف شد.")
         return None, None

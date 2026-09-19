@@ -42,6 +42,10 @@ DEFAULT_HTTP_PORT = 18080
 FIRST_ADB_PORT = 5551
 LAST_ADB_PORT = 13742
 GATEWAY_CONTAINER = "android-farm-gateway"
+ROOT_OWNER_UIDS = frozenset({0})
+# Coolify's official installer owns /data/coolify as 9999:root, mode 0700.
+# Trust this controller identity only at the Traefik integration boundary.
+COOLIFY_OWNER_UIDS = frozenset({0, 9999})
 RELEASE_ENTRIES = (
     ".dockerignore",
     "provisioner.py",
@@ -564,7 +568,8 @@ def _safe_existing_directory(path: Path, mode: int) -> None:
         os.chown(path, 0, 0)
 
 
-def _atomic_write(path: Path, content: bytes, mode: int) -> None:
+def _atomic_write(path: Path, content: bytes, mode: int, *,
+                  parent_owner_uids: frozenset[int] = ROOT_OWNER_UIDS) -> None:
     if path.exists() and path.is_symlink():
         raise RuntimeError(f"refusing to replace symlink: {path}")
     if path.parent.exists() or path.parent.is_symlink():
@@ -574,8 +579,12 @@ def _atomic_write(path: Path, content: bytes, mode: int) -> None:
         _safe_existing_directory(path.parent, 0o755)
     if os.name == "posix" and os.geteuid() == 0:
         parent_stat = path.parent.stat()
-        if parent_stat.st_uid != 0 or parent_stat.st_mode & 0o022:
-            raise RuntimeError(f"managed file parent must be root-owned and protected: {path.parent}")
+        if parent_stat.st_uid not in parent_owner_uids or parent_stat.st_mode & 0o022:
+            raise RuntimeError(
+                f"managed file parent must have a trusted owner {sorted(parent_owner_uids)} "
+                f"and no group/other write permission: {path.parent} "
+                f"(uid={parent_stat.st_uid}, mode={stat.S_IMODE(parent_stat.st_mode):04o})"
+            )
     fd, temporary_name = tempfile.mkstemp(prefix=f".{path.name}.", dir=path.parent)
     temporary = Path(temporary_name)
     try:
@@ -649,13 +658,15 @@ def _private_password(path: Path) -> str:
 def configure_traefik_auth(settings: Settings) -> dict[str, object]:
     """Install the fail-closed middleware and optionally create its bcrypt user."""
     dynamic = settings.paths.traefik_dynamic_dir.absolute()
-    if _path_traverses_symlink(dynamic) or not dynamic.is_dir():
-        raise RuntimeError(f"Coolify Traefik dynamic directory is unavailable: {dynamic}")
+    valid, detail = traefik_dynamic_status(dynamic)
+    if not valid:
+        raise RuntimeError(f"Coolify Traefik dynamic directory is unsafe: {dynamic}: {detail}")
     dynamic = dynamic.resolve(strict=True)
     middleware_source = settings.source / "traefik" / "farm-auth.yml"
     if middleware_source.is_symlink() or not middleware_source.is_file():
         raise RuntimeError("reviewed Traefik middleware source is missing")
-    _atomic_write(dynamic / "farm-auth.yml", middleware_source.read_bytes(), 0o644)
+    _atomic_write(dynamic / "farm-auth.yml", middleware_source.read_bytes(), 0o644,
+                  parent_owner_uids=COOLIFY_OWNER_UIDS)
     users = dynamic / "farm-users.htpasswd"
     if settings.auth_password_file is not None:
         if not settings.auth_user or not AUTH_USER_RE.fullmatch(settings.auth_user):
@@ -663,7 +674,7 @@ def configure_traefik_auth(settings: Settings) -> dict[str, object]:
         password = _private_password(settings.auth_password_file)
         existing_record = ""
         if users.exists() or users.is_symlink():
-            valid, detail = private_path_status(users)
+            valid, detail = traefik_users_status(users)
             if not valid:
                 raise RuntimeError(f"existing Basic Auth user file is unsafe: {detail}")
             existing_record = users.read_text(encoding="utf-8").strip()
@@ -681,18 +692,19 @@ def configure_traefik_auth(settings: Settings) -> dict[str, object]:
                               input_text=password + "\n")
             if result.returncode or not result.stdout.startswith(settings.auth_user + ":$2"):
                 raise RuntimeError("failed to generate the browser Basic Auth bcrypt record")
-            _atomic_write(users, result.stdout.rstrip("\n").encode("utf-8") + b"\n", 0o600)
+            _atomic_write(users, result.stdout.rstrip("\n").encode("utf-8") + b"\n", 0o600,
+                          parent_owner_uids=COOLIFY_OWNER_UIDS)
     if users.is_symlink() or not users.is_file() or not users.read_text(encoding="utf-8").strip():
         raise RuntimeError("Traefik Basic Auth user file is missing; pass --auth-user and --auth-password-file")
-    if os.name == "posix":
-        info = users.stat()
-        if info.st_uid != 0 or info.st_mode & 0o077:
-            raise RuntimeError("Traefik Basic Auth user file must be root-owned and chmod 0600")
+    valid, detail = traefik_users_status(users)
+    if not valid:
+        raise RuntimeError(f"Traefik Basic Auth user file is unsafe: {detail}")
     return {"middleware": str(dynamic / "farm-auth.yml"), "users_file": str(users),
             "revision": auth_file_revision(users)}
 
 
-def private_path_status(path: Path, *, directory: bool = False) -> tuple[bool, str]:
+def private_path_status(path: Path, *, directory: bool = False,
+                        owner_uids: frozenset[int] = ROOT_OWNER_UIDS) -> tuple[bool, str]:
     """Describe whether a managed private path has fail-closed ownership/mode."""
     try:
         info = path.lstat()
@@ -701,14 +713,47 @@ def private_path_status(path: Path, *, directory: bool = False) -> tuple[bool, s
     wanted = stat.S_ISDIR(info.st_mode) if directory else stat.S_ISREG(info.st_mode)
     if path.is_symlink() or not wanted:
         return False, "not a regular managed " + ("directory" if directory else "file")
-    if os.name == "posix" and (info.st_uid != 0 or info.st_mode & 0o077):
-        return False, "must be root-owned with no group/other permissions"
+    if os.name == "posix" and (info.st_uid not in owner_uids or info.st_mode & 0o077):
+        return False, f"must be owned by UID {sorted(owner_uids)} with no group/other permissions"
     return True, "private permissions verified"
+
+
+def traefik_dynamic_status(path: Path) -> tuple[bool, str]:
+    """Recognize Coolify-owned configuration without modifying shared folders.
+
+    https://github.com/coollabsio/coolify/blob/v4.x/scripts/install.sh
+    Custom controller UIDs require an explicit integration, not trust inferred
+    from whoever happens to own the supplied path.
+    """
+    try:
+        if _path_traverses_symlink(path) or not path.is_dir():
+            return False, "must be an existing directory without symlink components"
+        info = path.stat()
+        if os.name == "posix" and (info.st_uid not in COOLIFY_OWNER_UIDS or info.st_mode & 0o022):
+            return False, ("expected root or Coolify UID 9999, without group/other write permission; "
+                           f"found uid={info.st_uid}, mode={stat.S_IMODE(info.st_mode):04o}")
+        return True, "Coolify directory permissions verified"
+    except OSError as exc:
+        return False, str(exc)
+
+
+def traefik_users_status(path: Path) -> tuple[bool, str]:
+    """Allow the controller to retain ownership after a Coolify upgrade.
+
+    Only the farm's bcrypt integration file gets this exception. Passwords,
+    proxy credentials and other farm configuration remain root-only.
+    """
+    if path.name != "farm-users.htpasswd":
+        return False, "unexpected Traefik user file name"
+    valid, detail = traefik_dynamic_status(path.parent)
+    if not valid:
+        return False, detail
+    return private_path_status(path, owner_uids=COOLIFY_OWNER_UIDS)
 
 
 def auth_file_revision(path: Path) -> str:
     """Return a non-secret deployment trigger for a protected htpasswd file."""
-    valid, detail = private_path_status(path)
+    valid, detail = traefik_users_status(path)
     if not valid:
         raise RuntimeError(f"Basic Auth user file is unsafe: {detail}")
     content = path.read_bytes()
@@ -1572,7 +1617,8 @@ def doctor_checks(settings: Settings, discovered: Mapping[str, object]) -> list[
     middleware = dynamic / "farm-auth.yml"
     users = dynamic / "farm-users.htpasswd"
     try:
-        middleware_ok = (not middleware.is_symlink() and middleware.is_file() and
+        middleware_ok = (traefik_dynamic_status(dynamic)[0] and
+                         not middleware.is_symlink() and middleware.is_file() and
                          middleware.read_bytes() ==
                          (settings.source / "traefik" / "farm-auth.yml").read_bytes())
     except OSError:
@@ -1580,7 +1626,7 @@ def doctor_checks(settings: Settings, discovered: Mapping[str, object]) -> list[
     checks.append(Check("traefik-auth-middleware", "pass" if middleware_ok else "block",
                         str(middleware) if middleware_ok else "missing or differs from reviewed configuration",
                         None if middleware_ok else "Run apply to install the farm-auth middleware."))
-    users_ok, users_detail = private_path_status(users)
+    users_ok, users_detail = traefik_users_status(users)
     checks.append(Check("traefik-auth-users", "pass" if users_ok else "block", users_detail,
                         None if users_ok else
                         "Run apply with --auth-user and --auth-password-file (root-owned, chmod 0600)."))
