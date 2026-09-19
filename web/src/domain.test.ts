@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest';
-import { actionText, activeDevices, deviceStatus, egressText, eventText, isSnapshotFresh, parseSnapshot, provisionableProxies, resumablePhases, screenPath, startablePhases, type Device, type Job, type ProxyRecord } from './domain';
+import { actionText, activeDevices, deviceStatus, diagnoseCommand, egressText, eventText, isSnapshotFresh, parseSnapshot, provisionableProxies, resumablePhases, screenPath, startablePhases, type Device, type Job, type ProxyRecord } from './domain';
 
 const device: Device = { id: 'num01', phase: 'ready_for_operator', hold: null,
   containers: { android: 'running', proxy: 'healthy', screen: 'running' }, adb: '127.0.0.1:5551',
@@ -122,5 +122,20 @@ describe('وضعیت واقعی و مرز اعتماد API', () => {
     expect(parseSnapshot({ ...snapshotData(), devices: [failed] })?.devices[0].last_error).toBe(failed.last_error);
     expect(() => parseSnapshot({ ...snapshotData(), devices: [{ ...device, last_error: 7 }] })).toThrow();
     expect(eventText['device-removed']).toBe('دستگاه از فارم حذف شد');
+  });
+  it('زمان توقف ثبت‌شده اختیاری است و فقط ثانیهٔ صحیح و قابل نمایش را می‌پذیرد', () => {
+    for (const failed_at of [undefined, null, 0, 1789849223]) {
+      expect(parseSnapshot({ ...snapshotData(), devices: [{ ...device, failed_at }] }).devices[0].failed_at).toBe(failed_at);
+    }
+    for (const failed_at of [-1, 1.5, NaN, Infinity, Number.MAX_SAFE_INTEGER + 1, 8640000000001, '1789849223', true]) {
+      expect(() => parseSnapshot({ ...snapshotData(), devices: [{ ...device, failed_at }] })).toThrow();
+    }
+  });
+  it('فرمان عیب‌یابی فقط برای شناسهٔ استاندارد قابل کپی است', () => {
+    expect(diagnoseCommand('num03')).toBe('sudo device-provisioner diagnose --id num03');
+    expect(diagnoseCommand('num101')).toBe('sudo device-provisioner diagnose --id num101');
+    for (const id of ['', 'num3', 'num00', 'num03; shutdown', 'num03\nreboot', '$(reboot)', '../num03']) {
+      expect(diagnoseCommand(id)).toBeNull();
+    }
   });
 });

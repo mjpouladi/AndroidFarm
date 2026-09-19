@@ -650,12 +650,16 @@ class OperationsTests(unittest.TestCase):
         self.assertNotIn("'ops/farmctl.py'", source)
 
     def test_proxy_wait_reports_the_last_health_error(self):
+        import io
+        from contextlib import redirect_stderr
         from ops import farmctl
         failing = subprocess.CompletedProcess([], 6, '', 'curl: (6) Could not resolve host: api.ipify.org\n')
+        output = io.StringIO()
         with patch('ops.farmctl.subprocess.run', return_value=failing), \
                 patch('ops.farmctl.time.monotonic', side_effect=[0, 0, 500]), patch('ops.farmctl.time.sleep'), \
-                self.assertRaisesRegex(RuntimeError, r'proxy did not become healthy.*Could not resolve host'):
+                redirect_stderr(output), self.assertRaisesRegex(RuntimeError, 'proxy did not become healthy'):
             farmctl.wait_proxy('num01', timeout=120)
+        self.assertIn('Could not resolve host', output.getvalue())
 
     def test_network_forensics_are_bounded_and_never_fail_the_caller(self):
         import io
@@ -711,7 +715,9 @@ class OperationsTests(unittest.TestCase):
                     patch('provisioner.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', '')):
                 report = provisioner.collect_diagnosis(config, 'num04', log_dir=logs)
             names = [item['name'] for item in report['job_logs']]
-            self.assertEqual(names, ['20260919T205537Z-up.log', '20260919T210008Z-up-num04.log'])
+            self.assertEqual(names, ['20260919T205537Z-up.log', '20260919T210008Z-up-num04.log',
+                                     '20260919T210111Z-up.log'])
+            self.assertEqual(report['job_logs'][-1]['association'], 'unscoped')
             self.assertIn('proxy did not become healthy', report['job_logs'][0]['tail'])
             self.assertEqual(report['containers'], {'proxy': {'exists': False}, 'android': {'exists': False}, 'screen': {'exists': False}})
             self.assertEqual(report['record']['last_error'], 'guarded start failed')

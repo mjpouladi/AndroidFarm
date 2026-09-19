@@ -52,6 +52,12 @@ HOST_FAILURES = (
     ('device absent from Coolify Compose catalog', 'device capacity catalog needs regeneration through the installer'),
     ('resume the incomplete device', 'finish the existing incomplete device request before adding another'),
     ('resume or quarantine the incomplete device', 'finish or review the existing incomplete device before adding another'),
+    ('existing phone has a different request', 'the original device request differs; resume with the same phone, '
+                                             'egress and approved application'),
+    ('existing device proxy endpoint/session differs', 'the saved device network configuration differs from the '
+                                                      'original allocation; review it before resuming'),
+    ('existing device direct egress configuration differs', 'the saved direct network configuration is not the '
+                                                          'expected allocation; review it before resuming'),
     # Messages printed by ops/farmctl.py and ops/identity.py during a guarded start.
     ('identity drift detected', 'device identity drift detected; the device was stopped for manual review'),
     ('identity baseline missing', 'identity baseline is missing; restore protected state or re-run the initial provisioning'),
@@ -414,11 +420,14 @@ class Operations:
             # the host keeps it in a root-only log for the operator.
             output = result.stdout or ''
             log_name = self._keep_host_log(command, arguments, output)
+            reference = (f'; host log: {self.host_log_dir}/{log_name}' if log_name else
+                         '; host log unavailable; run device-provisioner diagnose for the device')
             for marker, message in HOST_FAILURES:
                 if marker in output:
-                    raise OperationError(message)
-            where = f'{self.host_log_dir}/{log_name}' if log_name else 'device-provisioner'
-            raise OperationError(f'host operation failed; the host log {where} has the details')
+                    raise OperationError(message + reference)
+            if log_name:
+                raise OperationError(f'host operation failed; the host log {self.host_log_dir}/{log_name} has the details')
+            raise OperationError('host operation failed' + reference)
         return result.stdout or ''
 
     def execute(self, job):
@@ -680,6 +689,7 @@ class Operations:
                 safe_hold = {'reason': reason if isinstance(reason, str) and reason in reasons else 'unknown',
                              'at': held_at if isinstance(held_at, (int, float)) else None}
             active = bool((inspections.get(f'android-{device}') or {}).get('State', {}).get('Running'))
+            failed_at = record.get('failed_at')
             row = {'id': device, 'phase': record.get('phase', 'unknown'), 'hold': safe_hold,
                    'containers': states, 'adb': f'127.0.0.1:{port}' if port else None,
                    'screen': provisioner.web_url(config, device), 'screen_path': f'/d/{device}/',
@@ -691,6 +701,8 @@ class Operations:
                    'running': active,
                    # Written by ops/provision.py from its own messages only; never raw command output.
                    'last_error': _safe_reason(record.get('last_error')),
+                   # Keep the historical failure time; a rejected request may not reach preparation.
+                   'failed_at': failed_at if type(failed_at) is int and 0 <= failed_at <= 8640000000000 else None,
                    'screen_ready': not has_hold and all(state in {'running', 'healthy'} for state in states.values())}
             result['devices'].append(row)
             if active:

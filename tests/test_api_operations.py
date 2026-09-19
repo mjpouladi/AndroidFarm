@@ -31,6 +31,7 @@ class ApiOperationsTests(unittest.TestCase):
                              proxy_registry=self.root / 'proxies.json', proxy_store_dir=self.root / 'proxies')
         self.runner = Mock(return_value=subprocess.CompletedProcess([], 0, '', ''))
         self.ops = Operations(self.root / 'config.json', catalog_path=self.root / 'apps.json', runner=self.runner)
+        self.ops.host_log_dir = self.root / 'job-logs'
         self.ops.components = Mock()
         self.ops.components.snapshot.return_value = []
         self.ops.credential_manager = Mock()
@@ -228,6 +229,7 @@ class ApiOperationsTests(unittest.TestCase):
             with self.subTest(params=params), self.assertRaises(ValueError):
                 self.ops.validate_job({'action': 'provision', 'params': dict(base, **params)})
 
+    @unittest.skipUnless(os.name == 'posix', 'Private upload modes and event locking require POSIX')
     def test_staged_uploads_are_private_and_imported_only_by_reference(self):
         import io
         staged = self.ops.stage_upload(io.BytesIO(b'PK\x03\x04payload'), 11)
@@ -290,6 +292,7 @@ class ApiOperationsTests(unittest.TestCase):
         self.assertIsNone(rows['num02']['proxy'])
         self.assertIsNone(rows['num02']['proxy_id'])
 
+    @unittest.skipUnless(os.name == 'posix', 'Event journal locking requires fcntl')
     def test_snapshot_carries_recent_device_events_from_the_shared_log(self):
         from ops import events
         events.record('device-crashed', 'num01', 'exit code 137')
@@ -304,6 +307,44 @@ class ApiOperationsTests(unittest.TestCase):
         self.assertEqual([item['kind'] for item in result['events']], ['recovery-succeeded', 'device-crashed'])
         self.assertEqual(result['events'][1]['device'], 'num01')
         self.assertNotIn('events', [error['component'] for error in result['errors']])
+
+    def test_snapshot_distinguishes_historical_failure_from_a_new_rejected_request(self):
+        self.app_catalog()
+        state = inventory.load(self.root / 'inventory.json')
+        record = inventory.find(state, 'num01')
+        reason = 'guarded start failed; the host job log of this request has the command output'
+        record.update(phase='failed', last_error=reason, failed_at=1700000000)
+        inventory.save(self.root / 'inventory.json', state)
+        # A new phone is rejected before provisioning begins. It must not make
+        # the older failure look like a newly observed Docker failure.
+        self.runner.return_value = subprocess.CompletedProcess([], 1,
+            'resume or quarantine the incomplete device before adding another', '')
+        with self.assertRaises(OperationError):
+            self.ops._command('up', '--request', 'private-request.json')
+        store = Mock()
+        store.list.return_value = []
+        with patch.object(self.ops, '_store', return_value=store), \
+                patch('services.api.operations.resources.probe', return_value={'capacity': 10}), \
+                patch('services.api.operations.provisioner.bulk_managed_inspections', return_value={}):
+            row = self.ops.snapshot()['devices'][0]
+        self.assertEqual(row['failed_at'], 1700000000)
+        self.assertEqual(row['last_error'], reason)
+        self.assertEqual(row['phase'], 'failed')
+
+    def test_snapshot_filters_invalid_failure_timestamps(self):
+        self.app_catalog()
+        state = inventory.load(self.root / 'inventory.json')
+        record = inventory.find(state, 'num01')
+        store = Mock()
+        store.list.return_value = []
+        with patch.object(self.ops, '_store', return_value=store), \
+                patch('services.api.operations.resources.probe', return_value={'capacity': 10}), \
+                patch('services.api.operations.provisioner.bulk_managed_inspections', return_value={}):
+            for value in (None, True, -1, '1700000000', 1.5, 8640000000001):
+                with self.subTest(value=value):
+                    record['failed_at'] = value
+                    inventory.save(self.root / 'inventory.json', state)
+                    self.assertIsNone(self.ops.snapshot()['devices'][0]['failed_at'])
 
     def test_failed_provision_also_removes_private_request(self):
         self.app_catalog()
@@ -505,7 +546,8 @@ class ApiOperationsTests(unittest.TestCase):
         logs = sorted((self.root / 'job-logs').glob('*.log'))
         self.assertEqual(len(logs), 1)
         self.assertRegex(logs[0].name, r'^\d{8}T\d{6}Z-check-num01\.log$')
-        self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
+        if os.name == 'posix':
+            self.assertEqual(logs[0].stat().st_mode & 0o777, 0o600)
         self.assertIn('token=never-in-http', logs[0].read_text())
         self.assertIn(logs[0].name, str(failure.exception))
         # A second failure in the same second gets its own file; the newest 40 are kept.
@@ -517,6 +559,29 @@ class ApiOperationsTests(unittest.TestCase):
         with self.assertRaises(OperationError):
             self.ops.execute({'action': 'check', 'device': 'num01'})
         self.assertEqual(len(list((self.root / 'job-logs').glob('*.log'))), 40)
+
+    def test_mapped_failures_name_the_exact_log_without_exposing_output(self):
+        for marker in ('existing phone has a different request',
+                       'existing device proxy endpoint/session differs', 'Android boot timed out'):
+            self.runner.return_value = subprocess.CompletedProcess([], 1,
+                f'{marker}\npassword=fixture-private-value', '')
+            with self.subTest(marker=marker), self.assertRaises(OperationError) as failure:
+                self.ops.execute({'action': 'check', 'device': 'num01'})
+            message = str(failure.exception)
+            self.assertNotIn('fixture-private-value', message)
+            path = Path(message.split('; host log: ', 1)[1])
+            self.assertEqual(path.parent, self.ops.host_log_dir)
+            self.assertIn(marker, path.read_text())
+            self.assertLess(len(message), 400)  # Preserved by the web job queue.
+
+    def test_log_write_failure_preserves_the_mapped_error_without_a_false_path(self):
+        self.runner.return_value = subprocess.CompletedProcess([], 1, 'Android boot timed out', '')
+        with patch.object(self.ops, '_keep_host_log', return_value=None), \
+                self.assertRaises(OperationError) as failure:
+            self.ops.execute({'action': 'check', 'device': 'num01'})
+        self.assertIn('Android did not finish booting', str(failure.exception))
+        self.assertIn('host log unavailable', str(failure.exception))
+        self.assertNotIn('; host log:', str(failure.exception))
 
     def test_subprocess_timeout_is_safe(self):
         with self.assertRaisesRegex(OperationError, 'timed out'):

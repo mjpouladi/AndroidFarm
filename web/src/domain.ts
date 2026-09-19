@@ -5,7 +5,7 @@ export type Device = {
   containers: { android: string; proxy: string; screen: string };
   adb: string | null; screen_path: string; screen_ready: boolean;
   proxy: string | null; proxy_id?: string; expected_egress_ip: string | null;
-  egress?: 'proxy' | 'direct'; last_error?: string | null;
+  egress?: 'proxy' | 'direct'; last_error?: string | null; failed_at?: number | null;
   phone: string | null; cpu: string | null; memory: string | null;
   running?: boolean;
 };
@@ -83,15 +83,20 @@ export function deviceStatus(device: Device, jobs: Job[]): DeviceStatus {
   return 'unknown';
 }
 
+const canonicalDeviceId = (id: string) => /^num(?:0[1-9]|[1-9]\d+)$/.test(id);
+// Only a canonical device ID may be included in a copyable host command.
+export const diagnoseCommand = (id: string): string | null => canonicalDeviceId(id) ? `sudo device-provisioner diagnose --id ${id}` : null;
 // Only canonical, same-origin device paths may be embedded in the console.
 export function screenPath(device: Pick<Device, 'id' | 'screen_path'>): string | null {
-  return /^num(?:0[1-9]|[1-9]\d+)$/.test(device.id) && device.screen_path === `/d/${device.id}/` ? device.screen_path : null;
+  return canonicalDeviceId(device.id) && device.screen_path === `/d/${device.id}/` ? device.screen_path : null;
 }
 export const isSnapshotFresh = (snapshot: Snapshot | null, now = Date.now()) => !!snapshot &&
   now / 1000 - snapshot.collected_at <= 20 && snapshot.collected_at - now / 1000 <= 5;
 
 const object = (value: unknown): value is Record<string, unknown> => !!value && typeof value === 'object' && !Array.isArray(value);
 const finite = (value: unknown): value is number => typeof value === 'number' && Number.isFinite(value) && value >= 0;
+// Epoch seconds must fit both integer precision and the JavaScript Date range.
+const timestamp = (value: unknown): value is number => finite(value) && Number.isSafeInteger(value) && value <= 8640000000000;
 const text = (value: unknown): value is string => typeof value === 'string';
 const nullableText = (value: unknown) => value === null || text(value);
 const jobStates = new Set(['queued', 'running', 'succeeded', 'failed', 'interrupted', 'cancelled']);
@@ -127,7 +132,8 @@ export function parseSnapshot(value: unknown): Snapshot {
         !nullableText(item.adb) || !text(item.screen_path) || typeof item.screen_ready !== 'boolean' || !nullableText(item.proxy) ||
         !nullableText(item.expected_egress_ip) || !nullableText(item.phone) || !nullableText(item.cpu) || !nullableText(item.memory) ||
         !(item.egress === undefined || ['proxy', 'direct'].includes(String(item.egress))) ||
-        !(item.last_error === undefined || nullableText(item.last_error))) return invalid();
+        !(item.last_error === undefined || nullableText(item.last_error)) ||
+        !(item.failed_at === undefined || item.failed_at === null || timestamp(item.failed_at))) return invalid();
   }
   for (const item of value.proxies as unknown[]) {
     if (!object(item) || !['id', 'label', 'server', 'expected_egress_ip'].every(key => text(item[key])) || !finite(item.server_port) ||

@@ -8,6 +8,7 @@ import json
 import os
 from pathlib import Path
 import re
+import stat
 import subprocess
 import sys
 import time
@@ -340,6 +341,81 @@ def _env_value(path, key, default):
     return default
 
 
+DIAGNOSTIC_LOG_SCAN_LIMIT = 40
+DIAGNOSTIC_LOG_READ_BYTES = 64 * 1024
+
+
+def _diagnostic_log_tail(path):
+    """Read a bounded tail from a regular file without following a symlink."""
+    try:
+        before = path.lstat()
+        if not stat.S_ISREG(before.st_mode):
+            return None
+        flags = os.O_RDONLY | getattr(os, 'O_NOFOLLOW', 0) | getattr(os, 'O_NONBLOCK', 0)
+        descriptor = os.open(path, flags)
+        with os.fdopen(descriptor, 'rb') as stream:
+            current = os.fstat(stream.fileno())
+            if (not stat.S_ISREG(current.st_mode) or
+                    (before.st_dev, before.st_ino) != (current.st_dev, current.st_ino)):
+                return None
+            offset = max(0, current.st_size - DIAGNOSTIC_LOG_READ_BYTES)
+            stream.seek(offset)
+            data = stream.read(DIAGNOSTIC_LOG_READ_BYTES)
+            if offset:
+                # A partial first line must not become a fabricated failure marker.
+                data = data.partition(b'\n')[2]
+        return data.decode('utf-8', errors='replace').splitlines()
+    except OSError:
+        return None
+
+
+def diagnostic_job_logs(log_dir, device, *, tail_lines=25):
+    """Keep recent attempts plus the last proven preparation failure, at most four logs.
+
+    An unscoped request filename alone does not prove which device it concerns.
+    Only its exact device-prefixed failure marker supplies that association.
+    """
+    directory = Path(log_dir)
+    if directory.is_symlink() or not directory.is_dir():
+        return []
+    pattern = re.compile(r'-(?:up|provision|restart|check|check-ip|remove)'
+                         r'(?:-(?P<device>num(?:0[1-9]|[1-9]\d+)))?(?:-\d+)?\.log\Z')
+    failure = re.compile(rf'^{re.escape(device)}: preparation stopped during \S')
+    other_failure = re.compile(r'^num(?:0[1-9]|[1-9]\d+): preparation stopped during \S')
+    try:
+        candidates = []
+        for path in directory.glob('*.log'):
+            try:
+                if stat.S_ISREG(path.lstat().st_mode):
+                    candidates.append(path)
+            except OSError:
+                continue
+        candidates = sorted(candidates, key=lambda path: path.name)[-DIAGNOSTIC_LOG_SCAN_LIMIT:]
+    except OSError:
+        return []
+    relevant = []
+    origin = None
+    for path in candidates:
+        match = pattern.search(path.name)
+        if not match or match['device'] not in (None, device):
+            continue
+        lines = _diagnostic_log_tail(path)
+        if lines is None:
+            continue
+        actual_failure = any(failure.match(line) for line in lines)
+        if match['device'] is None and not actual_failure and any(other_failure.match(line) for line in lines):
+            continue
+        entry = {'name': path.name, 'tail': lines[-tail_lines:],
+                 'association': 'device' if match['device'] == device or actual_failure else 'unscoped'}
+        relevant.append(entry)
+        if actual_failure:
+            origin = entry
+    selected = relevant[-3:]
+    if origin is not None and origin not in selected:
+        selected.insert(0, origin)
+    return selected
+
+
 def collect_diagnosis(config, device, *, log_dir=Path('/var/lib/android-farm/job-logs'), log_tail=60,
                       container_tail=40):
     """Read-only, bounded evidence for one device: record, containers, host prerequisites, logs.
@@ -413,21 +489,7 @@ def collect_diagnosis(config, device, *, log_dir=Path('/var/lib/android-farm/job
         report['events'] = events.recent(15, device=device)
     except (OSError, RuntimeError, ValueError):
         report['events'] = []
-    report['job_logs'] = []
-    if Path(log_dir).is_dir():
-        # A provisioning run has no --id in its file name; it is recognised by the
-        # device it names in its output. The newest four relevant logs are shown.
-        mention = re.compile(rf'(?<![0-9a-z]){device}(?![0-9a-z])')
-        chosen = []
-        for path in sorted(Path(log_dir).glob('*.log'))[-40:]:
-            try:
-                text = path.read_text(encoding='utf-8', errors='replace')
-            except OSError:
-                continue
-            if f'-{device}' in path.name or mention.search(text):
-                chosen.append((path.name, text))
-        for name, text in chosen[-4:]:
-            report['job_logs'].append({'name': name, 'tail': text.splitlines()[-log_tail:]})
+    report['job_logs'] = diagnostic_job_logs(log_dir, device, tail_lines=log_tail)
     return report
 
 
@@ -456,7 +518,8 @@ def print_diagnosis(report):
     for event in report['events']:
         print(f"  {event['at']} {event['kind']} {event.get('detail') or ''}")
     for log in report['job_logs']:
-        print(f"job log {log['name']}:")
+        scope = ' [unscoped; device association not established]' if log.get('association') == 'unscoped' else ''
+        print(f"job log {log['name']}{scope}:")
         for line in log['tail']:
             print(f'  | {line}')
 

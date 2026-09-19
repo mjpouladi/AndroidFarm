@@ -64,8 +64,9 @@ def run(*args, capture=False, timeout=300):
     return subprocess.run(args, check=True, text=True, capture_output=capture, timeout=timeout).stdout
 
 
-def inspect(name):
-    p = subprocess.run(['docker', 'inspect', name], text=True, capture_output=True)
+def inspect(name, *, timeout=None):
+    p = subprocess.run(['docker', 'inspect', name], text=True, errors='replace',
+                       capture_output=True, timeout=timeout)
     return json.loads(p.stdout)[0] if p.returncode == 0 else None
 
 
@@ -366,18 +367,23 @@ def ensure_android_image(resolved, device):
     return True
 
 
-def wait_proxy(device, timeout=120):
+def wait_proxy(device, timeout=120, *, phase='network-start'):
     deadline = time.monotonic() + timeout
-    last = ''
+    last = 'no completed healthcheck'
     while time.monotonic() < deadline:
-        result = subprocess.run(['docker', 'exec', f'proxy-{device}', '/healthcheck.sh'],
-                                text=True, capture_output=True, timeout=15)
+        try:
+            result = subprocess.run(['docker', 'exec', f'proxy-{device}', '/healthcheck.sh'],
+                                    text=True, errors='replace', capture_output=True, timeout=15)
+        except subprocess.TimeoutExpired:
+            last = 'healthcheck execution timed out'
+            time.sleep(3)
+            continue
         if result.returncode == 0:
             return
-        # curl's own error (DNS, connect, timeout) names the failing layer.
-        last = ' '.join(((result.stderr or '') + (result.stdout or '')).split())[:300] or f'exit {result.returncode}'
+        last = f'healthcheck exit {result.returncode}: ' + ((result.stderr or '') + (result.stdout or ''))[:2048].strip()
         time.sleep(3)
-    raise RuntimeError(f'proxy did not become healthy before timeout (last check: {last or "not attempted"})')
+    print(f'{device}: {phase}: {last}', file=sys.stderr, flush=True)
+    raise RuntimeError(f'proxy did not become healthy before timeout ({phase}); see private host network evidence')
 
 
 # Bounded, read-only evidence from the device's shared network namespace and
@@ -398,16 +404,21 @@ FORENSIC_COMMANDS = (
 )
 
 
-def network_forensics(device, stream=sys.stderr, limit=2500, timeout=10):
+def network_forensics(device, stream=None, limit=2500, timeout=3):
     """Print what the namespace and the host guard look like at the moment of failure."""
+    if stream is None:
+        stream = sys.stderr
     name = f'proxy-{device}'
     print(f'--- network forensics {device} ---', file=stream)
-    state = inspect(name)
+    try:
+        state = inspect(name, timeout=timeout)
+    except (OSError, subprocess.SubprocessError, ValueError):
+        state = None
     commands = []
     if state and (state.get('State') or {}).get('Running'):
         commands.extend((label, ['docker', 'exec', name, *argv]) for label, argv in FORENSIC_COMMANDS)
     else:
-        print('proxy container is not running; namespace evidence unavailable', file=stream)
+        print('proxy state unavailable or not running; namespace evidence unavailable', file=stream)
     plan = network_plan(device_index(device, aliases=False))
     commands.extend((('host-docker-user', ['iptables', '-w', '-S', 'DOCKER-USER']),
                      ('host-guard', ['iptables', '-w', '-S', plan['iptables_chain']]),
@@ -415,7 +426,7 @@ def network_forensics(device, stream=sys.stderr, limit=2500, timeout=10):
                      ('host-bridge-route', ['ip', '-4', 'route', 'show', 'dev', plan['bridge']])))
     for label, argv in commands:
         try:
-            result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+            result = subprocess.run(argv, text=True, errors='replace', capture_output=True, timeout=timeout)
             text, status = ((result.stdout or '') + (result.stderr or '')).strip(), result.returncode
         except (OSError, subprocess.SubprocessError) as exc:
             text, status = str(exc), 'error'
@@ -835,7 +846,7 @@ def main():
             android_paused = False
             try:
                 run(*compose, 'up', '-d', '--no-deps', '--force-recreate', f'proxy-{d}')
-                wait_proxy(d)
+                wait_proxy(d, phase='before-android-boot')
                 first_ip = proxy_egress_ip(d)
                 if expected_ip is not None and first_ip != expected_ip:
                     raise RuntimeError('approved sticky egress IP mismatch; device returned to stopped state')
@@ -862,7 +873,7 @@ def main():
                     run('docker', 'pause', f'android-{d}', timeout=30)
                     android_paused = True
                     guard(d, args.secret_dir, allow_upstream=True)
-                    wait_proxy(d)
+                    wait_proxy(d, phase='after-android-boot')
                     proxy_ip = proxy_egress_ip(d)
                     if proxy_ip != (expected_ip or first_ip):
                         raise RuntimeError('approved sticky egress IP mismatch; device returned to stopped state')

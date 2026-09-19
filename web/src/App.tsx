@@ -8,7 +8,7 @@ import Diagnostics from './Diagnostics';
 import SecurityPanel from './SecurityPanel';
 import CatalogSetup, { applicationGuide } from './CatalogSetup';
 import ArtifactPanel from './ArtifactPanel';
-import { actionText, activeDevices, activeJob, deviceStatus, egressText, eventText, fa, formatSize, formatTime, isSnapshotFresh,
+import { actionText, activeDevices, activeJob, deviceStatus, diagnoseCommand, egressText, eventText, fa, formatSize, formatTime, isSnapshotFresh,
   jobStateText, provisionableProxies, resumablePhases, runningContainer, screenPath, startablePhases, statusText, type Device, type DeviceStatus, type Job,
   type FarmEvent, type ProxyRecord, type Snapshot } from './domain';
 
@@ -25,6 +25,16 @@ const phaseText: Record<string, string> = { reserved: 'رزرو شده', volume_
 const containerText: Record<string, string> = { healthy: 'سالم', unhealthy: 'ناسالم', running: 'در حال اجرا', starting: 'در حال شروع',
   stopped: 'متوقف', missing: 'ساخته نشده', exited: 'خارج شده', created: 'ساخته شده', restarting: 'در حال بازراه‌اندازی' };
 const message = (error: unknown) => error instanceof Error ? error.message : 'عملیات ناموفق بود.';
+export function PreparationDiagnostics({ device }: { device: Pick<Device, 'id' | 'last_error' | 'failed_at'> }) {
+  const command = diagnoseCommand(device.id);
+  return <div>
+    {device.last_error && <><p><strong>آخرین توقف ثبت‌شده:</strong> <span dir="ltr">{device.last_error}</span>
+      {device.failed_at != null && <><br /><time dateTime={new Date(device.failed_at * 1000).toISOString()}>{formatTime(device.failed_at)}</time></>}</p>
+      <p>این پیام مربوط به آخرین اجرای آماده‌سازی است؛ درخواست‌های ردشده پیش از اجرا ممکن است آن را تغییر ندهند.</p></>}
+    {command && <><p>برای بررسی وضعیت فعلی و لاگ عملیات، این فرمان فقط‌خواندنی را روی میزبان اجرا کنید:</p>
+      <pre className="job-result" dir="ltr" tabIndex={0} aria-label="فرمان بررسی دستگاه؛ قابل کپی" style={{ userSelect: 'all' }}><code>{command}</code></pre></>}
+  </div>;
+}
 function Status({ status }: { status: DeviceStatus }) { return <span className={`status ${status}`}><i />{statusText[status]}</span>; }
 function IconButton({ label, children, onClick }: { label: string; children: ReactNode; onClick: () => void }) {
   return <button className="icon-button" aria-label={label} title={label} onClick={onClick}>{children}</button>;
@@ -225,7 +235,7 @@ export default function App() {
       {detailTab === 'events' && <div className="detail-body"><JobList jobs={jobs.filter(job => job.device === chosen.id)} onOpen={setSelectedJob} onCancel={cancel} canMutate={canMutate} unavailable={unavailable('queue')} /></div>}
       <div className="modal-footer"><button className="secondary" disabled={!canChangeDevice || chosenBusy || !runningContainer(chosen.containers.android)} onClick={() => void perform('check', chosen.id)}>بررسی ADB</button><button className="secondary" disabled={!canChangeDevice || chosenBusy || !runningContainer(chosen.containers.android)} onClick={() => void perform('check-ip', chosen.id)}>بررسی IP</button><button className="secondary" disabled={!canChangeDevice || chosenBusy || !['stopped', 'exited', 'created', 'missing'].includes(chosen.containers.android)} onClick={() => void perform('backup', chosen.id)}><Database size={15} />بکاپ</button><span className="spacer" />{runningContainer(chosen.containers.android) ? <><button className="secondary" disabled={!canChangeDevice || chosenBusy || !!chosen.hold} onClick={() => void perform('restart', chosen.id)}><RefreshCw size={15} />راه‌اندازی مجدد</button><button className="danger" disabled={!canChangeDevice || chosenBusy} onClick={() => setConfirm(chosen)}><Power size={15} />خاموش کردن</button></> :<button className="primary" disabled={!canChangeDevice || chosenBusy || !!chosen.hold || !chosenStartable} title={chosenStartable ? undefined : 'آماده‌سازی این دستگاه ناتمام است؛ از «ادامهٔ آماده‌سازی» استفاده کنید'} onClick={() => void perform('up', chosen.id)}><Power size={15} />روشن کردن</button>}</div>
       {chosen.hold && <div className="hold-actions"><button className="secondary" disabled={!canChangeDevice || chosenBusy} onClick={() => { setReleaseReviewed(false); setReleaseDevice(chosen); }}><ShieldCheck size={16} />رفع توقف پس از بررسی</button><p>این فرمان دستگاه را خودکار روشن نمی‌کند.</p></div>}
-      {chosenIncomplete && <div className="hold-actions"><button className="secondary" disabled={!canMutate || chosenBusy || !chosenCanResume} onClick={() => { setEgress(chosenAssignedProxy ? 'proxy' : 'direct'); setProxyId(chosenAssignedProxy ? chosenAssignedProxy.id : ''); setPhone(''); setArtifactId(''); setAuthorized(false); setFormError(''); setSelected(null); setAddOpen(true); }}><RefreshCw size={16} />ادامهٔ آماده‌سازی</button><p>{chosenCanResume ? 'آماده‌سازی این دستگاه ناتمام است و «روشن کردن» ساده آن را کامل نمی‌کند؛ شماره و برنامهٔ درخواست اولیه باید دوباره تأیید شوند.' : 'آماده‌سازی ناتمام است ولی پراکسی اختصاص‌یافته فعال یا موجود نیست؛ آن را در «شبکه و پراکسی» فعال کنید یا دستگاه را حذف کنید.'}{chosen.last_error && <><br /><b>آخرین علت توقف آماده‌سازی:</b> <span dir="ltr">{chosen.last_error}</span></>}</p></div>}
+      {chosenIncomplete && <div className="hold-actions"><button className="secondary" disabled={!canMutate || chosenBusy || !chosenCanResume} onClick={() => { setEgress(chosenAssignedProxy ? 'proxy' : 'direct'); setProxyId(chosenAssignedProxy ? chosenAssignedProxy.id : ''); setPhone(''); setArtifactId(''); setAuthorized(false); setFormError(''); setSelected(null); setAddOpen(true); }}><RefreshCw size={16} />ادامهٔ آماده‌سازی</button><p>{chosenCanResume ? 'آماده‌سازی این دستگاه ناتمام است و «روشن کردن» ساده آن را کامل نمی‌کند؛ شماره و برنامهٔ درخواست اولیه باید دوباره تأیید شوند.' : 'آماده‌سازی ناتمام است ولی پراکسی اختصاص‌یافته فعال یا موجود نیست؛ آن را در «شبکه و پراکسی» فعال کنید یا دستگاه را حذف کنید.'}</p><PreparationDiagnostics device={chosen} /></div>}
       <div className="hold-actions"><button className="danger" disabled={!canChangeDevice || chosenBusy} onClick={() => { setRemoveConfirm(''); setRemovePurge(false); setRemoveDevice(chosen); }}><Trash2 size={16} />حذف دستگاه از فارم</button><p>دستگاه متوقف، پراکسی آزاد و شناسه از موجودی حذف می‌شود؛ پاک‌کردن دادهٔ پایدار جداگانه تأیید می‌شود.</p></div>
     </Modal>}
 
