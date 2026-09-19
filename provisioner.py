@@ -416,7 +416,7 @@ def diagnostic_job_logs(log_dir, device, *, tail_lines=25):
     return selected
 
 
-def collect_diagnosis(config, device, *, log_dir=Path('/var/lib/android-farm/job-logs'), log_tail=25,
+def collect_diagnosis(config, device, *, log_dir=Path('/var/lib/android-farm/job-logs'), log_tail=60,
                       container_tail=40):
     """Read-only, bounded evidence for one device: record, containers, host prerequisites, logs.
 
