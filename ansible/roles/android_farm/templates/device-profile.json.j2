@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "android_version": {{ item.android_version | int }},
+  "resolution": {
+    "width": {{ item.resolution.width | int }},
+    "height": {{ item.resolution.height | int }}
+  },
+  "dpi": {{ item.dpi | int }},
+  "fps": {{ item.fps | int }},
+  "device_model": {{ item.device_model | to_json }},
+  "locale": {{ item.locale | to_json }}
+}

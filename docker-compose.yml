@@ -1,250 +1,214 @@
-{
-  "name": "android-farm-devices",
-  "services": {
-    "farm-anchor": {
-      "image": "alpine:3.21",
-      "container_name": "farm-anchor",
-      "command": [
-        "sleep",
-        "infinity"
-      ],
-      "restart": "unless-stopped",
-      "network_mode": "none",
-      "mem_limit": "32m",
-      "cpus": 0.1,
-      "labels": {
-        "farm.stack": "core",
-        "traefik.enable": "false"
-      }
-    },
-    "proxy-num01": {
-      "container_name": "proxy-num01",
-      "profiles": [
-        "manual"
-      ],
-      "restart": "no",
-      "mem_limit": "256m",
-      "cpus": 0.5,
-      "pids_limit": 256,
-      "labels": {
-        "farm.device": "num01",
-        "farm.stack": "devices",
-        "farm.role": "proxy",
-        "traefik.enable": "false"
-      },
-      "logging": {
-        "driver": "json-file",
-        "options": {
-          "max-size": "10m",
-          "max-file": "3"
-        }
-      },
-      "image": "${PROXY_IMAGE:-android-farm/proxy:1}",
-      "build": {
-        "context": ".",
-        "dockerfile": "images/proxy/Dockerfile"
-      },
-      "cap_add": [
-        "NET_ADMIN"
-      ],
-      "cap_drop": [
-        "NET_RAW"
-      ],
-      "sysctls": {
-        "net.ipv6.conf.all.disable_ipv6": "1"
-      },
-      "environment": {
-        "CONTROL_CIDR": "10.232.1.0/29",
-        "EGRESS_CIDR": "10.231.1.0/29"
-      },
-      "networks": {
-        "egress-num01": {
-          "ipv4_address": "10.231.1.2",
-          "gw_priority": 1
-        },
-        "control-num01": {
-          "ipv4_address": "10.232.1.2"
-        }
-      },
-      "ports": [
-        "127.0.0.1:5551:5555"
-      ],
-      "secrets": [
-        {
-          "source": "proxy-num01",
-          "target": "proxy.json"
-        }
-      ],
-      "healthcheck": {
-        "test": [
-          "CMD",
-          "/healthcheck.sh"
-        ],
-        "interval": "20s",
-        "timeout": "10s",
-        "retries": 3,
-        "start_period": "15s"
-      }
-    },
-    "android-num01": {
-      "container_name": "android-num01",
-      "profiles": [
-        "manual"
-      ],
-      "restart": "no",
-      "mem_limit": "4g",
-      "cpus": 4.0,
-      "pids_limit": 2048,
-      "labels": {
-        "farm.device": "num01",
-        "farm.stack": "devices",
-        "farm.role": "android",
-        "traefik.enable": "false"
-      },
-      "logging": {
-        "driver": "json-file",
-        "options": {
-          "max-size": "10m",
-          "max-file": "3"
-        }
-      },
-      "image": "${REDROID_IMAGE:-redroid/redroid:12.0.0-latest}",
-      "privileged": true,
-      "network_mode": "service:proxy-num01",
-      "depends_on": {
-        "proxy-num01": {
-          "condition": "service_healthy"
-        }
-      },
-      "volumes": [
-        "redroid-data-num01:/data"
-      ],
-      "stop_grace_period": "60s",
-      "command": [
-        "androidboot.redroid_width=720",
-        "androidboot.redroid_height=1280",
-        "androidboot.redroid_dpi=240",
-        "androidboot.redroid_fps=20",
-        "androidboot.redroid_gpu_mode=guest",
-        "androidboot.use_memfd=true",
-        "androidboot.redroid_dns=1.1.1.1",
-        "androidboot.serialno=farm-num01",
-        "ro.product.brand=redroid",
-        "ro.product.manufacturer=remote-android",
-        "ro.product.model=Redroid QA Phone"
-      ]
-    },
-    "screen-num01": {
-      "container_name": "screen-num01",
-      "profiles": [
-        "manual"
-      ],
-      "restart": "no",
-      "mem_limit": "1g",
-      "cpus": 1.5,
-      "pids_limit": 256,
-      "labels": {
-        "farm.device": "num01",
-        "farm.stack": "devices",
-        "farm.role": "screen",
-        "traefik.enable": "true",
-        "traefik.docker.network": "${COOLIFY_NETWORK:-coolify}",
-        "traefik.http.routers.farm-num01.rule": "Host(`${FARM_DOMAIN:-farm.example.com}`) && PathPrefix(`/d/num01/`)",
-        "traefik.http.routers.farm-num01.entrypoints": "https",
-        "traefik.http.routers.farm-num01.tls": "true",
-        "traefik.http.routers.farm-num01.tls.certresolver": "letsencrypt",
-        "traefik.http.routers.farm-num01.middlewares": "farm-auth@file,farm-num01-strip",
-        "traefik.http.routers.farm-num01.service": "farm-num01",
-        "traefik.http.middlewares.farm-num01-strip.stripprefix.prefixes": "/d/num01",
-        "traefik.http.services.farm-num01.loadbalancer.server.port": "6080"
-      },
-      "logging": {
-        "driver": "json-file",
-        "options": {
-          "max-size": "10m",
-          "max-file": "3"
-        }
-      },
-      "image": "${SCREEN_IMAGE:-android-farm/screen:1}",
-      "build": {
-        "context": ".",
-        "dockerfile": "images/screen/Dockerfile"
-      },
-      "init": true,
-      "cap_drop": [
-        "ALL"
-      ],
-      "security_opt": [
-        "no-new-privileges:true"
-      ],
-      "environment": {
-        "DEVICE_ID": "num01",
-        "ADB_TARGET": "10.232.1.2:5555"
-      },
-      "networks": {
-        "coolify": {},
-        "control-num01": {
-          "ipv4_address": "10.232.1.3"
-        }
-      },
-      "depends_on": {
-        "android-num01": {
-          "condition": "service_started"
-        }
-      },
-      "healthcheck": {
-        "test": [
-          "CMD",
-          "curl",
-          "-fsS",
-          "http://127.0.0.1:6080/vnc.html"
-        ],
-        "interval": "30s",
-        "timeout": "5s",
-        "retries": 3
-      }
-    }
-  },
-  "networks": {
-    "coolify": {
-      "external": true,
-      "name": "${COOLIFY_NETWORK:-coolify}"
-    },
-    "egress-num01": {
-      "name": "farm-egress-num01",
-      "driver": "bridge",
-      "driver_opts": {
-        "com.docker.network.bridge.name": "br-af001"
-      },
-      "ipam": {
-        "config": [
-          {
-            "subnet": "10.231.1.0/29"
-          }
-        ]
-      }
-    },
-    "control-num01": {
-      "name": "farm-control-num01",
-      "internal": true,
-      "ipam": {
-        "config": [
-          {
-            "subnet": "10.232.1.0/29"
-          }
-        ]
-      }
-    }
-  },
-  "volumes": {
-    "redroid-data-num01": {
-      "external": true,
-      "name": "redroid-data-num01"
-    }
-  },
-  "secrets": {
-    "proxy-num01": {
-      "file": "${FARM_SECRETS_DIR:-/etc/android-farm/secrets}/num01.json"
-    }
-  }
-}
+name: android-farm-core
+
+# This is the only Compose file imported into Coolify. Device containers are
+# rendered into docker-compose.farm.yml and started on demand by the root-owned
+# host agent in a separate Compose project.
+services:
+  farm-anchor:
+    image: alpine:3.21
+    container_name: farm-anchor
+    command: [sleep, infinity]
+    restart: unless-stopped
+    network_mode: none
+    mem_limit: 32m
+    cpus: 0.1
+    labels:
+      farm.stack: core
+      farm.release: ${FARM_RELEASE_ID:-development}
+      traefik.enable: "false"
+
+  console:
+    build:
+      context: ./web
+    container_name: farm-console
+    restart: unless-stopped
+    read_only: true
+    tmpfs:
+      - /tmp
+      - /var/cache/nginx
+      - /var/run
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    mem_limit: 128m
+    cpus: 0.5
+    networks: [coolify]
+    labels:
+      farm.stack: core
+      farm.role: console
+      traefik.enable: "true"
+      traefik.docker.network: ${COOLIFY_NETWORK:-coolify}
+      traefik.http.routers.farm-console.rule: Host(`${CONSOLE_DOMAIN:-console.farm.example.com}`)
+      traefik.http.routers.farm-console.entrypoints: https
+      traefik.http.routers.farm-console.tls: "true"
+      traefik.http.routers.farm-console.tls.certresolver: letsencrypt
+      traefik.http.routers.farm-console.middlewares: farm-auth@file
+      traefik.http.services.farm-console.loadbalancer.server.port: "8080"
+    healthcheck:
+      test: [CMD, wget, -q, -O, /dev/null, http://127.0.0.1:8080/healthz]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+
+  prometheus:
+    image: prom/prometheus:v3.13.3
+    container_name: android-farm-prometheus
+    restart: unless-stopped
+    user: "65534:65534"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command:
+      - --config.file=/etc/prometheus/prometheus.yml
+      - --storage.tsdb.path=/prometheus
+      - --storage.tsdb.retention.time=${PROMETHEUS_RETENTION:-30d}
+      - --storage.tsdb.retention.size=${PROMETHEUS_RETENTION_SIZE:-20GB}
+    volumes:
+      - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alerts.yml:/etc/prometheus/alerts.yml:ro
+      - prometheus-data:/prometheus
+    tmpfs: [/tmp]
+    mem_limit: 2g
+    cpus: 1.5
+    pids_limit: 512
+    networks: [monitoring]
+    depends_on: [node-exporter, cadvisor]
+    labels:
+      farm.stack: core
+      farm.role: prometheus
+      traefik.enable: "false"
+
+  node-exporter:
+    image: prom/node-exporter:v1.12.0
+    container_name: android-farm-node-exporter
+    restart: unless-stopped
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    command:
+      - --path.rootfs=/host
+      - --collector.textfile.directory=/textfile
+      - --collector.filesystem.mount-points-exclude=^/(sys|proc|dev|host|etc)($$|/)
+    volumes:
+      - /:/host:ro,rslave
+      - /var/lib/node_exporter/textfile_collector:/textfile:ro
+    networks: [monitoring]
+    mem_limit: 256m
+    cpus: 0.5
+    pids_limit: 256
+    labels:
+      farm.stack: core
+      farm.role: node-exporter
+      traefik.enable: "false"
+
+  cadvisor:
+    image: ghcr.io/google/cadvisor:v0.60.5
+    container_name: android-farm-cadvisor
+    restart: unless-stopped
+    privileged: true
+    read_only: true
+    command: [--docker_only=true, --housekeeping_interval=15s, --store_container_labels=true]
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:ro
+      - /sys:/sys:ro
+      - /var/lib/docker:/var/lib/docker:ro
+      - /dev/disk:/dev/disk:ro
+    devices: [/dev/kmsg:/dev/kmsg]
+    tmpfs: [/tmp]
+    mem_limit: 512m
+    cpus: 1.0
+    pids_limit: 512
+    networks: [monitoring]
+    labels:
+      farm.stack: core
+      farm.role: cadvisor
+      traefik.enable: "false"
+
+  grafana-secret-init:
+    image: alpine:3.21
+    container_name: android-farm-grafana-secret-init
+    restart: "no"
+    user: "0:0"
+    network_mode: none
+    read_only: true
+    cap_drop: [ALL]
+    cap_add: [CHOWN, DAC_OVERRIDE, FOWNER]
+    security_opt: [no-new-privileges:true]
+    command:
+      - /bin/sh
+      - -ec
+      - >-
+        umask 077;
+        cp /run/secrets/grafana-admin-password /private/admin-password.next;
+        chown 472:0 /private/admin-password.next;
+        chmod 0400 /private/admin-password.next;
+        mv -f /private/admin-password.next /private/admin-password;
+        chown -R 472:0 /grafana-data
+    volumes:
+      - grafana-secrets:/private
+      - grafana-data:/grafana-data
+    secrets: [grafana-admin-password]
+    mem_limit: 32m
+    cpus: 0.1
+    pids_limit: 32
+    labels:
+      farm.stack: core
+      farm.role: secret-init
+      traefik.enable: "false"
+
+  grafana:
+    image: grafana/grafana:13.2.2
+    container_name: android-farm-grafana
+    restart: unless-stopped
+    user: "472:0"
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    environment:
+      GF_SECURITY_ADMIN_USER: ${GRAFANA_ADMIN_USER:-admin}
+      GF_SECURITY_ADMIN_PASSWORD__FILE: /run/grafana-private/admin-password
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_AUTH_ANONYMOUS_ENABLED: "false"
+      GF_SERVER_ROOT_URL: https://${GRAFANA_DOMAIN:-metrics.farm.example.com}/
+    volumes:
+      - grafana-data:/var/lib/grafana
+      - grafana-secrets:/run/grafana-private:ro
+      - ./monitoring/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./monitoring/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    tmpfs: [/tmp, /var/log/grafana]
+    mem_limit: 1g
+    cpus: 1.0
+    pids_limit: 512
+    networks: [monitoring, coolify]
+    depends_on:
+      prometheus:
+        condition: service_started
+      grafana-secret-init:
+        condition: service_completed_successfully
+    labels:
+      farm.stack: core
+      farm.role: grafana
+      traefik.enable: "true"
+      traefik.docker.network: ${COOLIFY_NETWORK:-coolify}
+      traefik.http.routers.android-farm-grafana.rule: Host(`${GRAFANA_DOMAIN:-metrics.farm.example.com}`)
+      traefik.http.routers.android-farm-grafana.entrypoints: https
+      traefik.http.routers.android-farm-grafana.tls: "true"
+      traefik.http.routers.android-farm-grafana.tls.certresolver: letsencrypt
+      traefik.http.routers.android-farm-grafana.middlewares: farm-auth@file
+      traefik.http.services.android-farm-grafana.loadbalancer.server.port: "3000"
+
+networks:
+  coolify:
+    external: true
+    name: ${COOLIFY_NETWORK:-coolify}
+  monitoring:
+    internal: true
+
+volumes:
+  prometheus-data:
+  grafana-data:
+  grafana-secrets:
+
+secrets:
+  grafana-admin-password:
+    file: ${GRAFANA_PASSWORD_FILE:-/etc/android-farm/monitoring/grafana-admin-password}

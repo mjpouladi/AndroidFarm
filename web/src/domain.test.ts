@@ -2,6 +2,12 @@ import { describe, expect, it } from 'vitest';
 import { demoState, reducer, reserved } from './domain';
 
 describe('چرخهٔ دستگاه و محدودیت ظرفیت در شبیه‌ساز', () => {
+  it('صف را از ظرفیت کشف‌شدهٔ میزبان می‌سازد', () => {
+    let state = reducer(demoState(), { type: 'capacity', capacity: 12 });
+    for (const id of ['num07', 'num09', 'num10', 'num12', 'num13', 'num14']) state = reducer(state, { type: 'start', id });
+    expect(reserved(state.devices)).toBe(12);
+    expect(state.devices.find(d => d.id === 'num14')!.status).toBe('queued');
+  });
   it('اولویت صف زمان درخواست است، نه شماره دستگاه', () => {
     let state = demoState();
     for (const id of ['num07', 'num09', 'num10', 'num50', 'num12']) state = reducer(state, { type: 'start', id });

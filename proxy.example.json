@@ -1,8 +1,0 @@
-{
-  "host_note": "provider-host.example; resolve on host and pin its public IPv4 in server",
-  "type": "socks",
-  "server": "203.0.113.10",
-  "server_port": 1080,
-  "username": "account-session-num01",
-  "password": "REPLACE_LOCALLY"
-}

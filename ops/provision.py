@@ -17,10 +17,14 @@ import time
 
 try:
     from . import app_installer, farmctl, inventory, resources
+    from .proxy_store import ProxyStore
     from .secureio import atomic_json, read_private_json, require_private_directory
+    from .device_ids import DEVICE_LIMIT, device_id
 except ImportError:
     import app_installer, farmctl, inventory, resources
+    from proxy_store import ProxyStore
     from secureio import atomic_json, read_private_json, require_private_directory
+    from device_ids import DEVICE_LIMIT, device_id
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -41,10 +45,10 @@ def choose_record(records, phone_hash, proxy_hash, request_hash):
         raise RuntimeError('resume the incomplete device before adding another')
     if any(r['proxy_hash'] == proxy_hash for r in records):
         raise RuntimeError('proxy account/session already assigned; use a dedicated sticky session')
-    index = len(records) + 1
-    if index > 200:
-        raise RuntimeError('maximum device catalog size is 200')
-    return dict(id=f'num{index:02d}', phone_hash=phone_hash, proxy_hash=proxy_hash,
+    index = max((int(record['id'][3:]) for record in records), default=0) + 1
+    if index > DEVICE_LIMIT:
+        raise RuntimeError('device address/port allocator is exhausted')
+    return dict(id=device_id(index), phone_hash=phone_hash, proxy_hash=proxy_hash,
                 request_hash=request_hash, phase='reserved', created_at=int(time.time()))
 
 
@@ -52,8 +56,11 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--request', required=True, type=Path)
     parser.add_argument('--compose', required=True, type=Path)
-    parser.add_argument('--project', required=True, help='actual Coolify Compose project name')
+    parser.add_argument('--env-file', type=Path)
+    parser.add_argument('--project', required=True, help='host-owned runtime Compose project name')
     parser.add_argument('--secret-dir', type=Path, default=Path('/etc/android-farm/secrets'))
+    parser.add_argument('--proxy-registry', type=Path, default=Path('/var/lib/android-farm/proxies.json'))
+    parser.add_argument('--proxy-store-dir', type=Path, default=Path('/etc/android-farm/proxies'))
     parser.add_argument('--apk-trust-file', required=True, type=Path,
                         help='root-owned package/signer allowlist, separate from the request')
     args = parser.parse_args()
@@ -65,10 +72,24 @@ def main():
     phone = request['phone']
     if not re.fullmatch(r'\+[1-9]\d{9,14}', phone) or request.get('owner_authorized') is not True:
         raise RuntimeError('valid E.164 phone and owner_authorized=true required')
-    expected_ip = str(ipaddress.IPv4Address(request['expected_egress_ip']))
+    proxy_id = request.get('proxy_id')
+    proxy_file = request.get('proxy_file')
+    if bool(proxy_id) == bool(proxy_file):
+        raise RuntimeError('request must contain exactly one of proxy_id or legacy proxy_file')
+    proxy_store = None
+    if proxy_id:
+        proxy_store = ProxyStore(args.proxy_registry, args.proxy_store_dir)
+        proxy_record = proxy_store.show(proxy_id)
+        secret = proxy_store.provisioning_secret(proxy_id)
+        expected_value = proxy_record['expected_egress_ip']
+        if request.get('expected_egress_ip') not in (None, expected_value):
+            raise RuntimeError('request egress IP differs from the managed proxy record')
+    else:
+        secret = read_private_json(proxy_file, 'legacy proxy secret')
+        expected_value = request['expected_egress_ip']
+    expected_ip = str(ipaddress.IPv4Address(expected_value))
     if not ipaddress.ip_address(expected_ip).is_global:
         raise RuntimeError('expected egress IP must be public')
-    secret = read_private_json(request['proxy_file'], 'proxy secret')
     spec = importlib.util.spec_from_file_location('proxy_config', ROOT / 'images/proxy/configure.py')
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -120,11 +141,30 @@ def main():
         request_hash = digest(json.dumps(immutable_request, sort_keys=True) + proxy_identity)
         record, created = inventory.choose(inventory_state, digest(phone), digest(proxy_identity), request_hash)
         device = record['id']
+        if created:
+            # Persist the monotonic reservation before touching the proxy
+            # registry or Docker. A failed first attempt can then only resume
+            # the same identity instead of reusing this ID for another request.
+            record.update(phone_masked=phone[:3] + '***' + phone[-4:], created_at=int(time.time()),
+                          expected_egress_ip=expected_ip)
+            inventory.save(registry, inventory_state)
+        elif record.get('expected_egress_ip') != expected_ip:
+            raise RuntimeError('approved sticky egress IP differs from the existing allocation')
+        if proxy_store:
+            recorded_proxy = record.get('proxy_id')
+            if recorded_proxy not in (None, proxy_id):
+                raise RuntimeError('managed proxy id differs from the persistent device allocation')
+            if recorded_proxy is None:
+                record['proxy_id'] = proxy_id
+                inventory.save(registry, inventory_state)
+            proxy_store.assign(proxy_id, device)
         if record['phase'] in inventory.COMPLETE_PHASES:
             print(f'{device}: already prepared; no duplicate installation or start')
             return
-        compose = ['docker', 'compose', '-p', args.project, '-f', str(args.compose.resolve()),
-                   '--profile', 'manual']
+        compose = ['docker', 'compose']
+        if args.env_file:
+            compose.extend(['--env-file', str(args.env_file.resolve())])
+        compose.extend(['-p', args.project, '-f', str(args.compose.resolve()), '--profile', 'manual'])
         config = json.loads(farmctl.run(*compose, 'config', '--format', 'json', capture=True))
         if f'android-{device}' not in config['services']:
             raise RuntimeError('device absent from Coolify Compose catalog; regenerate and redeploy first')
@@ -133,13 +173,10 @@ def main():
         configured_path = Path(config['secrets'][wanted_secret]['file']).resolve()
         if configured_path != (args.secret_dir / f'{device}.json').resolve():
             raise RuntimeError('Compose secret path differs from --secret-dir; correct Coolify ENV first')
-        resources.admission(resources.probe(), len(farmctl.active_devices()))
-        if created:
-            record.update(phone_masked=phone[:3] + '***' + phone[-4:], created_at=int(time.time()),
-                          expected_egress_ip=expected_ip)
-            inventory.save(registry, inventory_state)
-        elif record.get('expected_egress_ip') != expected_ip:
-            raise RuntimeError('approved sticky egress IP differs from the existing allocation')
+        resource_report = resources.probe()
+        resources.admission(resource_report, len(farmctl.active_devices()))
+        if record.get('phase') == 'reserved':
+            resources.catalog_admission(resource_report)
         volume = f'redroid-data-{device}'
         data_root = require_private_directory(farmctl.DATA_ROOT, 'persistent data root', create=True)
         existing = subprocess.run(['docker', 'volume', 'inspect', volume], capture_output=True, text=True)
@@ -185,7 +222,17 @@ def main():
         try:
             farmctl.run(sys.executable, str(ROOT / 'ops/farmctl.py'), 'start', device,
                         '--compose', str(args.compose.resolve()), '--project', args.project,
-                        '--secret-dir', str(args.secret_dir))
+                        '--secret-dir', str(args.secret_dir),
+                        '--proxy-registry', str(args.proxy_registry),
+                        '--proxy-store-dir', str(args.proxy_store_dir),
+                        *(['--env-file', str(args.env_file.resolve())] if args.env_file else []))
+            # The child identity verifier may have committed the immutable
+            # baseline flag. Reload before any later checkpoint so this parent
+            # never overwrites that newer inventory state with its old copy.
+            inventory_state = inventory.load(registry)
+            record = inventory.find(inventory_state, device)
+            if not record or not record.get('identity_baseline_created'):
+                raise RuntimeError('identity baseline was not committed by the guarded start')
             observed = farmctl.run('docker', 'exec', f'proxy-{device}', 'curl', '--noproxy', '*',
                                   '-4', '-fsS', '--max-time', '15', 'https://api.ipify.org', capture=True).strip()
             if observed != expected_ip:

@@ -1,0 +1,392 @@
+---
+- name: Validate supported host and guarded secrets
+  ansible.builtin.assert:
+    that:
+      - ansible_facts.system == 'Linux'
+      - ansible_facts.distribution == 'Ubuntu'
+      - ansible_facts.distribution_version in ['22.04', '24.04']
+      - not (farm_manage_redis | bool) or farm_redis_worker_password | length >= 32
+      - not (farm_manage_redis | bool) or farm_redis_worker_password is match('^[A-Za-z0-9_-]{32,128}$')
+      - (farm_manage_redis | bool) or farm_redis_url is match('^rediss?://[A-Za-z0-9._~%!$&()*+,;=:@/?#\[\]-]+$')
+      - farm_health_restart_limit | int >= 0
+      - farm_health_restart_limit | int <= 2
+      - farm_worker_result_ttl_seconds | int >= 3600
+      - farm_worker_result_ttl_seconds | int <= 7776000
+    fail_msg: >-
+      Ubuntu 22.04/24.04 and a vaulted Redis password of at least 32 safe characters are
+      required. Automated recovery is intentionally capped at two per run.
+  no_log: true
+
+- name: Inspect installer state when no release override is set
+  ansible.builtin.stat:
+    path: "{{ farm_install_state_file }}"
+    follow: false
+  register: farm_install_state_metadata
+  when: farm_release_dir | string | trim | length == 0
+
+- name: Require private regular installer state
+  ansible.builtin.assert:
+    that:
+      - farm_install_state_metadata.stat.exists
+      - farm_install_state_metadata.stat.isreg
+      - not (farm_install_state_metadata.stat.islnk | default(false))
+      - farm_install_state_metadata.stat.pw_name == 'root'
+      - farm_install_state_metadata.stat.mode == '0600'
+    fail_msg: >-
+      {{ farm_install_state_file }} must be a root-owned 0600 regular file;
+      run the reviewed installer before applying this role.
+  when: farm_release_dir | string | trim | length == 0
+
+- name: Read installer state when no release override is set
+  ansible.builtin.slurp:
+    src: "{{ farm_install_state_file }}"
+  register: farm_install_state_raw
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  when: farm_release_dir | string | trim | length == 0
+  no_log: true
+
+- name: Require installer state for automatic release selection
+  ansible.builtin.assert:
+    that:
+      - not (farm_install_state_raw.failed | default(true))
+      - farm_install_state_raw.content | default('') | length > 0
+    fail_msg: >-
+      {{ farm_install_state_file }} is required when farm_release_dir is empty;
+      run the reviewed installer first or set an immutable managed release path.
+  when: farm_release_dir | string | trim | length == 0
+
+- name: Decode installer state
+  ansible.builtin.set_fact:
+    farm_install_state: "{{ farm_install_state_raw.content | b64decode | from_json }}"
+  when: farm_release_dir | string | trim | length == 0
+  no_log: true
+
+- name: Validate installer state release selection
+  ansible.builtin.assert:
+    that:
+      - farm_install_state is mapping
+      - farm_install_state.release_id | default('') is match('^[0-9a-f]{16}$')
+      - farm_install_state.release_dir | default('') == '/opt/android-farm/releases/' ~ (farm_install_state.release_id | default(''))
+      - farm_install_state.status | default('') == 'ready'
+    fail_msg: "Installer state has an invalid or inconsistent immutable release selection."
+  when: farm_release_dir | string | trim | length == 0
+
+- name: Select immutable release path
+  ansible.builtin.set_fact:
+    farm_effective_release_dir: >-
+      {{ (farm_release_dir | string | trim)
+         if (farm_release_dir | string | trim | length > 0)
+         else (farm_install_state.release_dir | default('') | string | trim) }}
+
+- name: Validate immutable release path layout
+  ansible.builtin.assert:
+    that:
+      - farm_effective_release_dir is match('^/opt/android-farm/releases/[0-9a-f]{16}$')
+    fail_msg: >-
+      The selected release must be /opt/android-farm/releases/<16 lowercase hex>;
+      refusing an untrusted or mutable working directory.
+
+- name: Inspect immutable release directory
+  ansible.builtin.stat:
+    path: "{{ farm_effective_release_dir }}"
+    follow: false
+  register: farm_release_directory
+
+- name: Refuse a missing or linked release directory
+  ansible.builtin.assert:
+    that:
+      - farm_release_directory.stat.exists
+      - farm_release_directory.stat.isdir
+      - not (farm_release_directory.stat.islnk | default(false))
+    fail_msg: "The selected immutable Android Farm release directory is missing or is a symbolic link."
+
+- name: Resolve immutable release directory
+  ansible.builtin.command:
+    argv: [readlink, -f, --, "{{ farm_effective_release_dir }}"]
+  register: farm_release_realpath
+  changed_when: false
+  check_mode: false
+
+- name: Refuse release paths redirected through symbolic links
+  ansible.builtin.assert:
+    that:
+      - farm_release_realpath.rc == 0
+      - farm_release_realpath.stdout == farm_effective_release_dir
+    fail_msg: "The selected release resolves outside its canonical immutable path."
+
+- name: Validate device desired-state collection
+  ansible.builtin.assert:
+    that:
+      - farm_devices is iterable
+      - farm_devices is not string
+      - farm_devices is not mapping
+      - farm_device_ids | unique | list | length == farm_device_ids | length
+    fail_msg: "farm_devices must be a list with unique device IDs."
+  vars:
+    farm_device_ids: "{{ farm_devices | map(attribute='id') | list }}"
+
+- name: Validate honest QA device desired state
+  ansible.builtin.assert:
+    that:
+      - item.id is match('^num[0-9]{2,6}$')
+      - item.id[3:] | int >= 1
+      - item.id[3:] | int <= 8192
+      - item.id == 'num' ~ ('%02d' | format(item.id[3:] | int))
+      - item.android_version is integer
+      - item.android_version in [11, 12]
+      - item.resolution is mapping
+      - item.resolution | dict2items | map(attribute='key') | list | sort == ['height', 'width']
+      - item.resolution.width is integer
+      - item.resolution.width | int >= 320
+      - item.resolution.width | int <= 4320
+      - item.resolution.height is integer
+      - item.resolution.height | int >= 320
+      - item.resolution.height | int <= 4320
+      - item.dpi is integer
+      - item.dpi | int >= 120
+      - item.dpi | int <= 640
+      - item.fps is integer
+      - item.fps | int >= 10
+      - item.fps | int <= 120
+      - item.device_model == item.device_model | trim
+      - item.device_model is match('^[A-Za-z0-9][A-Za-z0-9 ._()/-]{2,63}$')
+      - item.device_model is search('(?i)(^|[^a-z0-9])(qa|test|redroid|virtual|emulator|lab)([^a-z0-9]|$)')
+      - not (item.device_model is search('(?i)(^|[^a-z0-9])(apple|asus|galaxy|google|honor|huawei|iphone|lenovo|lg|motorola|nokia|nothing|oneplus|oppo|pixel|realme|redmi|samsung|sony|vivo|xiaomi)([^a-z0-9]|$)'))
+      - item.locale is match('^[a-z]{2,3}(?:-[A-Z][a-z]{3})?(?:-(?:[A-Z]{2}|[0-9]{3}))?$')
+      - item.network_isolation == 'proxy_namespace'
+    fail_msg: "Invalid or non-transparent QA profile for {{ item.id | default('unknown') }}"
+  loop: "{{ farm_devices }}"
+  loop_control:
+    label: "{{ item.id | default('invalid') }}"
+
+- name: Install host-side Python prerequisites
+  ansible.builtin.apt:
+    name: "{{ ['python3', 'python3-venv'] + (['redis-server'] if (farm_manage_redis | bool) else []) }}"
+    state: present
+    update_cache: true
+    cache_valid_time: 3600
+
+- name: Create protected control-plane directories
+  ansible.builtin.file:
+    path: "{{ item.path }}"
+    state: directory
+    owner: root
+    group: root
+    mode: "{{ item.mode }}"
+  loop:
+    - {path: /etc/android-farm, mode: '0700'}
+    - {path: /etc/android-farm/device-profiles, mode: '0700'}
+    - {path: /var/lib/android-farm, mode: '0700'}
+    - {path: /var/lib/node_exporter/textfile_collector, mode: '0755'}
+    - {path: /opt/android-farm, mode: '0755'}
+
+- name: Verify reviewed release is installed
+  ansible.builtin.stat:
+    path: "{{ farm_effective_release_dir }}/services/worker/worker.py"
+  register: farm_worker_source
+
+- name: Refuse to install from a missing release
+  ansible.builtin.assert:
+    that: farm_worker_source.stat.exists and farm_worker_source.stat.isreg
+    fail_msg: "Install the reviewed Android Farm release before applying this role."
+
+- name: Verify finalized provisioner configuration exists
+  ansible.builtin.stat:
+    path: "{{ farm_provisioner_config }}"
+    follow: false
+  register: farm_provisioner_configuration
+
+- name: Refuse an unfinished Coolify handoff
+  ansible.builtin.assert:
+    that:
+      - farm_provisioner_configuration.stat.exists
+      - farm_provisioner_configuration.stat.isreg
+      - not (farm_provisioner_configuration.stat.islnk | default(false))
+      - farm_provisioner_configuration.stat.pw_name == 'root'
+      - farm_provisioner_configuration.stat.mode == '0600'
+    fail_msg: >-
+      Finalize the second installer apply after deploying the matching Coolify
+      release before enabling Worker or health services.
+
+- name: Read finalized provisioner configuration
+  ansible.builtin.slurp:
+    src: "{{ farm_provisioner_config }}"
+  register: farm_provisioner_configuration_raw
+  changed_when: false
+  check_mode: false
+  no_log: true
+
+- name: Decode finalized provisioner configuration
+  ansible.builtin.set_fact:
+    farm_provisioner_state: "{{ farm_provisioner_configuration_raw.content | b64decode | from_json }}"
+  no_log: true
+
+- name: Require provisioner and service release parity
+  ansible.builtin.assert:
+    that:
+      - farm_provisioner_state is mapping
+      - farm_provisioner_state.compose_file | default('') == farm_effective_release_dir ~ '/docker-compose.farm.yml'
+      - farm_provisioner_state.compose_project | default('') == 'android-farm-runtime'
+    fail_msg: >-
+      Provisioner configuration does not select the same immutable release as
+      the Worker and health services; complete installer activation first.
+
+- name: Create isolated worker virtual environment
+  ansible.builtin.command:
+    argv: [python3, -m, venv, "{{ farm_python_venv }}"]
+    creates: "{{ farm_python_venv }}/bin/python"
+  when: not ansible_check_mode
+
+- name: Install pinned worker dependency
+  ansible.builtin.pip:
+    requirements: "{{ farm_effective_release_dir }}/services/worker/requirements.txt"
+    virtualenv: "{{ farm_python_venv }}"
+  when: not ansible_check_mode
+  notify: Restart farm worker
+
+- name: Install per-device desired profiles
+  ansible.builtin.template:
+    src: device-profile.json.j2
+    dest: "/etc/android-farm/device-profiles/{{ item.id }}.json"
+    owner: root
+    group: root
+    mode: '0600'
+  loop: "{{ farm_devices }}"
+  loop_control:
+    label: "{{ item.id }}"
+
+- name: Configure Redis ACL
+  ansible.builtin.template:
+    src: redis-users.acl.j2
+    dest: /etc/redis/android-farm-users.acl
+    owner: redis
+    group: redis
+    mode: '0600'
+  when: farm_manage_redis | bool and not ansible_check_mode
+  no_log: true
+  notify: Restart redis
+
+- name: Enforce local-only persistent Redis controls
+  ansible.builtin.lineinfile:
+    path: /etc/redis/redis.conf
+    regexp: "{{ item.regexp }}"
+    line: "{{ item.line }}"
+  loop:
+    - {regexp: '^bind ', line: 'bind 127.0.0.1 -::1'}
+    - {regexp: '^protected-mode ', line: 'protected-mode yes'}
+    - {regexp: '^aclfile ', line: 'aclfile /etc/redis/android-farm-users.acl'}
+    - {regexp: '^appendonly ', line: 'appendonly yes'}
+    - {regexp: '^appendfsync ', line: 'appendfsync everysec'}
+    - {regexp: '^maxmemory ', line: 'maxmemory 768mb'}
+    - {regexp: '^maxmemory-policy ', line: 'maxmemory-policy noeviction'}
+  when: farm_manage_redis | bool and not ansible_check_mode
+  notify: Restart redis
+
+- name: Keep managed Redis enabled and running
+  ansible.builtin.systemd:
+    name: redis-server.service
+    enabled: true
+    state: started
+  when: farm_manage_redis | bool and not ansible_check_mode
+
+- name: Install private worker environment
+  ansible.builtin.template:
+    src: worker.env.j2
+    dest: /etc/android-farm/worker.env
+    owner: root
+    group: root
+    mode: '0600'
+  no_log: true
+  notify: Restart farm worker
+
+- name: Install systemd units
+  ansible.builtin.template:
+    src: "{{ item.source }}"
+    dest: "/etc/systemd/system/{{ item.destination }}"
+    owner: root
+    group: root
+    mode: '0644'
+  loop:
+    - {source: android-farm-worker.service.j2, destination: android-farm-worker.service}
+    - {source: android-farm-health.service.j2, destination: android-farm-health.service}
+    - {source: android-farm-health.timer.j2, destination: android-farm-health.timer}
+  notify:
+    - Restart farm worker
+    - Reload health timer
+
+- name: Enable host worker
+  ansible.builtin.systemd:
+    name: android-farm-worker.service
+    enabled: "{{ farm_worker_enabled | bool }}"
+    state: "{{ 'started' if farm_worker_enabled else 'stopped' }}"
+    daemon_reload: true
+  when: not ansible_check_mode
+
+- name: Enable bounded health timer
+  ansible.builtin.systemd:
+    name: android-farm-health.timer
+    enabled: "{{ farm_health_enabled | bool }}"
+    state: "{{ 'started' if farm_health_enabled else 'stopped' }}"
+    daemon_reload: true
+  when: not ansible_check_mode
+
+# These are read-only inspections.  The role never recreates 70 containers as
+# one batch and never deletes /data.  Stopped devices are checked at next start.
+- name: Inspect configured Android runtime
+  ansible.builtin.command:
+    argv: [docker, inspect, "android-{{ item.id }}"]
+  register: farm_android_inspects
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  loop: "{{ farm_devices }}"
+  loop_control:
+    label: "{{ item.id }}"
+  throttle: 1
+
+- name: Inspect configured proxy runtime
+  ansible.builtin.command:
+    argv: [docker, inspect, "proxy-{{ item.id }}"]
+  register: farm_proxy_inspects
+  changed_when: false
+  failed_when: false
+  check_mode: false
+  loop: "{{ farm_devices }}"
+  loop_control:
+    label: "{{ item.id }}"
+  throttle: 1
+
+- name: Verify active runtime profile and network namespace
+  ansible.builtin.assert:
+    that:
+      - android_result.rc != 0 or proxy_result.rc != 0 or not ((android_result.stdout | from_json)[0].State.Running | bool) or runtime_ok
+    fail_msg: >-
+      Runtime drift detected for {{ item.id }}. The role preserved the running
+      device and /data; apply the reviewed profile in a maintenance window.
+  vars:
+    android_result: "{{ farm_android_inspects.results[index] }}"
+    proxy_result: "{{ farm_proxy_inspects.results[index] }}"
+    android_info: "{{ (android_result.stdout | from_json)[0] if android_result.rc == 0 else {} }}"
+    proxy_info: "{{ (proxy_result.stdout | from_json)[0] if proxy_result.rc == 0 else {} }}"
+    runtime_command: "{{ android_info.Config.Cmd | default([]) }}"
+    proxy_network_names: >-
+      {{ proxy_info.NetworkSettings.Networks | default({}) | dict2items |
+         map(attribute='key') | list | sort }}
+    runtime_ok: >-
+      {{ ('androidboot.redroid_width=' ~ item.resolution.width) in runtime_command and
+         ('androidboot.redroid_height=' ~ item.resolution.height) in runtime_command and
+         ('androidboot.redroid_dpi=' ~ item.dpi) in runtime_command and
+         ('androidboot.redroid_fps=' ~ item.fps) in runtime_command and
+         ('ro.product.model=' ~ item.device_model) in runtime_command and
+         ('ro.product.locale=' ~ item.locale) in runtime_command and
+         (android_info.Config.Image | default('')).startswith('redroid/redroid:' ~ item.android_version ~ '.') and
+         (proxy_info.State.Running | default(false) | bool) and
+         proxy_network_names == ['farm-control-' ~ item.id, 'farm-egress-' ~ item.id] and
+         (android_info.HostConfig.NetworkMode | default('')) == ('container:' ~ (proxy_info.Id | default('missing'))) }}
+  loop: "{{ farm_devices }}"
+  loop_control:
+    index_var: index
+    label: "{{ item.id }}"
+  when: farm_fail_on_device_drift | bool

@@ -4,9 +4,14 @@ from pathlib import Path
 import subprocess
 import time
 
+try:
+    from .device_ids import device_index, network_plan
+except ImportError:
+    from device_ids import device_index, network_plan
+
 
 def snapshot(device, timeout=300):
-    target = f'10.232.{int(device[3:])}.2:5555'
+    target = f"{network_plan(device_index(device, aliases=False))['proxy_control_ip']}:5555"
     base = ['docker', 'exec', f'screen-{device}', 'adb', '-s', target, 'shell']
     def read(*args):
         return subprocess.check_output([*base, *args], text=True, stderr=subprocess.DEVNULL, timeout=15).strip()

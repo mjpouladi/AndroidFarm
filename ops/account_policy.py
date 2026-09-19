@@ -3,7 +3,6 @@ import argparse
 import json
 import os
 from pathlib import Path
-import re
 import subprocess
 import sys
 import time
@@ -35,9 +34,11 @@ def main():
     try:
         from .secureio import atomic_json, require_private_directory
         from . import farmctl
+        from .device_ids import canonical_device
     except ImportError:
         from secureio import atomic_json, require_private_directory
         import farmctl
+        from device_ids import canonical_device
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument('action', choices=['hold', 'release', 'list'])
     parser.add_argument('device', nargs='?')
@@ -56,7 +57,9 @@ def main():
         if args.action == 'list':
             print(json.dumps(holds, indent=2))
             return
-        if not re.fullmatch(r'num(?:0[1-9]|[1-9][0-9]|1[0-9]{2}|200)', args.device or ''):
+        try:
+            args.device = canonical_device(args.device)
+        except ValueError:
             parser.error('valid device required')
         require_private_directory(DEFAULT.parent, 'safety hold directory', create=True)
         if args.action == 'hold':

@@ -1,0 +1,28 @@
+[Unit]
+Description=Android Farm Redis Worker
+After=network-online.target docker.service{% if farm_manage_redis | bool %} redis-server.service{% endif %}
+Wants=network-online.target
+Requires=docker.service
+{% if farm_manage_redis | bool %}Wants=redis-server.service
+{% endif %}
+
+[Service]
+Type=simple
+User=root
+Group=root
+WorkingDirectory={{ farm_effective_release_dir }}
+EnvironmentFile=/etc/android-farm/worker.env
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart={{ farm_python_venv }}/bin/python -m services.worker.worker --config {{ farm_provisioner_config }} run
+Restart=on-failure
+RestartSec=5s
+TimeoutStopSec=30s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/android-farm /var/backups/android-farm /opt/farm/data/instances /run /var/run
+UMask=0077
+
+[Install]
+WantedBy=multi-user.target

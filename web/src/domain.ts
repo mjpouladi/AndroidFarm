@@ -3,10 +3,10 @@ export type Device = { id: string; label: string; phone: string; status: DeviceS
   proxyHealthy: boolean; cpu: number; ram: number; latency: number; backup: string | null; queueOrder?: number; };
 export type FarmEvent = { id: string; device: string; text: string; at: number; kind: 'success' | 'info' | 'warning' };
 export type Backup = { id: string; device: string; at: number; size: string };
-export type FarmState = { devices: Device[]; events: FarmEvent[]; backups: Backup[]; message: string };
+export type FarmState = { devices: Device[]; events: FarmEvent[]; backups: Backup[]; message: string; capacity: number };
 export type Action = { type: 'start' | 'stop' | 'cancel' | 'backup' | 'tick' | 'proxy' | 'reset'; id?: string; now?: number }
-  | { type: 'add'; label: string; phone: string; now?: number };
-export const CAPACITY = 10;
+  | { type: 'add'; label: string; phone: string; now?: number }
+  | { type: 'capacity'; capacity: number; now?: number };
 export const fa = (value: number) => new Intl.NumberFormat('fa-IR').format(value);
 export const reserved = (devices: Device[]) => devices.filter(d => ['running', 'booting', 'stopping'].includes(d.status)).length;
 export const maskPhone = (phone: string) => `${phone.slice(0, 3)} ••• ••• ${phone.slice(-4)}`;
@@ -14,12 +14,12 @@ export const statusText: Record<DeviceStatus, string> = { running: 'آماده �
   queued: 'در صف', stopping: 'در حال توقف', backup: 'پشتیبان‌گیری', error: 'نیاز به بررسی' };
 
 export function initialState(): FarmState {
-  return { devices: [], events: [], backups: [], message: '' };
+  return { devices: [], events: [], backups: [], message: '', capacity: 1 };
 }
 
 // Explicit demonstration fixture, never used as the initial fleet.
 export function demoState(): FarmState {
-  return { devices: Array.from({ length: 70 }, (_, index) => {
+  return { capacity: 10, devices: Array.from({ length: 70 }, (_, index) => {
     const n = index + 1;
     return { id: `num${String(n).padStart(2, '0')}`, label: n <= 12 ? ['رجیستری تهران', 'ورود مجدد', 'تست نشست', 'رجیستری جدید', 'عملیات تیم اول', 'کنترل کیفیت', 'ذخیره', 'رجیستری شیراز', 'ذخیره', 'تست اتصال', 'عملیات تیم دوم', 'ذخیره'][index] : `دستگاه ${fa(n)}`,
       phone: `+98900000${String(4100 + n)}`, status: [1, 2, 3, 5, 6, 8, 11].includes(n) ? 'running' : [4, 19].includes(n) ? 'error' : 'off',
@@ -35,7 +35,11 @@ export function demoState(): FarmState {
 
 export function reducer(state: FarmState, action: Action): FarmState {
   const now = action.now ?? Date.now();
-  if (action.type === 'reset') return initialState();
+  if (action.type === 'reset') return { ...initialState(), capacity: state.capacity };
+  if (action.type === 'capacity') {
+    if (!Number.isInteger(action.capacity) || action.capacity < 0) return { ...state, message: 'ظرفیت میزبان نامعتبر است.' };
+    return { ...state, capacity: action.capacity, message: 'ظرفیت امن میزبان به‌روزرسانی شد.' };
+  }
   let devices = state.devices.map(d => ({ ...d }));
   let events = [...state.events];
   let backups = [...state.backups];
@@ -48,7 +52,6 @@ export function reducer(state: FarmState, action: Action): FarmState {
     if (!/^\+\d{10,15}$/.test(action.phone)) return { ...state, message: 'شماره را با + و کد کشور وارد کنید.' };
     if (devices.some(d => d.phone === action.phone)) return { ...state, message: 'این شماره قبلاً به یک دستگاه اختصاص یافته است.' };
     const n = devices.length + 1;
-    if (n > 200) return { ...state, message: 'ظرفیت تعریف دستگاه به ۲۰۰ دستگاه محدود است.' };
     devices.push({ id: `num${String(n).padStart(2, '0')}`, label: action.label.trim() || `دستگاه ${fa(n)}`,
       phone: action.phone, status: 'off', region: 'آلمان', proxyHealthy: true, cpu: 0, ram: 0,
       latency: 95, backup: null });
@@ -63,7 +66,7 @@ export function reducer(state: FarmState, action: Action): FarmState {
         event(d.id, 'پشتیبان آزمایشی ثبت شد', 'success');
       }
     }
-    for (const d of devices.filter(d => d.status === 'queued').sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0))) if (reserved(devices) < CAPACITY && d.proxyHealthy) {
+    for (const d of devices.filter(d => d.status === 'queued').sort((a, b) => (a.queueOrder ?? 0) - (b.queueOrder ?? 0))) if (reserved(devices) < state.capacity && d.proxyHealthy) {
       d.status = 'booting'; event(d.id, 'جایگاه آزاد شد؛ راه‌اندازی آغاز شد');
     }
     if (!message) return state;
@@ -72,7 +75,7 @@ export function reducer(state: FarmState, action: Action): FarmState {
     if (!d) return state;
     if (action.type === 'start' && ['off', 'error'].includes(d.status)) {
       if (!d.proxyHealthy) return { ...state, message: 'ابتدا اتصال پراکسی این دستگاه را بررسی کنید.' };
-      d.status = reserved(devices) >= CAPACITY ? 'queued' : 'booting';
+      d.status = reserved(devices) >= state.capacity ? 'queued' : 'booting';
       if (d.status === 'queued') d.queueOrder = Math.max(0, ...devices.map(item => item.queueOrder ?? 0)) + 1;
       event(d.id, d.status === 'queued' ? 'ظرفیت تکمیل است؛ دستگاه به صف اضافه شد' : 'راه‌اندازی دستگاه آغاز شد');
     } else if (action.type === 'stop' && ['running', 'booting'].includes(d.status)) {
@@ -88,5 +91,5 @@ export function reducer(state: FarmState, action: Action): FarmState {
       event(d.id, 'آزمون شبیه‌سازی‌شدهٔ پراکسی موفق بود', 'success');
     }
   }
-  return { devices, events: events.slice(0, 100), backups, message };
+  return { ...state, devices, events: events.slice(0, 100), backups, message };
 }

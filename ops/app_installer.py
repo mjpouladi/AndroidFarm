@@ -5,6 +5,8 @@ from pathlib import Path
 import subprocess
 import time
 
+from .device_ids import device_index, network_plan
+
 try:
     from .secureio import read_private_json, require_private_file
 except ImportError:  # direct host execution during recovery only
@@ -79,7 +81,7 @@ def install(device, artifact, permissions=(), activity=None, timeout=300):
         raise ValueError('unsupported runtime permission: ' + ', '.join(sorted(invalid)))
     if activity and not ACTIVITY_RE.fullmatch(activity):
         raise ValueError('invalid Android activity component')
-    target = f'10.232.{int(device[3:])}.2:5555'
+    target = f"{network_plan(device_index(device, aliases=False))['proxy_control_ip']}:5555"
     adb = ['docker', 'exec', f'screen-{device}', 'adb', '-s', target]
     deadline = time.monotonic() + timeout
     while time.monotonic() < deadline:

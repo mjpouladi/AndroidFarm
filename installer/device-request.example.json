@@ -1,8 +1,7 @@
 {
   "phone": "+989000000001",
   "owner_authorized": false,
-  "proxy_file": "/root/farm-input/num01-proxy.json",
-  "expected_egress_ip": "REPLACE_WITH_APPROVED_STICKY_IP",
+  "proxy_id": "isp-frankfurt-01",
   "apk_path": "/root/farm-input/approved-qa-app.apk",
   "apk_sha256": "REPLACE_WITH_APPROVED_APK_SHA256",
   "apk_package": "com.example.qaapp",

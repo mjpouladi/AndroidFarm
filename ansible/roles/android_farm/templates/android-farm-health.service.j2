@@ -1,0 +1,19 @@
+[Unit]
+Description=Android Farm bounded ADB health recovery
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+User=root
+Group=root
+WorkingDirectory={{ farm_effective_release_dir }}
+Environment=PYTHONDONTWRITEBYTECODE=1
+ExecStart={{ farm_python_venv }}/bin/python -m ops.healthcheck --config {{ farm_provisioner_config }} --restart-limit {{ farm_health_restart_limit }} --cooldown-base {{ farm_health_cooldown_base }} --cooldown-max {{ farm_health_cooldown_max }}
+TimeoutStartSec={{ (farm_health_restart_limit | int) * 3300 + 900 }}s
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectHome=true
+ProtectSystem=strict
+ReadWritePaths=/var/lib/android-farm /var/lib/node_exporter/textfile_collector /run /var/run
+UMask=0077

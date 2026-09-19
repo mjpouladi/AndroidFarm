@@ -1,0 +1,65 @@
+groups:
+  - name: android-farm
+    rules:
+      - alert: AndroidFarmProbeFailed
+        expr: android_farm_probe_failed == 1
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Docker inspection failed for {{ $labels.device }}"
+          description: "Device state is unknown; automatic recovery is suspended for this probe."
+
+      - alert: AndroidFarmADBStalled
+        expr: android_farm_android_running == 1 and android_farm_adb_healthy == 0
+        for: 3m
+        labels: {severity: warning}
+        annotations:
+          summary: "ADB is stalled for {{ $labels.device }}"
+          description: "The bounded recovery controller could not restore a healthy ADB shell."
+
+      - alert: AndroidFarmProxyUnhealthy
+        expr: android_farm_android_running == 1 and android_farm_proxy_healthy == 0
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Proxy healthcheck failed for {{ $labels.device }}"
+          description: "Review the dedicated proxy; the controller does not bypass the egress guard."
+
+      - alert: AndroidFarmScreenUnavailable
+        expr: android_farm_android_running == 1 and android_farm_screen_running == 0
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "Browser control is unavailable for {{ $labels.device }}"
+          description: "A stopped screen is restarted in place; a missing container needs reviewed lifecycle repair."
+
+      - alert: AndroidFarmProxyLatencyHigh
+        expr: android_farm_proxy_healthcheck_duration_seconds > 3
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Proxy latency is high for {{ $labels.device }}"
+          description: "The local proxy healthcheck has exceeded three seconds."
+
+      - alert: AndroidFarmContainerCPUHigh
+        expr: sum by (container_label_farm_device) (rate(container_cpu_usage_seconds_total{container_label_farm_role="android"}[5m])) > 3.5
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Sustained Android CPU pressure on {{ $labels.container_label_farm_device }}"
+          description: "CPU usage has remained above 3.5 cores for ten minutes."
+
+      - alert: AndroidFarmHealthMetricsStale
+        expr: absent(node_textfile_mtime_seconds{file=~".*android_farm_health.prom"}) or (time() - node_textfile_mtime_seconds{file=~".*android_farm_health.prom"} > 180 unless on(job, instance) android_farm_health_run_deadline_seconds > time())
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "Android Farm health metrics are stale"
+          description: "The systemd health timer or node-exporter textfile path needs attention."
+
+      - alert: AndroidFarmRecoveryFailed
+        expr: increase(android_farm_health_recovery_failures_total[15m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "Bounded recovery failed for {{ $labels.device }}"
+          description: "The controller kept its cooldown and exported metrics; inspect the service journal."

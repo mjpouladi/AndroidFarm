@@ -1,0 +1,12 @@
+{
+  "schema_version": 1,
+  "android_version": 12,
+  "resolution": {
+    "width": 720,
+    "height": 1280
+  },
+  "dpi": 240,
+  "fps": 20,
+  "device_model": "Android Farm QA Phone HD",
+  "locale": "en-US"
+}

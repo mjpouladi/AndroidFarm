@@ -1,6 +1,7 @@
 #!/usr/bin/env python3
 """Unified, fail-closed operator CLI for the Android Farm."""
 import argparse
+from contextlib import contextmanager
 from dataclasses import dataclass
 import ipaddress
 import json
@@ -14,7 +15,11 @@ from urllib.parse import urlparse
 
 from ops import inventory, resources
 from ops.compose_factory import PROFILES, canonical_device, single_instance
-from ops.secureio import read_private_json, require_trusted_release_file, require_trusted_release_tree
+from ops.device_profiles import apply_profile, load as load_device_profile
+from ops.account_policy import assert_not_held
+from ops.identity import verify as verify_identity
+from ops.secureio import (atomic_json, read_private_json, require_private_file, require_trusted_release_file,
+                          require_trusted_release_tree)
 
 ROOT = Path(__file__).resolve().parent
 DEFAULT_CONFIG = Path('/etc/android-farm/provisioner.json')
@@ -23,12 +28,15 @@ DEFAULT_CONFIG = Path('/etc/android-farm/provisioner.json')
 @dataclass(frozen=True)
 class Config:
     compose_file: Path
+    compose_env_file: Path | None
     compose_project: str
     secret_dir: Path
     backup_dir: Path
     console_url: str
     state_dir: Path = Path('/var/lib/android-farm')
     apk_trust_file: Path | None = None
+    proxy_registry: Path = Path('/var/lib/android-farm/proxies.json')
+    proxy_store_dir: Path = Path('/etc/android-farm/proxies')
 
 
 def load_config(path):
@@ -55,11 +63,14 @@ def load_config(path):
     if state_dir != Path('/var/lib/android-farm'):
         raise RuntimeError('state_dir is fixed at /var/lib/android-farm for all host guards')
     trust = Path(value['apk_trust_file']).resolve() if value.get('apk_trust_file') else None
-    return Config(compose, project,
-                  Path(value.get('secret_dir', '/etc/android-farm/secrets')).resolve(),
-                  Path(value.get('backup_dir', '/var/backups/android-farm')).resolve(),
-                  value['console_url'].rstrip('/'),
-                  state_dir, trust)
+    env_file = require_private_file(Path(value['compose_env_file']).resolve(), 'Compose environment') if value.get('compose_env_file') else None
+    return Config(compose_file=compose, compose_env_file=env_file, compose_project=project,
+                  secret_dir=Path(value.get('secret_dir', '/etc/android-farm/secrets')).resolve(),
+                  backup_dir=Path(value.get('backup_dir', '/var/backups/android-farm')).resolve(),
+                  console_url=value['console_url'].rstrip('/'), state_dir=state_dir,
+                  apk_trust_file=trust,
+                  proxy_registry=Path(value.get('proxy_registry', '/var/lib/android-farm/proxies.json')).resolve(),
+                  proxy_store_dir=Path(value.get('proxy_store_dir', '/etc/android-farm/proxies')).resolve())
 
 
 def require_host_root():
@@ -68,15 +79,27 @@ def require_host_root():
     resources.local_docker()
 
 
+@contextmanager
+def host_lifecycle_lock(path=Path('/run/lock/android-farm.lock')):
+    """Coordinate credential changes with guarded start/stop/backup operations."""
+    import fcntl
+    with path.open('w') as descriptor:
+        fcntl.flock(descriptor, fcntl.LOCK_EX)
+        yield
+
+
 def invoke(script, *arguments, capture=False):
     module = f'ops.{Path(script).stem}'
     command = [sys.executable, '-m', module, *map(str, arguments)]
-    return subprocess.run(command, check=True, text=True, capture_output=capture, timeout=900, cwd=ROOT)
+    return subprocess.run(command, check=True, text=True, capture_output=capture, timeout=3300, cwd=ROOT)
 
 
 def farmctl(config, action, device, *extra, capture=False):
-    return invoke('farmctl.py', action, device, '--compose', config.compose_file,
+    env_args = ('--env-file', config.compose_env_file) if config.compose_env_file else ()
+    return invoke('farmctl.py', action, device, '--compose', config.compose_file, *env_args,
                   '--project', config.compose_project, '--secret-dir', config.secret_dir,
+                  '--proxy-registry', config.proxy_registry,
+                  '--proxy-store-dir', config.proxy_store_dir,
                   '--backup-dir', config.backup_dir, *extra, capture=capture)
 
 
@@ -92,11 +115,86 @@ def proxy_endpoint(config, device):
     return f'{secret.get("type", "proxy")}://{secret.get("server", "?")}:{secret.get("server_port", "?")}'
 
 
+def validate_managed_proxy(config, device, record):
+    """Fail closed when a registry-managed proxy is disabled, moved or stale."""
+    proxy_id = record.get('proxy_id')
+    if not proxy_id:
+        return
+    from ops.proxy_store import ProxyStore
+    store = ProxyStore(config.proxy_registry, config.proxy_store_dir)
+    metadata = store.show(proxy_id)
+    if metadata.get('state') != 'enabled' or metadata.get('assigned_device') != device:
+        raise RuntimeError('managed proxy is disabled or no longer assigned to this device')
+    if metadata.get('expected_egress_ip') != record.get('expected_egress_ip'):
+        raise RuntimeError('managed proxy expected IP differs from the persistent allocation')
+    installed = read_private_json(config.secret_dir / f'{device}.json',
+                                  f'{device} installed proxy secret')
+    current = store.provisioning_secret(proxy_id)
+    keys = ('type', 'server', 'server_port', 'username', 'password')
+    if any(installed.get(key) != current.get(key) for key in keys):
+        raise RuntimeError('installed proxy credential differs from the managed registry')
+
+
 def docker_inspect(name):
     result = subprocess.run(['docker', 'inspect', name], text=True, capture_output=True, timeout=20)
     if result.returncode:
         return None
     return json.loads(result.stdout)[0]
+
+
+def bulk_managed_inspections(devices, runner=subprocess.run, chunk_size=128):
+    """Inspect only materialized fleet containers with bounded Docker calls."""
+    expected = {f'{role}-{device}' for device in devices for role in ('proxy', 'android', 'screen')}
+    listing = runner(['docker', 'ps', '-a', '--filter', 'label=farm.stack=devices',
+                      '--format', '{{.Names}}'], text=True, capture_output=True, timeout=30)
+    if listing.returncode:
+        raise RuntimeError('failed to list managed device containers')
+    names = sorted(expected.intersection(line.strip() for line in listing.stdout.splitlines()))
+    found = {}
+    for offset in range(0, len(names), chunk_size):
+        result = runner(['docker', 'inspect', *names[offset:offset + chunk_size]],
+                        text=True, capture_output=True, timeout=60)
+        # Docker can return non-zero if a container disappears after ``ps``;
+        # any valid objects still returned are safe to use and the rest remain
+        # "missing" in this point-in-time status snapshot.
+        if not result.stdout.strip():
+            continue
+        try:
+            items = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise RuntimeError('Docker returned invalid inspection data') from exc
+        for item in items if isinstance(items, list) else []:
+            name = str(item.get('Name', '')).lstrip('/')
+            if name in expected:
+                found[name] = item
+    return found
+
+
+def all_roles_running(device):
+    for role in ('proxy', 'android', 'screen'):
+        item = docker_inspect(f'{role}-{device}')
+        if not item or not item.get('State', {}).get('Running'):
+            return False
+    return True
+
+
+def accept_idempotent_running(config, device, record):
+    """Prove an already-running device before treating a replayed up task as success."""
+    if not all_roles_running(device):
+        return False
+    assert_not_held(device, config.state_dir / 'holds.json')
+    farmctl(config, 'check', device)
+    verify_identity(device)
+    result = farmctl(config, 'ip', device, capture=True)
+    payload = json.loads(result.stdout)
+    expected = record.get('expected_egress_ip')
+    if payload.get('proxy_namespace') != expected or payload.get('android_shell') != expected:
+        try:
+            invoke('account_policy.py', 'hold', device, '--reason', 'ip-change')
+        except subprocess.SubprocessError as exc:
+            raise RuntimeError('egress mismatch and automatic safety hold failed') from exc
+        raise RuntimeError('egress mismatch; device was placed on a safety hold and stopped')
+    return True
 
 
 def collect_status(config):
@@ -105,14 +203,14 @@ def collect_status(config):
     holds = read_private_json(hold_path, 'safety holds') if hold_path.exists() else {}
     rows = []
     running_names = []
-    inspections = {}
-    for record in inventory.records(state):
+    records = inventory.records(state)
+    inspections = bulk_managed_inspections([record['id'] for record in records])
+    for record in records:
         device = record['id']
         role_states = {}
         for role in ('proxy', 'android', 'screen'):
             name = f'{role}-{device}'
-            item = docker_inspect(name)
-            inspections[name] = item
+            item = inspections.get(name)
             if item and item['State'].get('Running'):
                 running_names.append(name)
             role_states[role] = ('missing' if not item else
@@ -192,12 +290,85 @@ def build_parser():
     release.add_argument('--review-completed', action='store_true', required=True)
     resources_command = sub.add_parser('resources', help='print the live host capacity report')
     resources_command.add_argument('--json', action='store_true')
-    render = sub.add_parser('render', help='render one honest Redroid QA profile for Coolify review/import')
+    render = sub.add_parser('render', help='render one transparent Redroid QA profile for offline review')
     render.add_argument('--id', dest='device', required=True)
-    render.add_argument('--profile', choices=sorted(PROFILES), default='phone_hd')
-    render.add_argument('--data-root', type=Path, default=Path('/opt/farm/data'))
+    render_profile = render.add_mutually_exclusive_group()
+    render_profile.add_argument('--profile', choices=sorted(PROFILES), default='phone_hd',
+                                help='built-in transparent QA display profile')
+    render_profile.add_argument('--profile-file', type=Path,
+                                help='validated JSON profile with Android version, display and locale')
     render.add_argument('--output', type=Path, required=True)
+    proxy = sub.add_parser('proxy', help='manage authenticated sticky proxy connections')
+    proxy_actions = proxy.add_subparsers(dest='proxy_action', required=True)
+    proxy_add = proxy_actions.add_parser('add', help='register a dedicated upstream proxy')
+    proxy_add.add_argument('--id', required=True)
+    proxy_add.add_argument('--label', required=True)
+    proxy_add.add_argument('--type', required=True, choices=['http', 'socks', 'socks5'])
+    proxy_add.add_argument('--server', required=True, help='pinned public IPv4')
+    proxy_add.add_argument('--port', required=True, type=int)
+    proxy_add.add_argument('--username', required=True)
+    proxy_add.add_argument('--password-file', required=True, type=Path)
+    proxy_add.add_argument('--expected-ip', required=True)
+    for action in ('show', 'test', 'disable', 'enable', 'delete'):
+        command = proxy_actions.add_parser(action)
+        command.add_argument('--id', required=True)
+    proxy_list = proxy_actions.add_parser('list')
+    proxy_list.add_argument('--enabled-only', action='store_true')
+    proxy_rotate = proxy_actions.add_parser('rotate-password')
+    proxy_rotate.add_argument('--id', required=True)
+    proxy_rotate.add_argument('--password-file', required=True, type=Path)
+    proxy_assign = proxy_actions.add_parser('assign')
+    proxy_assign.add_argument('--id', required=True)
+    proxy_assign.add_argument('--device', required=True)
+    proxy_unassign = proxy_actions.add_parser('unassign')
+    proxy_unassign.add_argument('--id', required=True)
+    proxy_unassign.add_argument('--device')
     return parser
+
+
+def private_password(path):
+    value = require_private_file(path, 'proxy password file').read_text(encoding='utf-8')
+    if value.endswith('\n'):
+        value = value[:-1]
+    if not value or any(ord(character) < 32 or ord(character) == 127 for character in value):
+        raise RuntimeError('password file must contain one non-empty line without control characters')
+    return value
+
+
+def rotate_managed_proxy_password(store, proxy_id, password_file, config):
+    """Rotate both credential copies while starts are excluded by the host lock."""
+    from ops import farmctl as farm_operations
+    with host_lifecycle_lock():
+        record = store.show(proxy_id)
+        assigned = record.get('assigned_device')
+        old_secret = store.provisioning_secret(proxy_id)
+        installed_path = config.secret_dir / f'{assigned}.json' if assigned else None
+        if assigned:
+            assigned = canonical_device(assigned)
+            farm_operations.stop(assigned)
+            installed = read_private_json(installed_path, f'{assigned} installed proxy secret')
+            old_identity = [old_secret.get(key) for key in ('type', 'server', 'server_port', 'username')]
+            installed_identity = [installed.get(key) for key in ('type', 'server', 'server_port', 'username')]
+            if installed_identity != old_identity:
+                raise RuntimeError('installed proxy secret differs from the registry; repair manually')
+        try:
+            result = store.rotate_password(proxy_id, private_password(password_file))
+            if installed_path:
+                atomic_json(installed_path, store.provisioning_secret(proxy_id))
+            health = store.check_health(proxy_id)
+        except Exception:
+            # Keep both copies on the last known credential when the new
+            # password cannot prove the pinned egress IP.
+            try:
+                store.rotate_password(proxy_id, old_secret['password'])
+                if installed_path:
+                    atomic_json(installed_path, old_secret)
+            except Exception as rollback_error:
+                raise RuntimeError('proxy password rotation failed and rollback needs manual repair') from rollback_error
+            raise
+        result['health'] = health
+        result['assigned_device_stopped'] = bool(assigned)
+        return result
 
 
 def main(argv=None):
@@ -210,7 +381,10 @@ def main(argv=None):
               f"available={report['available_ram_gib']}GiB disk_free={report['disk_free_gib']}GiB")
         return
     if args.command == 'render':
-        document = single_instance(args.device, args.profile, args.data_root)
+        document = single_instance(args.device, args.profile)
+        if args.profile_file:
+            document = apply_profile(document, canonical_device(args.device),
+                                     load_device_profile(args.profile_file))
         output = args.output.resolve()
         output.parent.mkdir(parents=True, exist_ok=True)
         if output.exists():
@@ -219,21 +393,77 @@ def main(argv=None):
         print(output)
         return
     config = load_config(args.config)
-    if args.command == 'up' and args.request:
+    if args.command == 'proxy':
+        from ops.proxy_store import ProxyStore
+        store = ProxyStore(config.proxy_registry, config.proxy_store_dir)
+        if args.proxy_action == 'add':
+            result = store.add(args.id, label=args.label, proxy_type=args.type, server=args.server,
+                               server_port=args.port, username=args.username,
+                               password=private_password(args.password_file),
+                               expected_egress_ip=args.expected_ip)
+        elif args.proxy_action == 'list':
+            result = store.list(include_disabled=not args.enabled_only)
+        elif args.proxy_action == 'show':
+            result = store.show(args.id)
+        elif args.proxy_action == 'test':
+            result = store.check_health(args.id)
+        elif args.proxy_action == 'disable':
+            assigned = store.show(args.id).get('assigned_device')
+            if assigned:
+                invoke('account_policy.py', 'hold', canonical_device(assigned),
+                       '--reason', 'maintenance')
+            result = store.disable(args.id)
+            result['assigned_device_stopped'] = bool(assigned)
+            result['safety_hold_created'] = bool(assigned)
+        elif args.proxy_action == 'enable':
+            result = store.enable(args.id)
+            try:
+                result['health'] = store.check_health(args.id)
+            except Exception:
+                store.disable(args.id)
+                raise RuntimeError('proxy enable failed health validation; proxy remains disabled')
+        elif args.proxy_action == 'delete':
+            state = inventory.load(config.state_dir / 'inventory.json')
+            if any(record.get('proxy_id') == args.id for record in inventory.records(state)):
+                raise RuntimeError('proxy belongs to a persistent device and cannot be deleted')
+            store.delete(args.id)
+            result = {'id': args.id, 'deleted': True}
+        elif args.proxy_action == 'rotate-password':
+            result = rotate_managed_proxy_password(store, args.id, args.password_file, config)
+        elif args.proxy_action == 'assign':
+            result = store.assign(args.id, canonical_device(args.device))
+        else:
+            assigned = (canonical_device(args.device) if args.device
+                        else store.show(args.id).get('assigned_device'))
+            state = inventory.load(config.state_dir / 'inventory.json')
+            if assigned and inventory.find(state, assigned):
+                raise RuntimeError('persistent device proxy assignments cannot be removed; use a reviewed device migration')
+            result = store.unassign(args.id, assigned)
+        print(json.dumps(result, indent=2))
+    elif args.command == 'up' and args.request:
         if not config.apk_trust_file:
             raise RuntimeError('request provisioning requires configured apk_trust_file')
         result = invoke('provision.py', '--request', args.request, '--compose', config.compose_file,
+                        *(( '--env-file', config.compose_env_file) if config.compose_env_file else ()),
                         '--project', config.compose_project, '--secret-dir', config.secret_dir,
+                        '--proxy-registry', config.proxy_registry,
+                        '--proxy-store-dir', config.proxy_store_dir,
                         '--apk-trust-file', config.apk_trust_file, capture=True)
         if result.stdout:
             print(result.stdout, end='')
-        matches = re.findall(r'^(num\d{2,3}):', result.stdout or '', re.MULTILINE)
+        matches = re.findall(r'^(num\d{2,}):', result.stdout or '', re.MULTILINE)
         if not matches:
             raise RuntimeError('provision completed without a device identifier')
         print('screen:', web_url(config, matches[-1]))
     elif args.command == 'up':
         device = canonical_device(args.device)
-        farmctl(config, 'start', device)
+        record = inventory.find(inventory.load(config.state_dir / 'inventory.json'), device)
+        if not record:
+            raise RuntimeError('device is not allocated in the managed inventory')
+        validate_managed_proxy(config, device, record)
+        already_running = accept_idempotent_running(config, device, record)
+        if not already_running:
+            farmctl(config, 'start', device)
         if any((args.apk, args.apk_sha256, args.package, args.activity, args.grant)):
             if not all((args.apk, args.apk_sha256, args.package)) or not config.apk_trust_file:
                 raise RuntimeError('APK install requires --apk, --apk-sha256, --package and configured apk_trust_file')
@@ -241,7 +471,7 @@ def main(argv=None):
             artifact = app_installer.verify(args.apk, args.apk_sha256, args.package, config.apk_trust_file)
             app_installer.install(device, artifact, args.grant, args.activity)
             print(f'{device}: approved QA application installed and launched')
-        print('screen:', web_url(config, device))
+        print(('already running; screen:' if already_running else 'screen:'), web_url(config, device))
     elif args.command == 'down':
         farmctl(config, 'stop', canonical_device(args.device))
     elif args.command == 'check':

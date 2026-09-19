@@ -1,0 +1,10 @@
+apiVersion: 1
+providers:
+  - name: Android Farm
+    orgId: 1
+    folder: Android Farm
+    type: file
+    disableDeletion: true
+    allowUiUpdates: false
+    options:
+      path: /var/lib/grafana/dashboards

@@ -1,0 +1,9 @@
+---
+- name: Maintain Android Farm host control plane
+  hosts: android_farm_hosts
+  become: true
+  gather_facts: true
+  serial: 1
+  max_fail_percentage: 0
+  roles:
+    - role: android_farm

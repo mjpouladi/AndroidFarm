@@ -16,15 +16,22 @@ try:
     from .account_policy import assert_not_held
     from .identity import verify as verify_identity
     from . import inventory
-    from .secureio import atomic_json, read_private_json, require_private_directory
+    from .secureio import atomic_json, read_private_json, require_private_directory, require_private_file
+    from .device_ids import canonical_device, device_index, network_plan
+    from .device_profiles import (PROFILE_DIGEST_LABEL, REDROID_IMAGES, apply_profile,
+                                  load as load_device_profile)
+    from .proxy_store import ProxyStore
 except ImportError:
     from resources import probe, admission, local_docker
     from account_policy import assert_not_held
     from identity import verify as verify_identity
     import inventory
-    from secureio import atomic_json, read_private_json, require_private_directory
+    from secureio import atomic_json, read_private_json, require_private_directory, require_private_file
+    from device_ids import canonical_device, device_index, network_plan
+    from device_profiles import (PROFILE_DIGEST_LABEL, REDROID_IMAGES, apply_profile,
+                                  load as load_device_profile)
+    from proxy_store import ProxyStore
 
-MAX_ACTIVE = 10
 DATA_ROOT = Path('/opt/farm/data/instances')
 
 
@@ -61,11 +68,31 @@ def validate_managed_volume(device, record):
     return info
 
 
-def assert_capacity(active, device):
+def validate_managed_proxy(device, record, secret_dir,
+                           registry=Path('/var/lib/android-farm/proxies.json'),
+                           store_dir=Path('/etc/android-farm/proxies')):
+    """Attest registry assignment and installed credentials inside the lifecycle lock."""
+    proxy_id = record.get('proxy_id')
+    if not proxy_id:  # Read-only compatibility for legacy file-managed proxies.
+        return
+    store = ProxyStore(registry, store_dir)
+    metadata = store.show(proxy_id)
+    if metadata.get('state') != 'enabled' or metadata.get('assigned_device') != device:
+        raise RuntimeError('managed proxy is disabled or no longer assigned to this device')
+    if metadata.get('expected_egress_ip') != record.get('expected_egress_ip'):
+        raise RuntimeError('managed proxy expected IP differs from the persistent allocation')
+    installed = read_private_json(Path(secret_dir) / f'{device}.json',
+                                  f'{device} installed proxy secret')
+    current = store.provisioning_secret(proxy_id)
+    keys = ('type', 'server', 'server_port', 'username', 'password')
+    if any(installed.get(key) != current.get(key) for key in keys):
+        raise RuntimeError('installed proxy credential differs from the managed registry')
+
+
+def assert_capacity(active, device, report=None):
     if f'android-{device}' in active:
         raise RuntimeError('device is already running; stop before starting again')
-    if len(active) >= MAX_ACTIVE:
-        raise RuntimeError('maximum of 10 active Android containers reached')
+    admission(report or probe(), len(active))
 
 
 def guard(device, secret_dir, allow_upstream=True):
@@ -77,8 +104,8 @@ def guard(device, secret_dir, allow_upstream=True):
     port = int(secret['server_port'])
     if not 1 <= port <= 65535:
         raise RuntimeError('invalid upstream port')
-    index = int(device[3:])
-    bridge, chain = f'br-af{index:03d}', f'AF{index:03d}'
+    addresses = network_plan(device_index(device, aliases=False))
+    bridge, chain = addresses['bridge'], addresses['iptables_chain']
     run('iptables', '-w', '-S', 'DOCKER-USER', capture=True)
     existing = subprocess.run(['iptables', '-w', '-S', chain], capture_output=True)
     if existing.returncode != 0:
@@ -105,8 +132,7 @@ def guard(device, secret_dir, allow_upstream=True):
 
 def cut_egress(device):
     """Best-effort immediate host-level cut before graceful container shutdown."""
-    index = int(device[3:])
-    chain = f'AF{index:03d}'
+    chain = network_plan(device_index(device, aliases=False))['iptables_chain']
     if subprocess.run(['iptables', '-w', '-S', chain], capture_output=True).returncode == 0:
         payload = '\n'.join(['*filter', f'-F {chain}', f'-A {chain} -j DROP', 'COMMIT', ''])
         result = subprocess.run(['iptables-restore', '-w', '--noflush'], input=payload, text=True,
@@ -139,12 +165,41 @@ def check(device):
         if not item or not item['State']['Running']:
             raise RuntimeError(f'{kind}-{device} is not running')
     run('docker', 'exec', f'proxy-{device}', '/healthcheck.sh')
-    target = f'10.232.{int(device[3:])}.2:5555'
+    target = f"{network_plan(device_index(device, aliases=False))['proxy_control_ip']}:5555"
     boot = run('docker', 'exec', f'screen-{device}', 'adb', '-s', target,
                'shell', 'getprop', 'sys.boot_completed', capture=True).strip()
     if boot != '1':
         raise RuntimeError('Android boot not complete')
     print(f'{device}: proxy and ADB ready; verify browser rendering separately')
+
+
+def recovery_android_is_active(device):
+    """Re-check the on-demand intent while the caller owns the lifecycle lock."""
+    current = inspect(f'android-{device}')
+    return bool(current and current.get('State', {}).get('Running'))
+
+
+def recover_existing_screen(device):
+    """Start only an existing screen for a still-active, healthy proxy namespace."""
+    android = inspect(f'android-{device}')
+    proxy = inspect(f'proxy-{device}')
+    screen = inspect(f'screen-{device}')
+    if not android or not android.get('State', {}).get('Running'):
+        print(f'ANDROID_FARM_RECOVERY_SKIPPED {device} android-not-running')
+        return False
+    if not proxy or not proxy.get('State', {}).get('Running'):
+        print(f'ANDROID_FARM_RECOVERY_SKIPPED {device} proxy-not-running')
+        return False
+    if screen is None:
+        raise RuntimeError('screen recovery refused: managed container is missing')
+    if screen.get('State', {}).get('Running'):
+        print(f'ANDROID_FARM_RECOVERY_SKIPPED {device} screen-already-running')
+        return False
+    assert_not_held(device)
+    run('docker', 'exec', f'proxy-{device}', '/healthcheck.sh', timeout=30)
+    run('docker', 'start', f'screen-{device}', timeout=60)
+    print(f'{device} screen recovered from its existing reviewed container')
+    return True
 
 
 def _global_ipv4(text):
@@ -170,7 +225,7 @@ def proxy_egress_ip(device):
 
 def android_egress_ip(device):
     """Probe from an ADB shell UID, which traverses the transparent redirect rules."""
-    target = f'10.232.{int(device[3:])}.2:5555'
+    target = f"{network_plan(device_index(device, aliases=False))['proxy_control_ip']}:5555"
     adb = ['docker', 'exec', f'screen-{device}', 'adb', '-s', target, 'shell']
     curl = subprocess.run([*adb, 'command', '-v', 'curl'], text=True, capture_output=True, timeout=15)
     if curl.returncode == 0 and curl.stdout.strip():
@@ -193,7 +248,7 @@ def wait_proxy(device, timeout=120):
     raise RuntimeError('proxy did not become healthy before timeout')
 
 
-def validate_compose(config, device, secret_dir):
+def validate_compose(config, device, secret_dir, expected_profile=None):
     """Attest the isolation-critical parts of the resolved Compose document.
 
     This is deliberately an allowlist. Redroid is privileged, so merely
@@ -210,7 +265,8 @@ def validate_compose(config, device, secret_dir):
         raise RuntimeError(f'resolved Compose is missing {exc.args[0]}') from exc
     if android.get('network_mode') != f'service:{proxy_name}':
         raise RuntimeError('Compose drift: Android must share only its proxy network namespace')
-    index = int(device[3:])
+    index = device_index(device, aliases=False)
+    addresses = network_plan(index)
     egress, control = f'egress-{device}', f'control-{device}'
     if set(proxy.get('networks', {})) != {egress, control}:
         raise RuntimeError('Compose drift: proxy must have exactly its egress and internal control networks')
@@ -219,10 +275,19 @@ def validate_compose(config, device, secret_dir):
     if set(screen.get('networks', {})) != {'coolify', control}:
         raise RuntimeError('Compose drift: screen must have exactly Coolify and its control network')
     proxy_networks, screen_networks = proxy['networks'], screen['networks']
-    if (proxy_networks[egress].get('ipv4_address') != f'10.231.{index}.2' or
-            proxy_networks[control].get('ipv4_address') != f'10.232.{index}.2' or
-            screen_networks[control].get('ipv4_address') != f'10.232.{index}.3'):
+    if (proxy_networks[egress].get('ipv4_address') != addresses['proxy_egress_ip'] or
+            proxy_networks[control].get('ipv4_address') != addresses['proxy_control_ip'] or
+            screen_networks[control].get('ipv4_address') != addresses['screen_control_ip']):
         raise RuntimeError('Compose drift: control and egress endpoints do not match the audited addresses')
+    screen_environment = screen.get('environment', {})
+    if screen_environment.get('ADB_TARGET') != f"{addresses['proxy_control_ip']}:5555":
+        raise RuntimeError('Compose drift: screen ADB target differs from the private proxy namespace')
+    expected_screen = ({'SCREEN_WIDTH': str(expected_profile.resolution.width),
+                        'SCREEN_HEIGHT': str(expected_profile.resolution.height),
+                        'SCREEN_FPS': str(expected_profile.fps)} if expected_profile else
+                       {'SCREEN_WIDTH': '720', 'SCREEN_HEIGHT': '1280', 'SCREEN_FPS': '20'})
+    if any(str(screen_environment.get(key)) != value for key, value in expected_screen.items()):
+        raise RuntimeError('Compose drift: browser display geometry differs from Android profile')
     networks = config.get('networks', {})
     try:
         egress_config, control_config, coolify_config = networks[egress], networks[control], networks['coolify']
@@ -230,7 +295,7 @@ def validate_compose(config, device, secret_dir):
         raise RuntimeError(f'Compose drift: missing network {exc.args[0]}') from exc
     if (egress_config.get('driver', 'bridge') != 'bridge' or egress_config.get('internal') or
             egress_config.get('name') != f'farm-egress-{device}' or
-            egress_config.get('driver_opts', {}).get('com.docker.network.bridge.name') != f'br-af{index:03d}'):
+            egress_config.get('driver_opts', {}).get('com.docker.network.bridge.name') != addresses['bridge']):
         raise RuntimeError('Compose drift: egress network does not match the host guard bridge')
     if (not control_config.get('internal') or control_config.get('name') != f'farm-control-{device}' or
             control_config.get('driver', 'bridge') != 'bridge'):
@@ -241,7 +306,7 @@ def validate_compose(config, device, secret_dir):
         ipam = network.get('ipam', {})
         entries = ipam.get('config', []) if isinstance(ipam, dict) else []
         return entries[0].get('subnet') if len(entries) == 1 and isinstance(entries[0], dict) else None
-    if subnet(egress_config) != f'10.231.{index}.0/29' or subnet(control_config) != f'10.232.{index}.0/29':
+    if subnet(egress_config) != addresses['egress_subnet'] or subnet(control_config) != addresses['control_subnet']:
         raise RuntimeError('Compose drift: device subnets do not match the audited topology')
     for service, name in ((proxy, proxy_name), (android, android_name), (screen, screen_name)):
         if service.get('container_name') != name or service.get('restart') != 'no':
@@ -265,8 +330,21 @@ def validate_compose(config, device, secret_dir):
         raise RuntimeError('Compose drift: expected persistent device volume is not mounted at /data')
     command = android.get('command') or []
     required_properties = {f'androidboot.serialno=farm-{device}', 'androidboot.use_memfd=true',
-                           'ro.product.brand=redroid', 'ro.product.manufacturer=remote-android',
-                           'ro.product.model=Redroid QA Phone'}
+                           'ro.product.brand=redroid', 'ro.product.manufacturer=remote-android'}
+    if expected_profile is None:
+        required_properties.add('ro.product.model=Redroid QA Phone')
+    else:
+        required_properties.update({
+            f'androidboot.redroid_width={expected_profile.resolution.width}',
+            f'androidboot.redroid_height={expected_profile.resolution.height}',
+            f'androidboot.redroid_dpi={expected_profile.dpi}',
+            f'androidboot.redroid_fps={expected_profile.fps}',
+            f'ro.product.model={expected_profile.device_model}',
+            f'ro.product.locale={expected_profile.locale}',
+        })
+        if (android.get('image') != REDROID_IMAGES[expected_profile.android_version] or
+                android.get('labels', {}).get(PROFILE_DIGEST_LABEL) != expected_profile.digest):
+            raise RuntimeError('Compose drift: Android QA profile image or digest differs')
     if not isinstance(command, list) or not required_properties.issubset(set(command)):
         raise RuntimeError('Compose drift: Android must keep the audited honest QA properties')
     volume_config = config.get('volumes', {}).get(volume, {})
@@ -281,10 +359,10 @@ def validate_compose(config, device, secret_dir):
         raise RuntimeError('Compose drift: proxy secret path does not match managed secret directory')
     ports = proxy.get('ports', [])
     adb = [item for item in ports if isinstance(item, dict) and int(item.get('target', 0)) == 5555]
-    if (len(adb) != 1 or adb[0].get('host_ip') != '127.0.0.1' or
+    if (len(ports) != 1 or len(adb) != 1 or adb[0].get('host_ip') != '127.0.0.1' or
             str(adb[0].get('protocol', 'tcp')).lower() != 'tcp' or
-            int(adb[0].get('published', 0)) != 5550 + index):
-        raise RuntimeError('Compose drift: ADB must be published once on IPv4 loopback only')
+            int(adb[0].get('published', 0)) != addresses['adb_port']):
+        raise RuntimeError('Compose drift: ADB must be the proxy\'s only published port and use IPv4 loopback')
     labels = screen.get('labels', {})
     middleware = labels.get(f'traefik.http.routers.farm-{device}.middlewares', '')
     route = labels.get(f'traefik.http.routers.farm-{device}.rule', '')
@@ -346,18 +424,26 @@ def _sha256(path):
 
 def main():
     p = argparse.ArgumentParser(description=__doc__)
-    p.add_argument('action', choices=['start', 'stop', 'check', 'ip', 'backup', 'status'])
+    p.add_argument('action', choices=['start', 'recover', 'recover-screen', 'stop',
+                                      'check', 'ip', 'backup', 'status'])
     p.add_argument('device', nargs='?')
     p.add_argument('--compose', default='docker-compose.farm.yml')
-    p.add_argument('--project', default='android-farm-devices')
+    p.add_argument('--env-file', type=Path)
+    p.add_argument('--project', default='android-farm-runtime')
     p.add_argument('--secret-dir', type=Path, default=Path('/etc/android-farm/secrets'))
+    p.add_argument('--proxy-registry', type=Path, default=Path('/var/lib/android-farm/proxies.json'))
+    p.add_argument('--proxy-store-dir', type=Path, default=Path('/etc/android-farm/proxies'))
+    p.add_argument('--profile-dir', type=Path, default=Path('/etc/android-farm/device-profiles'))
     p.add_argument('--backup-dir', type=Path, default=Path('/var/backups/android-farm'))
     args = p.parse_args()
     if os.name != 'posix' or os.geteuid() != 0:
         p.error('run on the Ubuntu Docker host as root')
     local_docker()
-    if args.action != 'status' and not re.fullmatch(r'num(?:0[1-9]|[1-9][0-9]|1[0-9]{2}|200)', args.device or ''):
-        p.error('device must be num01..num200')
+    if args.action != 'status':
+        try:
+            args.device = canonical_device(args.device)
+        except ValueError as exc:
+            p.error(str(exc))
     import fcntl
     # One host-wide lock shared by all checkouts and projects, including backups.
     with open('/run/lock/android-farm.lock', 'w') as lock:
@@ -374,7 +460,15 @@ def main():
                               'android_shell': android_egress_ip(d), 'checked_at': int(time.time())}))
         elif args.action == 'backup':
             backup(d, args.backup_dir)
-        elif args.action == 'start':
+        elif args.action == 'recover-screen':
+            # Health recovery must never recreate a missing container or start
+            # a screen after an operator intentionally stopped Android.  This
+            # decision and the start happen under the same lifecycle lock.
+            recover_existing_screen(d)
+        elif args.action in {'start', 'recover'}:
+            if args.action == 'recover' and not recovery_android_is_active(d):
+                print(f'ANDROID_FARM_RECOVERY_SKIPPED {d} android-not-running')
+                return
             assert_not_held(d)
             state = inventory.load()
             record = inventory.find(state, d)
@@ -389,14 +483,53 @@ def main():
                 raise RuntimeError('device has no valid approved egress IP')
             if not ipaddress.ip_address(expected_ip).is_global:
                 raise RuntimeError('approved egress IP must be public')
+            validate_managed_proxy(d, record, args.secret_dir,
+                                   args.proxy_registry, args.proxy_store_dir)
             validate_managed_volume(d, record)
             active = active_devices()
-            assert_capacity(active, d)
-            admission(probe(), len(active))
-            compose = ['docker', 'compose', '-p', args.project, '-f', str(Path(args.compose).resolve()),
-                       '--profile', 'manual']
+            if f'android-{d}' in active:
+                # A caller may be reconciling a partially healthy instance or
+                # replaying an interrupted start. Stop this device first, then
+                # calculate capacity from the remaining fleet.
+                stop(d)
+                active = active_devices()
+            assert_capacity(active, d, probe())
+            compose = ['docker', 'compose']
+            if args.env_file:
+                compose.extend(['--env-file', str(args.env_file.resolve())])
+            compose.extend(['-p', args.project, '-f', str(Path(args.compose).resolve())])
+            expected_profile = None
+            profile_path = args.profile_dir.resolve() / f'{d}.json'
+            if profile_path.exists():
+                require_private_file(profile_path, f'{d} QA profile')
+                expected_profile = load_device_profile(profile_path)
+                base_resolved = json.loads(run(*compose, '--profile', 'manual', 'config',
+                                               '--format', 'json', capture=True))
+                profiled = apply_profile(base_resolved, d, expected_profile)
+                android_name = f'android-{d}'
+                screen_name = f'screen-{d}'
+                android = profiled['services'][android_name]
+                screen_environment = profiled['services'][screen_name]['environment']
+                override_root = require_private_directory(Path('/var/lib/android-farm/device-overrides'),
+                                                          'device override directory', create=True)
+                override_path = override_root / f'{d}.json'
+                atomic_json(override_path, {'services': {
+                    android_name: {'image': android['image'], 'command': android['command'],
+                                   'labels': {PROFILE_DIGEST_LABEL: expected_profile.digest}},
+                    screen_name: {'environment': {
+                        'SCREEN_WIDTH': screen_environment['SCREEN_WIDTH'],
+                        'SCREEN_HEIGHT': screen_environment['SCREEN_HEIGHT'],
+                        'SCREEN_FPS': screen_environment['SCREEN_FPS'],
+                    }},
+                }})
+                compose.extend(['-f', str(override_path)])
+            compose.extend(['--profile', 'manual'])
             resolved = json.loads(run(*compose, 'config', '--format', 'json', capture=True))
-            validate_compose(resolved, d, args.secret_dir)
+            validate_compose(resolved, d, args.secret_dir, expected_profile)
+            # Proxy and screen use local reviewed Dockerfiles with stable image
+            # names. Explicitly build from the active immutable release so an
+            # upgrade can never reuse an older local tag silently.
+            run(*compose, 'build', f'proxy-{d}', f'screen-{d}', timeout=1200)
             # First prove the gateway's endpoint while no Android namespace is
             # running. Then close the host guard before booting Android, so no
             # guest process can reach the upstream prior to the identity check.

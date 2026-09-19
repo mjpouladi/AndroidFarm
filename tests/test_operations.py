@@ -1,6 +1,7 @@
 import hashlib
 import json
 from pathlib import Path
+import subprocess
 import tempfile
 import unittest
 from unittest.mock import patch
@@ -9,18 +10,39 @@ from ops.resources import capacity, admission
 from ops.provision import choose_record
 from ops.account_policy import assert_not_held
 from ops.identity import verify
+from ops import identity
+from ops.device_ids import network_plan
+from ops.device_profiles import apply_profile, validate as validate_device_profile
 from ops import inventory
 from ops.compose_factory import canonical_device, single_instance
-from ops.farmctl import _global_ipv4, validate_compose
+from ops.farmctl import (_global_ipv4, recover_existing_screen,
+                         recovery_android_is_active, validate_compose)
 from ops import app_installer
+from provisioner import bulk_managed_inspections
 
 
 class OperationsTests(unittest.TestCase):
+    def test_status_bulk_inspection_scales_with_materialized_containers(self):
+        calls = []
+
+        def runner(argv, **_kwargs):
+            calls.append(argv)
+            if argv[1:3] == ['ps', '-a']:
+                return subprocess.CompletedProcess(
+                    argv, 0, 'proxy-num01\nandroid-num01\nscreen-num01\nnot-managed\n', '')
+            items = [{'Name': '/' + name, 'State': {'Running': True}} for name in argv[2:]]
+            return subprocess.CompletedProcess(argv, 0, json.dumps(items), '')
+
+        result = bulk_managed_inspections(['num01', 'num02'], runner=runner)
+        self.assertEqual(set(result), {'proxy-num01', 'android-num01', 'screen-num01'})
+        self.assertEqual(len(calls), 2)
+        self.assertNotIn('not-managed', calls[1])
+
     def test_resource_capacity(self):
         self.assertEqual(capacity(72, 96)[0], 10)
         self.assertEqual(capacity(16, 32)[0], 2)
         self.assertEqual(capacity(2, 4)[0], 0)
-        self.assertEqual(capacity(128, 512)[0], 10)
+        self.assertEqual(capacity(128, 512)[0], 19)
 
     def test_admission_fails_closed_under_pressure(self):
         report = dict(capacity=10, available_ram_gib=80, reserved_ram_gib=19.2,
@@ -32,6 +54,14 @@ class OperationsTests(unittest.TestCase):
         for change in ({'available_ram_gib': 23}, {'disk_free_gib': 90}, {'free_inode_ratio': .01}, {'load_1m': 100}):
             with self.assertRaises(RuntimeError):
                 admission(dict(report, **change), 1)
+        split_storage = dict(report, data_disk_total_gib=1000, data_disk_free_gib=300,
+                             data_free_inode_ratio=.8, docker_disk_total_gib=200,
+                             docker_disk_free_gib=100, docker_free_inode_ratio=.8)
+        admission(split_storage, 1)
+        with self.assertRaisesRegex(RuntimeError, 'Docker root storage'):
+            admission(dict(split_storage, docker_disk_free_gib=10), 1)
+        with self.assertRaisesRegex(RuntimeError, 'Docker root storage'):
+            admission(dict(split_storage, docker_free_inode_ratio=.01), 1)
 
     def test_sequential_allocation_and_resume(self):
         first = choose_record([], 'phone1', 'proxy1', 'request1')
@@ -75,6 +105,27 @@ class OperationsTests(unittest.TestCase):
                 with self.assertRaises(RuntimeError):
                     verify('num01', root / 'identities')
 
+    def test_identity_probe_uses_shared_allocator_beyond_first_subnet(self):
+        commands = []
+
+        def output(command, **_kwargs):
+            commands.append(command)
+            if command[-2:] == ['getprop', 'sys.boot_completed']:
+                return '1\n'
+            if command[-2:] == ['getprop', 'ro.serialno']:
+                return 'farm-num129\n'
+            if command[-3:] == ['settings', 'get', 'secure']:
+                return 'unused\n'
+            if command[-4:] == ['settings', 'get', 'secure', 'android_id']:
+                return '0123456789abcdef\n'
+            return 'qa-value\n'
+
+        with patch('ops.identity.subprocess.check_output', side_effect=output):
+            identity.snapshot('num129', timeout=1)
+        target = f"{network_plan(129)['proxy_control_ip']}:5555"
+        self.assertTrue(commands)
+        self.assertTrue(all(command[5] == target for command in commands))
+
     def test_versioned_inventory_is_monotonic_and_migrates_legacy(self):
         state = inventory.empty_inventory()
         first, created = inventory.choose(state, 'phone-1', 'proxy-1', 'request-1')
@@ -101,10 +152,13 @@ class OperationsTests(unittest.TestCase):
         self.assertEqual(canonical_device('dev01'), 'num01')
         document = single_instance('dev01', 'phone_fhd')
         android = document['services']['android-num01']
-        self.assertTrue(android['volumes'][0]['source'].replace('\\', '/').endswith('/opt/farm/data/instances/num01/data'))
+        self.assertEqual(android['volumes'], ['redroid-data-num01:/data'])
+        self.assertEqual(document['volumes']['redroid-data-num01'],
+                         {'external': True, 'name': 'redroid-data-num01'})
         self.assertIn('ro.product.brand=redroid', android['command'])
         self.assertIn('ro.product.model=Redroid QA Phone FHD', android['command'])
         self.assertFalse(any('samsung' in value.lower() for value in android['command']))
+        self.assertEqual(document['services']['screen-num01']['environment']['SCREEN_WIDTH'], '1080')
 
     def test_public_ip_parser_rejects_private_and_malformed(self):
         self.assertEqual(_global_ipv4('HTTP/1.0 200 OK\r\n\r\n8.8.8.8'), '8.8.8.8')
@@ -117,8 +171,8 @@ class OperationsTests(unittest.TestCase):
             'proxy-num01': {
                 'container_name': 'proxy-num01', 'restart': 'no',
                 'cap_add': ['NET_ADMIN'], 'cap_drop': ['NET_RAW'],
-                'networks': {'egress-num01': {'ipv4_address': '10.231.1.2'},
-                             'control-num01': {'ipv4_address': '10.232.1.2'}},
+                'networks': {'egress-num01': {'ipv4_address': '10.231.0.2'},
+                             'control-num01': {'ipv4_address': '10.232.0.2'}},
                 'secrets': [{'source': 'proxy-num01', 'target': 'proxy.json'}],
                 'ports': [{'target': 5555, 'host_ip': '127.0.0.1', 'protocol': 'tcp', 'published': '5551'}]},
             'android-num01': {
@@ -131,7 +185,9 @@ class OperationsTests(unittest.TestCase):
             'screen-num01': {
                 'container_name': 'screen-num01', 'restart': 'no', 'cap_drop': ['ALL'],
                 'security_opt': ['no-new-privileges:true'],
-                'networks': {'coolify': {}, 'control-num01': {'ipv4_address': '10.232.1.3'}},
+                'environment': {'ADB_TARGET': '10.232.0.2:5555', 'SCREEN_WIDTH': '720',
+                                'SCREEN_HEIGHT': '1280', 'SCREEN_FPS': '20'},
+                'networks': {'coolify': {}, 'control-num01': {'ipv4_address': '10.232.0.3'}},
                 'labels': {'traefik.enable': 'true',
                            'traefik.http.routers.farm-num01.middlewares': 'farm-auth@file,farm-num01-strip',
                            'traefik.http.routers.farm-num01.rule': 'Host(`farm.example.com`) && PathPrefix(`/d/num01/`)',
@@ -139,21 +195,55 @@ class OperationsTests(unittest.TestCase):
             },
             'networks': {
                 'egress-num01': {'name': 'farm-egress-num01', 'driver': 'bridge',
-                                 'driver_opts': {'com.docker.network.bridge.name': 'br-af001'},
-                                 'ipam': {'config': [{'subnet': '10.231.1.0/29'}]}},
+                                 'driver_opts': {'com.docker.network.bridge.name': 'br-af00001'},
+                                 'ipam': {'config': [{'subnet': '10.231.0.0/29'}]}},
                 'control-num01': {'name': 'farm-control-num01', 'internal': True,
-                                  'ipam': {'config': [{'subnet': '10.232.1.0/29'}]}},
+                                  'ipam': {'config': [{'subnet': '10.232.0.0/29'}]}},
                 'coolify': {'external': True, 'name': 'coolify'}},
             'volumes': {'redroid-data-num01': {'external': True, 'name': 'redroid-data-num01'}},
             'secrets': {'proxy-num01': {'file': '/etc/android-farm/secrets/num01.json'}}}
         validate_compose(config, 'num01', Path('/etc/android-farm/secrets'))
+        profile = validate_device_profile({
+            'schema_version': 1, 'android_version': 12,
+            'resolution': {'width': 1080, 'height': 1920}, 'dpi': 420, 'fps': 30,
+            'device_model': 'Android Farm QA Phone FHD', 'locale': 'fa-IR',
+        })
+        profiled = apply_profile(config, 'num01', profile)
+        validate_compose(profiled, 'num01', Path('/etc/android-farm/secrets'), profile)
         config['services']['proxy-num01']['ports'][0]['host_ip'] = '0.0.0.0'
         with self.assertRaises(RuntimeError):
             validate_compose(config, 'num01', Path('/etc/android-farm/secrets'))
         config['services']['proxy-num01']['ports'][0]['host_ip'] = '127.0.0.1'
+        config['services']['proxy-num01']['ports'].append(
+            {'target': 8080, 'host_ip': '0.0.0.0', 'protocol': 'tcp', 'published': '8080'})
+        with self.assertRaisesRegex(RuntimeError, 'only published port'):
+            validate_compose(config, 'num01', Path('/etc/android-farm/secrets'))
+        config['services']['proxy-num01']['ports'].pop()
         config['services']['proxy-num01']['networks']['side-channel'] = {}
         with self.assertRaises(RuntimeError):
             validate_compose(config, 'num01', Path('/etc/android-farm/secrets'))
+
+    def test_health_recovery_rechecks_on_demand_state_before_start(self):
+        stopped = {'State': {'Running': False}}
+        with patch('ops.farmctl.inspect', return_value=stopped):
+            self.assertFalse(recovery_android_is_active('num01'))
+        with patch('ops.farmctl.inspect', side_effect=[stopped, {'State': {'Running': True}}, stopped]), \
+                patch('ops.farmctl.run') as command:
+            self.assertFalse(recover_existing_screen('num01'))
+            command.assert_not_called()
+
+    def test_screen_recovery_starts_only_existing_container_behind_healthy_proxy(self):
+        running = {'State': {'Running': True}}
+        stopped = {'State': {'Running': False}}
+        with patch('ops.farmctl.inspect', side_effect=[running, running, stopped]), \
+                patch('ops.farmctl.assert_not_held') as hold, \
+                patch('ops.farmctl.run') as command:
+            self.assertTrue(recover_existing_screen('num01'))
+        hold.assert_called_once_with('num01')
+        self.assertEqual(command.call_args_list[0].args,
+                         ('docker', 'exec', 'proxy-num01', '/healthcheck.sh'))
+        self.assertEqual(command.call_args_list[1].args,
+                         ('docker', 'start', 'screen-num01'))
 
     def test_generic_apk_requires_separate_package_trust_policy(self):
         with tempfile.TemporaryDirectory() as folder:

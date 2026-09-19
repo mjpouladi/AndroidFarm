@@ -1,0 +1,31 @@
+---
+# Leave empty to resolve the immutable release selected by the installer.
+# An explicit override is accepted only when it has the same managed layout.
+farm_release_dir: ""
+farm_install_state_file: /var/lib/android-farm/install-state.json
+farm_python_venv: /opt/android-farm/venv
+farm_provisioner_config: /etc/android-farm/provisioner.json
+farm_worker_enabled: true
+farm_health_enabled: true
+farm_manage_redis: true
+farm_redis_worker_password: ""
+farm_redis_url: ""
+farm_health_interval: 1min
+farm_health_restart_limit: 1
+farm_health_cooldown_base: 300
+farm_health_cooldown_max: 3600
+farm_worker_result_ttl_seconds: 604800
+farm_fail_on_device_drift: true
+
+# Honest QA display/environment profiles.  No hardware identifiers belong here.
+# Runtime containers are never recreated by this role; drift fails the play and
+# is applied during the next explicitly approved device maintenance window.
+farm_devices: []
+# - id: num01
+#   android_version: 12
+#   resolution: {width: 720, height: 1280}
+#   dpi: 240
+#   fps: 20
+#   device_model: Android Farm QA Phone HD
+#   locale: en-US
+#   network_isolation: proxy_namespace
