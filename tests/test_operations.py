@@ -649,6 +649,74 @@ class OperationsTests(unittest.TestCase):
         source = (Path(__file__).resolve().parents[1] / 'ops' / 'provision.py').read_text()
         self.assertNotIn("'ops/farmctl.py'", source)
 
+    def test_proxy_wait_reports_the_last_health_error(self):
+        from ops import farmctl
+        failing = subprocess.CompletedProcess([], 6, '', 'curl: (6) Could not resolve host: api.ipify.org\n')
+        with patch('ops.farmctl.subprocess.run', return_value=failing), \
+                patch('ops.farmctl.time.monotonic', side_effect=[0, 0, 500]), patch('ops.farmctl.time.sleep'), \
+                self.assertRaisesRegex(RuntimeError, r'proxy did not become healthy.*Could not resolve host'):
+            farmctl.wait_proxy('num01', timeout=120)
+
+    def test_network_forensics_are_bounded_and_never_fail_the_caller(self):
+        import io
+        from ops import farmctl
+        calls = []
+
+        def fake_run(argv, **kwargs):
+            calls.append(argv)
+            if argv[-1] == 'api.ipify.org' and argv[0] == 'docker':
+                raise subprocess.TimeoutExpired(argv, 10)
+            return subprocess.CompletedProcess(argv, 0, 'x' * 5000, '')
+
+        buffer = io.StringIO()
+        with patch('ops.farmctl.inspect', return_value={'State': {'Running': True}}), \
+                patch('ops.farmctl.subprocess.run', side_effect=fake_run):
+            farmctl.network_forensics('num01', stream=buffer, limit=100)
+        text = buffer.getvalue()
+        self.assertIn('--- network forensics num01 ---', text)
+        self.assertIn('[https-by-ip] exit=0', text)
+        self.assertIn('[dns] exit=error', text)
+        self.assertIn('[host-guard] exit=0', text)
+        self.assertTrue(all(len(line) <= 120 for line in text.splitlines()))
+        self.assertTrue(any(argv[:3] == ['docker', 'exec', 'proxy-num01'] for argv in calls))
+        self.assertIn(['iptables', '-w', '-S', 'AF00001'], calls)
+        buffer = io.StringIO()
+        with patch('ops.farmctl.inspect', return_value=None), patch('ops.farmctl.subprocess.run', side_effect=fake_run):
+            farmctl.network_forensics('num01', stream=buffer)
+        self.assertIn('namespace evidence unavailable', buffer.getvalue())
+
+    def test_diagnosis_shows_the_provisioning_log_that_names_the_device(self):
+        import os
+        import provisioner
+        with tempfile.TemporaryDirectory() as folder:
+            root = Path(folder)
+            os.environ['ANDROID_FARM_EVENT_LOG'] = str(root / 'events.jsonl')
+            self.addCleanup(os.environ.pop, 'ANDROID_FARM_EVENT_LOG', None)
+            state = inventory.empty_inventory()
+            state['next_index'] = 4
+            record, _ = inventory.choose(state, 'phone-4', 'direct:phone-4', 'request-4')
+            self.assertEqual(record['id'], 'num04')
+            record.update(phase='failed', egress='direct', last_error='guarded start failed')
+            inventory.save(root / 'inventory.json', state)
+            logs = root / 'job-logs'
+            logs.mkdir(mode=0o700)
+            for name, text in (('20260919T205537Z-up.log', '# up failed\nproxy did not become healthy\nnum04: preparation stopped during guarded start\n'),
+                               ('20260919T210008Z-up-num04.log', '# up num04 failed\nnot startable\n'),
+                               ('20260919T210111Z-up.log', '# up failed\nresume or quarantine the incomplete device\n'),
+                               ('20260919T210124Z-check-num05.log', '# check num05 failed\nnum05 only\n')):
+                (logs / name).write_text(text)
+            config = Config(root / 'compose.yml', None, 'farm', root / 'secrets', root / 'backups',
+                            'https://farm.example.com', state_dir=root)
+            with patch('provisioner.docker_inspect', return_value=None), \
+                    patch('provisioner.subprocess.run', return_value=subprocess.CompletedProcess([], 1, '', '')):
+                report = provisioner.collect_diagnosis(config, 'num04', log_dir=logs)
+            names = [item['name'] for item in report['job_logs']]
+            self.assertEqual(names, ['20260919T205537Z-up.log', '20260919T210008Z-up-num04.log'])
+            self.assertIn('proxy did not become healthy', report['job_logs'][0]['tail'])
+            self.assertEqual(report['containers'], {'proxy': {'exists': False}, 'android': {'exists': False}, 'screen': {'exists': False}})
+            self.assertEqual(report['record']['last_error'], 'guarded start failed')
+            self.assertFalse(report['files']['volume'])
+
 
 if __name__ == '__main__':
     unittest.main()

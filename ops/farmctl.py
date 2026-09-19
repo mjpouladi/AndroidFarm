@@ -348,13 +348,59 @@ def ensure_android_image(resolved, device):
 
 def wait_proxy(device, timeout=120):
     deadline = time.monotonic() + timeout
+    last = ''
     while time.monotonic() < deadline:
         result = subprocess.run(['docker', 'exec', f'proxy-{device}', '/healthcheck.sh'],
                                 text=True, capture_output=True, timeout=15)
         if result.returncode == 0:
             return
+        # curl's own error (DNS, connect, timeout) names the failing layer.
+        last = ' '.join(((result.stderr or '') + (result.stdout or '')).split())[:300] or f'exit {result.returncode}'
         time.sleep(3)
-    raise RuntimeError('proxy did not become healthy before timeout')
+    raise RuntimeError(f'proxy did not become healthy before timeout (last check: {last or "not attempted"})')
+
+
+# Bounded, read-only evidence from the device's shared network namespace and
+# the host guard. Printed to stderr after a failed start, which the API keeps
+# in the root-only host job log; nothing here reaches HTTP.
+FORENSIC_COMMANDS = (
+    ('resolv.conf', ['cat', '/etc/resolv.conf']),
+    ('addresses', ['ip', '-4', 'addr']),
+    ('rules', ['ip', '-4', 'rule']),
+    ('routes', ['ip', '-4', 'route', 'show', 'table', 'all']),
+    ('filter', ['iptables', '-w', '-S']),
+    ('nat', ['iptables', '-w', '-t', 'nat', '-S']),
+    ('dns', ['nslookup', 'api.ipify.org']),
+    ('https-by-name', ['curl', '--noproxy', '*', '-4', '-sS', '--max-time', '8', '-o', '/dev/null',
+                       '-w', '%{http_code} %{remote_ip}', 'https://api.ipify.org']),
+    ('https-by-ip', ['curl', '--noproxy', '*', '-4', '-sS', '--max-time', '8', '-o', '/dev/null',
+                     '-w', '%{http_code}', 'https://1.1.1.1/cdn-cgi/trace']),
+)
+
+
+def network_forensics(device, stream=sys.stderr, limit=2500, timeout=10):
+    """Print what the namespace and the host guard look like at the moment of failure."""
+    name = f'proxy-{device}'
+    print(f'--- network forensics {device} ---', file=stream)
+    state = inspect(name)
+    commands = []
+    if state and (state.get('State') or {}).get('Running'):
+        commands.extend((label, ['docker', 'exec', name, *argv]) for label, argv in FORENSIC_COMMANDS)
+    else:
+        print('proxy container is not running; namespace evidence unavailable', file=stream)
+    plan = network_plan(device_index(device, aliases=False))
+    commands.extend((('host-docker-user', ['iptables', '-w', '-S', 'DOCKER-USER']),
+                     ('host-guard', ['iptables', '-w', '-S', plan['iptables_chain']]),
+                     ('host-forward-policy', ['iptables', '-w', '-S', 'FORWARD', '1']),
+                     ('host-bridge-route', ['ip', '-4', 'route', 'show', 'dev', plan['bridge']])))
+    for label, argv in commands:
+        try:
+            result = subprocess.run(argv, text=True, capture_output=True, timeout=timeout)
+            text, status = ((result.stdout or '') + (result.stderr or '')).strip(), result.returncode
+        except (OSError, subprocess.SubprocessError) as exc:
+            text, status = str(exc), 'error'
+        print(f'[{label}] exit={status}\n{text[:limit]}', file=stream)
+    print(f'--- end forensics {device} ---', file=stream)
 
 
 def validate_compose(config, device, secret_dir, expected_profile=None, access_mode='domain'):
@@ -811,6 +857,10 @@ def main():
                 events.note('device-started', d, 'attested start' if args.action == 'start' else f'{args.action} recovery')
                 print(f'{d} started; identity and egress verified. Use check and browser acceptance tests.')
             except BaseException:
+                if args.action == 'start':
+                    # Evidence first, while the namespace still exists; then the stop.
+                    with contextlib.suppress(Exception):
+                        network_forensics(d)
                 if android_paused:
                     with contextlib.suppress(Exception):
                         run('docker', 'unpause', f'android-{d}', timeout=30)
@@ -824,4 +874,8 @@ if __name__ == '__main__':
         main()
     except (RuntimeError, ValueError, KeyError, OSError, subprocess.SubprocessError) as exc:
         print(str(exc), file=sys.stderr)
+        # A captured child's own error text (e.g. curl's) is the actual diagnosis.
+        detail = getattr(exc, 'stderr', None) or getattr(exc, 'output', None)
+        if isinstance(detail, str) and detail.strip():
+            print('child output: ' + ' '.join(detail.split())[-400:], file=sys.stderr)
         sys.exit(1)

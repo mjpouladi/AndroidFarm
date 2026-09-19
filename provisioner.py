@@ -335,7 +335,7 @@ def _env_value(path, key, default):
     return default
 
 
-def collect_diagnosis(config, device, *, log_dir=Path('/var/lib/android-farm/job-logs'), log_tail=25,
+def collect_diagnosis(config, device, *, log_dir=Path('/var/lib/android-farm/job-logs'), log_tail=60,
                       container_tail=40):
     """Read-only, bounded evidence for one device: record, containers, host prerequisites, logs.
 
@@ -410,11 +410,19 @@ def collect_diagnosis(config, device, *, log_dir=Path('/var/lib/android-farm/job
         report['events'] = []
     report['job_logs'] = []
     if Path(log_dir).is_dir():
-        pattern = re.compile(rf'-(?:up|provision|restart|check|check-ip|remove)(?:-{device})?(?:-\d+)?\.log\Z')
-        names = sorted(path.name for path in Path(log_dir).glob('*.log') if pattern.search(path.name))
-        for name in names[-3:]:
-            lines = (Path(log_dir) / name).read_text(encoding='utf-8', errors='replace').splitlines()
-            report['job_logs'].append({'name': name, 'tail': lines[-log_tail:]})
+        # A provisioning run has no --id in its file name; it is recognised by the
+        # device it names in its output. The newest four relevant logs are shown.
+        mention = re.compile(rf'(?<![0-9a-z]){device}(?![0-9a-z])')
+        chosen = []
+        for path in sorted(Path(log_dir).glob('*.log'))[-40:]:
+            try:
+                text = path.read_text(encoding='utf-8', errors='replace')
+            except OSError:
+                continue
+            if f'-{device}' in path.name or mention.search(text):
+                chosen.append((path.name, text))
+        for name, text in chosen[-4:]:
+            report['job_logs'].append({'name': name, 'tail': text.splitlines()[-log_tail:]})
     return report
 
 
