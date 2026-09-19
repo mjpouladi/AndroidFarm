@@ -91,6 +91,8 @@ flowchart TB
 
 در Coolify فقط فایل ریشهٔ `docker-compose.yml` به‌عنوان یک Application وارد می‌شود. این stack شامل `farm-anchor`، کنسول، درگاه Nginx، Prometheus، node-exporter، cAdvisor، آماده‌سازهای یک‌بارهٔ secret و Grafana است. در حالت IP درگاه فقط یک پورت منتشر می‌کند و نیازی به تغییر proxy سراسری Coolify نیست؛ در حالت دامنه، دسترسی اصلی با Traefik است و درگاه HTTP فقط روی loopback می‌ماند. کاتالوگ `docker-compose.farm.yml` را agent میزبان با project ثابت `android-farm-runtime` مدیریت می‌کند؛ Coolify آن را deploy نمی‌کند تا redeploy هسته دستگاه‌های on-demand را orphan یا حذف نکند.
 
+Coolify ابتدا imageهای کنسول و درگاه را از checkout مخزن می‌سازد و سپس هسته را با project ثابت `android-farm-core` اجرا می‌کند. نام imageهای محلی صریح است: `android-farm/console:<FARM_RELEASE_ID>` و `android-farm/gateway:<FARM_RELEASE_ID>`. بنابراین تغییر نام project یا مسیر بین مرحلهٔ build و start، image دیگری را انتخاب نمی‌کند. `pull_policy: never` برای این دو سرویس، دریافت image از registry را غیرفعال می‌کند؛ مرحلهٔ build همچنان اجرا می‌شود و start از image ساخته‌شدهٔ همان release استفاده می‌کند.
+
 برای هر دستگاه این اجزا ساخته می‌شود:
 
 - `proxy-numXX`: gateway خروجی و تنها دارندهٔ مسیر اینترنت؛ `restart: "no"`.
@@ -392,6 +394,8 @@ PROMETHEUS_RETENTION=30d
 7. Deploy کنید و صبر کنید آماده‌سازهای secret با موفقیت تمام شوند و `farm-anchor`، `farm-console`، `android-farm-gateway`، Prometheus، node-exporter، cAdvisor و Grafana بالا بیایند.
 
 `farm-anchor` label مربوط به release را از `FARM_RELEASE_ID` می‌گیرد. installer تنها وقتی release میزبان و deploy Coolify یکسان باشند کنترل‌پلین را فعال می‌کند.
+
+`FARM_RELEASE_ID` نام imageهای کنسول و درگاه را هم مشخص می‌کند و باید با **مقدار یکسان در Build Time و Runtime** فعال باشد؛ راه‌انداز این دو گزینه را خودکار تنظیم می‌کند. در نصب دستی نیز هر دو را فعال کنید تا start همان image مرحلهٔ build را پیدا کند.
 
 متغیر `FARM_MONITORING_DIR` در `coolify.env` مسیر مطلق فایل‌های مانیتورینگ همان release روی میزبان است؛ معمولاً `/opt/android-farm/releases/<release-id>/monitoring`. راه‌انداز این مسیر را هنگام هر ارتقا به‌روز می‌کند. در مسیر دستی، مقدار تولیدشده را همراه `FARM_RELEASE_ID` وارد Coolify کنید؛ مقدار `./monitoring` در `env.example` فقط برای اجرای محلی توسعه است. این روش مانع وابستگی مانیتورینگ به نگهداری checkout موقت Coolify و ساخته‌شدن پوشه به‌جای فایل‌های YAML توسط Raw Compose می‌شود. mountها فقط‌خواندنی هستند و فایل رمز Grafana جداگانه در مسیر خصوصی خود می‌ماند.
 
@@ -992,6 +996,7 @@ ss -ltnp | grep ':5551'
 | Binder بارگذاری شده ولی `/dev/binder`، `/dev/hwbinder` و `/dev/vndbinder` آماده نیستند | خطای تشخیص نسخهٔ قبلی نصب‌کننده؛ بخش «Binder بارگذاری شده ولی دستگاه‌های میزبان وجود ندارند» را ببینید و همان فرمان نصب را تکرار کنید |
 | `managed file parent must be root-owned and protected: /data/coolify/proxy/dynamic` | ناسازگاری نسخهٔ قبلی با مالک استاندارد Coolify؛ بخش «مالکیت مسیر dynamic در Coolify» را ببینید |
 | `non-string key in services.farm-anchor.labels: 0` | ناسازگاری قالب label با Raw Compose؛ بخش «خطای label هنگام Deploy» را ببینید |
+| `unable to prepare context: path "/data/coolify/applications/.../web" not found` | نام ضمنی image بین build و start فرق کرده است؛ بخش «پیدا نشدن مسیر web هنگام start» را ببینید |
 | `doctor: blocked` | remediation همان check را اجرا کنید؛ معمولاً Binder، release mismatch، auth file یا local Docker context است |
 | راه‌انداز: نتیجهٔ Deploy نامعلوم | راه‌انداز ابتدا تاریخچهٔ API را بررسی می‌کند. فقط اگر در Coolify مطمئن شدید هیچ Deploy ساخته نشده، همان فرمان را با `--retry-deploy` تکرار کنید؛ درخواست نامعلوم خودکار تکرار نمی‌شود |
 | apply در `waiting_for_coolify` | `coolify.env` را در همان یک App وارد، همان release را deploy و apply یکسان را دوباره اجرا کنید |
@@ -1002,6 +1007,26 @@ ss -ltnp | grep ':5551'
 | metricهای سلامت stale هستند | `android-farm-health.timer`، permission مسیر textfile و mount node-exporter را بررسی کنید |
 | worker retry می‌کند | journal، result task، lock device و DLQ را بررسی کنید؛ task دلخواه shell به صف نفرستید |
 | profile drift | device را stop، فایل profile و digest را بازبینی و start کنترل‌شده اجرا کنید |
+
+### پیدا نشدن مسیر web هنگام start
+
+اگر build تمام شد ولی مرحلهٔ `Starting new application` با این پیام متوقف شد:
+
+```text
+unable to prepare context: path "/data/coolify/applications/.../web" not found
+```
+
+در مسیر Raw Compose، Coolify برای build نام project را UUID برنامه می‌گذارد، اما start از نام project داخل Compose استفاده می‌کند. نسخهٔ قبلی برای کنسول و درگاه نام صریح image نداشت؛ در نتیجه start image ساخته‌شده را پیدا نمی‌کرد و دوباره از مسیری که checkout مخزن در آن نبود build می‌کرد. [کد رسمی مراحل build و start در Coolify](https://github.com/coollabsio/coolify/blob/v4.x/app/Jobs/ApplicationDeploymentJob.php#L718-L795)
+
+نسخهٔ اصلاح‌شده برای هر دو سرویس نام صریح و tag مبتنی بر `FARM_RELEASE_ID` دارد. `pull_policy: never` فقط pull از registry را متوقف می‌کند؛ تضمین استفاده از build قبلی، یکسان‌بودن نام و tag image در دو مرحله است. [مستند Docker دربارهٔ pull policy](https://docs.docker.com/reference/compose-file/services/#pull_policy)
+
+برای دریافت اصلاح و Deploy مجدد همان برنامه اجرا کنید:
+
+```bash
+sudo bash /opt/android-farm/source/install.sh --domain commex-box.com
+```
+
+پوشهٔ خالی `web` در مسیر برنامه نسازید و فایل‌های source را دستی به آن کپی نکنید؛ این کار image ساخته‌شده را به مرحلهٔ start متصل نمی‌کند. فعال‌کردن Preserve Repository، حذف volumeها یا تغییر نام project برای این اصلاح لازم نیست. در نصب دستی، `FARM_RELEASE_ID` را در Build Time و Runtime یکسان نگه دارید.
 
 ### خطای label هنگام Deploy
 

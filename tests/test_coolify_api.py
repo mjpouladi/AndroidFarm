@@ -267,6 +267,10 @@ class CoolifyProvisioningTests(unittest.TestCase):
         self.assertEqual(payload["data"][0]["key"], "FARM_DOMAIN")
         self.assertTrue(payload["data"][0]["is_literal"])
         self.assertFalse(payload["data"][0]["is_preview"])
+        release_variable = next(item for item in payload["data"] if item["key"] == "FARM_RELEASE_ID")
+        self.assertEqual(release_variable["value"], "release1")
+        self.assertTrue(release_variable["is_buildtime"])
+        self.assertTrue(release_variable["is_runtime"])
         self.assertEqual(client.deploy(core.app_uuid), "deployment1")
         self.assertEqual(client.deployment_status("deployment1")["status"], "finished")
         with self.assertRaises(CoolifyError):

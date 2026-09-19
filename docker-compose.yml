@@ -20,6 +20,10 @@ services:
       - "traefik.enable=false"
 
   console:
+    # Coolify builds with its resource UUID as the Compose project, then starts
+    # Raw Compose with this file's name. An explicit tag bridges both stages.
+    image: android-farm/console:${FARM_RELEASE_ID:-development}
+    pull_policy: never
     build:
       context: ./web
     container_name: farm-console
@@ -84,6 +88,8 @@ services:
       - "traefik.enable=false"
 
   gateway:
+    image: android-farm/gateway:${FARM_RELEASE_ID:-development}
+    pull_policy: never
     build:
       context: .
       dockerfile: images/gateway/Dockerfile

@@ -52,6 +52,42 @@ class CoolifyComposeTests(unittest.TestCase):
             label_lists('    labels:\n      farm.stack: core\n      0: coolify.managed=true\n')
 
     @unittest.skipUnless(os.environ.get("COMPOSE_BIN"), "set COMPOSE_BIN for the real Compose check")
+    def test_build_and_raw_start_use_the_same_release_images_despite_different_projects(self):
+        # Coolify builds inside /artifacts with -p <resource UUID>, but its raw
+        # start runs from a host directory containing Compose/env, not the repo.
+        # Implicit <project>-<service> image names therefore cannot bridge them.
+        text = COMPOSE.read_text(encoding="utf-8")
+        with tempfile.TemporaryDirectory() as directory:
+            runtime = Path(directory) / "coolify-application"
+            runtime.mkdir()
+            copied_compose = runtime / "docker-compose.yaml"
+            copied_compose.write_text(text, encoding="utf-8")
+            self.assertFalse((runtime / "web").exists())
+            previous_images = None
+            for release in ("a" * 16, "b" * 16):
+                environment = {key: value for key, value in os.environ.items()
+                               if not key.startswith("COMPOSE_")}
+                environment["FARM_RELEASE_ID"] = release
+                stages = []
+                for path, folder, project_flags in (
+                    (COMPOSE, ROOT, ["--project-name", "coolify-resource-uuid"]),
+                    (copied_compose, runtime, []),
+                ):
+                    result = subprocess.run(
+                        [os.environ["COMPOSE_BIN"], *project_flags, "--project-directory", str(folder),
+                         "-f", str(path), "config", "--images"],
+                        capture_output=True, text=True, timeout=30, env=environment,
+                    )
+                    self.assertEqual(result.returncode, 0, result.stderr)
+                    stages.append(set(result.stdout.splitlines()))
+                self.assertEqual(stages[0], stages[1])
+                for service in ("console", "gateway"):
+                    self.assertIn(f"android-farm/{service}:{release}", stages[1])
+                if previous_images is not None:
+                    self.assertNotEqual(previous_images, stages[1])
+                previous_images = stages[1]
+
+    @unittest.skipUnless(os.environ.get("COMPOSE_BIN"), "set COMPOSE_BIN for the real Compose check")
     def test_real_compose_accepts_coolify_augmented_core_without_changing_our_settings(self):
         text = COMPOSE.read_text(encoding="utf-8")
         label_lists(text)  # Refuse to accidentally test an unsupported mapping.
@@ -96,6 +132,11 @@ class CoolifyComposeTests(unittest.TestCase):
         # Routes/auth, release label, no-network helpers, secret mounts and
         # dependency conditions must all survive the upstream label append.
         self.assertEqual(processed, original)
+        self.assertEqual(processed["name"], "android-farm-core")
+        for service_name in ("console", "gateway"):
+            service = processed["services"][service_name]
+            self.assertEqual(service["pull_policy"], "never")
+            self.assertTrue(service["image"].startswith(f"android-farm/{service_name}:"))
         for service_name, target, relative in (
             ("prometheus", "/etc/prometheus/prometheus.yml", "prometheus.yml"),
             ("prometheus", "/etc/prometheus/alerts.yml", "alerts.yml"),
