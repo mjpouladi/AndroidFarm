@@ -71,6 +71,7 @@ FAILURE_DETAILS = {
     'init-policy': 'تنظیم کانتینر همگام‌سازی با سیاست مدیریت‌شده سازگار نیست.',
     'tool-failed': 'ابزار محلی مدیریت رمز موفق نشد.',
     'tool-unavailable': 'ابزار محلی اجرا نشد یا مهلت اجرای آن پایان یافت.',
+    'tool-output': 'خروجی ابزار محلی ساخت bcrypt یک رکورد معتبر نبود.',
     'grafana-auth': 'Grafana اطلاعات ورود ذخیره‌شده را نپذیرفت.',
     'grafana-forbidden': 'Grafana مجوز تغییر حساب را نداد.',
     'grafana-http': 'Grafana پاسخ HTTP موفق نداد.',
@@ -391,9 +392,14 @@ class CredentialManager:
         original = _safe_path(middleware, dynamic=True, public=True).read_bytes()
         if not middleware_matches(original, DEFAULT_MIDDLEWARE):
             raise CredentialsError('میان‌افزار سفارشی است؛ تغییر ورود باید پس از بررسی تنظیمات انجام شود.')
-        new_hash = self._run(['htpasswd', '-niB', username], input=password + '\n').encode()
-        if not new_hash.startswith((username + ':$2').encode()) or len(new_hash.splitlines()) != 1:
-            raise CredentialsError('ساخت bcrypt جدید تأیید نشد.')
+        # apache2-utils prints the record followed by an extra blank line
+        # (``user:hash\n\n``). Keep exactly one record and one newline so the
+        # single-user check in _user() still holds after this rotation.
+        record = self._run(['htpasswd', '-niB', username], input=password + '\n').strip()
+        if (not record.startswith(username + ':$2') or len(record.splitlines()) != 1 or
+                any(character.isspace() for character in record)):
+            raise CredentialsError('ساخت bcrypt جدید تأیید نشد.', code='tool-output')
+        new_hash = (record + '\n').encode()
         revision = hashlib.sha256(new_hash).hexdigest()
         before_password = _safe_path(self.web_password).read_bytes() if self.web_password.exists() else None
         before_user = _safe_path(self.web_user).read_bytes() if self.web_user.exists() else None

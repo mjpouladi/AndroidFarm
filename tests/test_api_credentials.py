@@ -61,6 +61,7 @@ class CredentialManagerTests(unittest.TestCase):
         self.commands, self.http_calls = [], []
         self.current_user, self.current_password = 'admin', 'existing-monitor-password'
         self.fail_init_once = None
+        self.htpasswd_output = None
         self.fail_after_password = False
         self.fail_all_http = False
         self.containers = {}
@@ -107,7 +108,10 @@ class CredentialManagerTests(unittest.TestCase):
     def runner(self, argv, **kwargs):
         self.commands.append((list(argv), kwargs))
         if argv[:2] == ['htpasswd', '-niB']:
-            return subprocess.CompletedProcess(argv, 0, argv[2] + ':$2y$12$new-test-hash\n', '')
+            if self.htpasswd_output is not None:
+                return subprocess.CompletedProcess(argv, 0, self.htpasswd_output, '')
+            # Real apache2-utils output: the record plus an extra blank line.
+            return subprocess.CompletedProcess(argv, 0, argv[2] + ':$2y$12$new-test-hash\n\n', '')
         if argv[:2] == ['docker', 'inspect']:
             return subprocess.CompletedProcess(argv, 0, json.dumps([copy.deepcopy(self.containers[argv[2]])]), '')
         if argv[:3] == ['docker', 'start', '--attach']:
@@ -155,7 +159,9 @@ class CredentialManagerTests(unittest.TestCase):
         for name in ('compose.env', 'coolify.env'):
             self.assertIn('GRAFANA_ADMIN_USER=new-operator', (self.config / name).read_text())
         self.assertEqual(json.loads((self.state / 'quickstart.json').read_text())['auth_user'], 'new-operator')
-        self.assertTrue(self.auth_file.read_text().startswith('new-operator:$2'))
+        # Exactly one record and one newline, although htpasswd printed a blank line too.
+        self.assertEqual(self.auth_file.read_text(), 'new-operator:$2y$12$new-test-hash\n')
+        self.assertEqual(self.manager.summary()['web_username'], 'new-operator')
         self.assertTrue(middleware_matches((self.dynamic / 'farm-auth.yml').read_bytes(), DEFAULT_MIDDLEWARE))
         started = [argv[-1] for argv, _ in self.commands if argv[:2] == ['docker', 'start']]
         self.assertEqual(started, ['android-farm-grafana-secret-init', 'android-farm-gateway-secret-init'])
@@ -164,6 +170,18 @@ class CredentialManagerTests(unittest.TestCase):
         if os.name == 'posix':
             self.assertEqual(self.auth_file.stat().st_mode & 0o777, 0o600)
             self.assertEqual((self.config / 'web-login-password').stat().st_mode & 0o777, 0o600)
+
+    def test_malformed_htpasswd_output_is_rejected_before_any_change(self):
+        before = self.files()
+        for output in ('new-operator:$2y$12$one\nnew-operator:$2y$12$two\n', 'other:$2y$12$hash\n',
+                       'new-operator:$2y$12$hash extra\n', ''):
+            with self.subTest(output=output):
+                self.htpasswd_output = output
+                with self.assertRaises(CredentialsError) as failure:
+                    self.manager.rotate('web', 'new-operator', 'new-platform-password')
+                self.assertIn('[web-preflight/tool-output]', str(failure.exception))
+                self.assertEqual(self.files(), before)
+        self.assertEqual([argv for argv, _ in self.commands if argv[:2] == ['docker', 'start']], [])
 
     def test_web_only_does_not_touch_grafana_and_returns_safe_summary(self):
         self.manager.rotate('web', 'new-operator', 'new-platform-password')
